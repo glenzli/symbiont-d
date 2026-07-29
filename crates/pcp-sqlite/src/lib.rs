@@ -1,0 +1,12 @@
+mod read;
+mod row;
+mod schema;
+mod search;
+mod store;
+mod write;
+
+pub use store::SqlitePcpStore;
+
+#[cfg(test)]
+#[path = "tests.rs"]
+mod tests;

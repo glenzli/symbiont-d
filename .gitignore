@@ -1,0 +1,15 @@
+/target
+/node_modules
+/data/memory.md
+/data/compute.toml
+/data/profile.toml
+/data/orientation.md
+/data/autonomy.toml
+/data/*.sqlite3
+/data/*.sqlite3-shm
+/data/*.sqlite3-wal
+/data/context.sqlite3
+/data/context.sqlite3-shm
+/data/context.sqlite3-wal
+/data/assets
+.DS_Store

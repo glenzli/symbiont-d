@@ -1,0 +1,162 @@
+mod asset;
+mod autonomy;
+mod codex;
+mod compute;
+mod continuity;
+mod exploration;
+mod memory;
+mod profile;
+mod usage;
+mod web;
+
+use std::{
+    env,
+    net::SocketAddr,
+    path::{Path, PathBuf},
+    sync::Arc,
+};
+
+use anyhow::{Context, Result};
+use asset::AssetStore;
+use autonomy::AutonomyStore;
+use codex::{CodexClient, CodexConfig};
+use compute::ComputeStore;
+use continuity::ContinuityHost;
+use exploration::ExplorationHandle;
+use memory::MemoryStore;
+use pcp_sqlite::SqlitePcpStore;
+use profile::ProfileStore;
+use tokio::{net::TcpListener, sync::Mutex};
+use tracing::info;
+use tracing_subscriber::EnvFilter;
+use usage::UsageStore;
+use web::AppState;
+
+const DEFAULT_BIND: &str = "127.0.0.1:4317";
+
+#[tokio::main]
+async fn main() -> Result<()> {
+    tracing_subscriber::fmt()
+        .with_env_filter(
+            EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("symbiont_d=info")),
+        )
+        .with_target(false)
+        .compact()
+        .init();
+
+    let workspace = env::current_dir().context("resolve the current workspace")?;
+    let memory_path = resolve_memory_path(&workspace);
+    let memory = Arc::new(MemoryStore::open(memory_path).await?);
+    let profile = Arc::new(
+        ProfileStore::open(
+            resolve_data_path(&workspace, "SYMBIONT_PROFILE_PATH", "profile.toml"),
+            resolve_data_path(&workspace, "SYMBIONT_ORIENTATION_PATH", "orientation.md"),
+        )
+        .await?,
+    );
+    let autonomy = Arc::new(
+        AutonomyStore::open(resolve_data_path(
+            &workspace,
+            "SYMBIONT_AUTONOMY_PATH",
+            "autonomy.toml",
+        ))
+        .await?,
+    );
+    let assets = Arc::new(
+        AssetStore::open(resolve_data_path(
+            &workspace,
+            "SYMBIONT_ASSET_PATH",
+            "assets",
+        ))
+        .await?,
+    );
+    let pcp = Arc::new(
+        SqlitePcpStore::open(resolve_data_path(
+            &workspace,
+            "SYMBIONT_PCP_PATH",
+            "context.sqlite3",
+        ))
+        .await?,
+    );
+    let continuity = Arc::new(ContinuityHost::open(pcp).await?);
+    let migration = continuity
+        .migrate_legacy(&memory, &profile.snapshot().await)
+        .await
+        .context("migrate legacy symbiont context into PCP")?;
+    info!(
+        migrated_messages = migration.migrated_messages,
+        orientation_ready = migration.orientation.is_some(),
+        "PCP continuity store is ready"
+    );
+
+    let codex = CodexClient::start(
+        CodexConfig {
+            binary: env::var("CODEX_BIN").unwrap_or_else(|_| "codex".to_owned()),
+            workspace: workspace.clone(),
+        },
+        Arc::clone(&continuity),
+        Arc::clone(&profile),
+    )
+    .await
+    .context("start the Codex app-server session")?;
+
+    let compute = Arc::new(
+        ComputeStore::open(
+            resolve_data_path(&workspace, "SYMBIONT_COMPUTE_PATH", "compute.toml"),
+            codex.models().to_vec(),
+        )
+        .await?,
+    );
+    let usage = Arc::new(
+        UsageStore::open(resolve_data_path(
+            &workspace,
+            "SYMBIONT_USAGE_PATH",
+            "symbiont.sqlite3",
+        ))
+        .await?,
+    );
+    let rate_limits = codex.rate_limits();
+    let codex = Arc::new(Mutex::new(codex));
+    let exploration = ExplorationHandle::start(
+        Arc::clone(&autonomy),
+        Arc::clone(&profile),
+        Arc::clone(&codex),
+        Arc::clone(&compute),
+        Arc::clone(&continuity),
+        Arc::clone(&usage),
+    );
+    let state = AppState::new(
+        continuity,
+        assets,
+        profile,
+        autonomy,
+        codex,
+        compute,
+        usage,
+        rate_limits,
+        exploration,
+    );
+    let app = web::router(state);
+    let bind: SocketAddr = env::var("SYMBIONT_BIND")
+        .unwrap_or_else(|_| DEFAULT_BIND.to_owned())
+        .parse()
+        .context("parse SYMBIONT_BIND")?;
+    let listener = TcpListener::bind(bind)
+        .await
+        .with_context(|| format!("bind the local interface at {bind}"))?;
+
+    info!("symbiont-d is listening at http://{bind}");
+    axum::serve(listener, app).await.context("serve symbiont-d")
+}
+
+fn resolve_memory_path(workspace: &Path) -> PathBuf {
+    env::var_os("SYMBIONT_MEMORY_PATH")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| workspace.join("data/memory.md"))
+}
+
+fn resolve_data_path(workspace: &Path, variable: &str, filename: &str) -> PathBuf {
+    env::var_os(variable)
+        .map(PathBuf::from)
+        .unwrap_or_else(|| workspace.join("data").join(filename))
+}

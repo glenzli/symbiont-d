@@ -1,0 +1,323 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <meta name="color-scheme" content="light dark">
+    <title>symbiont-d</title>
+    <link rel="stylesheet" href="/rich-text.css">
+    <link rel="stylesheet" href="/styles.css">
+  </head>
+  <body>
+    <main class="shell">
+      <header class="topbar">
+        <div class="identity" aria-label="symbiont-d">
+          <span class="presence-mark" aria-hidden="true">S</span>
+          <div>
+            <h1>symbiont-d</h1>
+            <p id="connection-status">正在连接</p>
+          </div>
+        </div>
+        <div class="top-actions">
+          <button
+            class="usage-state"
+            id="open-usage"
+            type="button"
+            title="查看模型用量"
+          >
+            <span>tokens</span>
+            <strong id="token-total">0</strong>
+          </button>
+          <div class="memory-state" title="当前本地记忆长度">
+            <span>context</span>
+            <strong id="memory-size">0</strong>
+          </div>
+          <button class="quiet-button" id="open-archive" type="button">档案</button>
+          <button class="quiet-button" id="open-settings" type="button">设置</button>
+        </div>
+      </header>
+
+      <section
+        id="conversation"
+        class="conversation"
+        aria-live="polite"
+        aria-label="Conversation"
+      >
+        <section id="onboarding" class="onboarding" hidden>
+          <header>
+            <p class="section-label">INITIAL ORIENTATION</p>
+            <h2>先从你正在关心的事情开始</h2>
+            <p>不需要选择标签。给它一段已有描述，或者直接聊几轮。</p>
+          </header>
+
+          <div id="onboarding-choices" class="onboarding-choices">
+            <button id="choose-description" class="choice-button" type="button">
+              <strong>我有一段描述</strong>
+              <span>粘贴已有的自我介绍或 AI 导出</span>
+            </button>
+            <button id="start-guided" class="choice-button" type="button">
+              <strong>边聊边认识</strong>
+              <span>从一个问题开始，后面跟着回答走</span>
+            </button>
+          </div>
+
+          <form id="description-form" class="description-form" hidden>
+            <label for="initial-description">初始描述</label>
+            <textarea
+              id="initial-description"
+              rows="8"
+              maxlength="12000"
+              placeholder="写你当前在做什么、持续关心什么、希望外部世界带来什么信号，也可以直接粘贴已有内容。"
+              required
+            ></textarea>
+            <div class="inline-actions">
+              <button id="cancel-description" class="secondary-button" type="button">返回</button>
+              <button class="primary-button" type="submit">开始对话</button>
+            </div>
+          </form>
+          <p id="onboarding-state" class="form-state" role="status"></p>
+        </section>
+
+        <div id="empty-state" class="empty-state">
+          <p>它在这里。</p>
+        </div>
+      </section>
+
+      <form id="composer" class="composer" hidden>
+        <div id="attachment-tray" class="attachment-tray" hidden></div>
+        <div class="composer-row">
+          <button
+            id="add-image"
+            class="composer-icon-button"
+            type="button"
+            title="添加图片"
+            aria-label="添加图片"
+          >
+            <span aria-hidden="true">＋</span>
+          </button>
+          <label class="sr-only" for="message">消息</label>
+          <textarea
+            id="message"
+            name="message"
+            rows="1"
+            maxlength="12000"
+            placeholder="说点什么…"
+            autocomplete="off"
+          ></textarea>
+          <button id="send" type="submit">发送</button>
+        </div>
+        <input
+          id="image-input"
+          type="file"
+          accept="image/jpeg,image/png,image/webp,image/gif"
+          multiple
+          hidden
+        >
+        <p id="composer-state" class="composer-state" role="status"></p>
+      </form>
+    </main>
+
+    <dialog id="settings-dialog" class="panel-dialog">
+      <header class="dialog-header">
+        <div>
+          <h2>设置</h2>
+          <p id="settings-context">本地运行边界</p>
+        </div>
+        <button class="icon-button" data-close="settings-dialog" type="button" aria-label="关闭">×</button>
+      </header>
+      <nav class="dialog-tabs" role="tablist" aria-label="设置分类">
+        <button type="button" role="tab" data-settings-tab="autonomy" aria-selected="true">自主</button>
+        <button type="button" role="tab" data-settings-tab="models" aria-selected="false">模型</button>
+        <button type="button" role="tab" data-settings-tab="stats" aria-selected="false">统计</button>
+      </nav>
+
+      <section class="tab-panel" data-settings-panel="autonomy">
+        <form id="autonomy-form">
+          <div class="setting-section">
+            <label class="toggle-row">
+              <span>
+                <strong>允许自主探索</strong>
+                <small id="autonomy-availability">初始化完成后生效</small>
+              </span>
+              <input id="autonomy-enabled" type="checkbox">
+            </label>
+          </div>
+          <div class="autonomy-runtime">
+            <span>
+              <small>运行状态</small>
+              <strong id="autonomy-runtime-state">正在读取</strong>
+            </span>
+            <button id="run-exploration" class="secondary-button" type="button">立即探索</button>
+          </div>
+          <div class="setting-grid">
+            <label class="field">
+              <span>检查间隔</span>
+              <select id="autonomy-interval">
+                <option value="30">30 分钟</option>
+                <option value="60">1 小时</option>
+                <option value="180">3 小时</option>
+                <option value="360">6 小时</option>
+                <option value="720">12 小时</option>
+                <option value="1440">1 天</option>
+                <option value="4320">3 天</option>
+                <option value="10080">7 天</option>
+              </select>
+            </label>
+            <label class="field">
+              <span>每日主动消息上限</span>
+              <input id="daily-interrupt-limit" type="number" min="0" max="20" step="1">
+            </label>
+            <label class="field">
+              <span>每日自主 token 上限</span>
+              <input
+                id="daily-token-limit"
+                type="number"
+                min="0"
+                max="100000000"
+                step="10000"
+                inputmode="numeric"
+              >
+              <small>0 表示不限制</small>
+            </label>
+          </div>
+          <div class="setting-section">
+            <label class="toggle-row">
+              <span>
+                <strong>安静时段</strong>
+                <small>这段时间不主动打扰</small>
+              </span>
+              <input id="quiet-hours-enabled" type="checkbox">
+            </label>
+            <div class="time-range">
+              <label class="field"><span>开始</span><input id="quiet-hours-start" type="time"></label>
+              <span>至</span>
+              <label class="field"><span>结束</span><input id="quiet-hours-end" type="time"></label>
+            </div>
+          </div>
+          <footer class="dialog-actions">
+            <span id="autonomy-save-state" role="status"></span>
+            <button class="primary-button" type="submit">保存</button>
+          </footer>
+        </form>
+      </section>
+
+      <section class="tab-panel" data-settings-panel="models" hidden>
+        <form id="compute-form">
+          <label class="field routing-field">
+            <span>路由方式</span>
+            <select id="routing" name="routing">
+              <option value="bounded_auto">在设定范围内自动</option>
+              <option value="fixed">不自动升级</option>
+            </select>
+          </label>
+
+          <div class="lane-list">
+            <div class="lane-row" data-lane="observe">
+              <div class="lane-name"><strong>观察</strong><span>后台轻量任务</span></div>
+              <label class="field"><span>模型</span><select data-field="model"></select></label>
+              <label class="field"><span>思考</span><select data-field="effort"></select></label>
+            </div>
+            <div class="lane-row" data-lane="conversation">
+              <div class="lane-name"><strong>日常</strong><span>普通聊天入口</span></div>
+              <label class="field"><span>模型</span><select data-field="model"></select></label>
+              <label class="field"><span>思考</span><select data-field="effort"></select></label>
+            </div>
+            <div class="lane-row" data-lane="investigate">
+              <div class="lane-name"><strong>深入</strong><span>需要检索或推演</span></div>
+              <label class="field"><span>模型</span><select data-field="model"></select></label>
+              <label class="field"><span>思考</span><select data-field="effort"></select></label>
+            </div>
+            <div class="lane-row" data-lane="critical">
+              <div class="lane-name"><strong>关键</strong><span>高影响判断</span></div>
+              <label class="field"><span>模型</span><select data-field="model"></select></label>
+              <label class="field"><span>思考</span><select data-field="effort"></select></label>
+            </div>
+          </div>
+
+          <footer class="dialog-actions">
+            <span id="compute-save-state" role="status"></span>
+            <button class="primary-button" type="submit">保存</button>
+          </footer>
+        </form>
+      </section>
+
+      <section class="tab-panel" data-settings-panel="stats" hidden>
+        <div class="stats-heading">
+          <span id="quota-state">正在读取</span>
+        </div>
+        <div id="stats-content" class="stats-content" aria-live="polite"></div>
+      </section>
+    </dialog>
+
+    <dialog id="archive-dialog" class="panel-dialog">
+      <header class="dialog-header">
+        <div>
+          <h2>档案</h2>
+          <p>symbiont-d 当前知道的内容</p>
+        </div>
+        <button class="icon-button" data-close="archive-dialog" type="button" aria-label="关闭">×</button>
+      </header>
+      <nav class="dialog-tabs" role="tablist" aria-label="档案分类">
+        <button type="button" role="tab" data-archive-tab="orientation" aria-selected="true">画像</button>
+        <button type="button" role="tab" data-archive-tab="pages" aria-selected="false">Pages</button>
+        <button type="button" role="tab" data-archive-tab="memory" aria-selected="false">记录</button>
+        <button type="button" role="tab" data-archive-tab="info" aria-selected="false">信息</button>
+      </nav>
+
+      <section class="tab-panel archive-panel" data-archive-panel="orientation">
+        <form id="orientation-form">
+          <label class="field orientation-field">
+            <span>可见、可修改的初始理解</span>
+            <textarea id="orientation-text" rows="18" maxlength="32000" disabled></textarea>
+          </label>
+          <footer class="dialog-actions">
+            <span id="orientation-save-state" role="status"></span>
+            <button id="save-orientation" class="primary-button" type="submit">保存</button>
+          </footer>
+        </form>
+      </section>
+      <section class="tab-panel archive-panel" data-archive-panel="pages" hidden>
+        <div id="archive-pages" class="archive-pages"></div>
+      </section>
+      <section class="tab-panel archive-panel" data-archive-panel="memory" hidden>
+        <div id="archive-memory" class="archive-memory"></div>
+      </section>
+      <section class="tab-panel archive-panel" data-archive-panel="info" hidden>
+        <dl id="archive-info" class="info-list"></dl>
+      </section>
+    </dialog>
+
+    <dialog id="trace-dialog" class="panel-dialog trace-dialog">
+      <header class="dialog-header">
+        <div>
+          <h2>PCP 调用链</h2>
+          <p id="trace-summary">正在读取</p>
+        </div>
+        <button class="icon-button" data-close="trace-dialog" type="button" aria-label="关闭">×</button>
+      </header>
+      <div id="trace-content" class="trace-content" aria-live="polite"></div>
+    </dialog>
+
+    <template id="message-template">
+      <article class="message">
+        <div class="message-meta">
+          <span class="speaker"></span>
+          <time></time>
+        </div>
+        <div class="message-body"></div>
+        <div class="message-foot">
+          <span class="message-runtime"></span>
+          <button
+            class="trace-button"
+            type="button"
+            title="查看 PCP 调用链"
+            aria-label="查看 PCP 调用链"
+            hidden
+          >⎇</button>
+        </div>
+      </article>
+    </template>
+
+    <script type="module" src="/app.js"></script>
+  </body>
+</html>

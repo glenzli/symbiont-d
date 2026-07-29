@@ -1,0 +1,36 @@
+[package]
+name = "symbiont-d"
+version = "0.1.0"
+edition = "2024"
+default-run = "symbiont-d"
+
+[workspace]
+members = ["crates/pcp-core", "crates/pcp-sqlite"]
+resolver = "3"
+
+[dependencies]
+anyhow = "1.0"
+axum = { version = "0.8", features = ["multipart"] }
+chrono = { version = "0.4", features = ["serde"] }
+imagesize = "0.14"
+infer = "0.19"
+pcp-core = { path = "crates/pcp-core" }
+pcp-sqlite = { path = "crates/pcp-sqlite" }
+rusqlite = { version = "0.40", features = ["bundled"] }
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+sha2 = "0.10"
+tokio = { version = "1.0", features = [
+    "fs",
+    "io-util",
+    "macros",
+    "net",
+    "process",
+    "rt-multi-thread",
+    "sync",
+    "time",
+] }
+tokio-stream = "0.1"
+toml = "1.1"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
