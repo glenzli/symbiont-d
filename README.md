@@ -18,6 +18,10 @@ user's attention into a feed.
   is reconsidered against the newest message before publication.
 - Latest-message recall, edit-as-resend, and recovery for interrupted sends.
 - Direct connection to `codex app-server`; no separate model API pipeline.
+- Explicit `$symbiont` skill for bringing a bounded live context packet into
+  any Codex task without starting another model run.
+- Opt-in Codex task browser: listing reads metadata only, and task content is
+  fetched only after a user selects it.
 - Live model catalog and configurable compute lanes.
 - Markdown, sanitized inline HTML, KaTeX, code blocks, tables, and images.
 - Local [Paged Context Protocol](https://glenzli.com/projects/paged-context-protocol/)
@@ -91,6 +95,30 @@ Open [http://127.0.0.1:4317](http://127.0.0.1:4317).
 Initialization is explicit. Autonomous exploration does not run until the
 initial orientation is complete and autonomy is enabled in Settings.
 
+### Connect Codex tasks
+
+Install the local user skill once:
+
+```bash
+./scripts/install-codex-skill.sh
+```
+
+Then invoke it explicitly from any Codex task:
+
+```text
+$symbiont How does this decision relate to what I have been working through?
+```
+
+The current Codex model reads a bounded packet containing orientation, Current
+Map, Open Loops, active Hunches, working hypotheses, and query-matched PCP
+snippets. This does not start a second model run.
+
+The reverse direction is disabled by default. Enable **读取 Codex 任务** under
+Settings → 连接, then open **任务**. The list endpoint reads task metadata only.
+Selecting a task performs a read-only `thread/read`; **带入对话** places a
+bounded transcript in the composer for review and does not send or store it
+automatically.
+
 ### Run as a macOS service
 
 Install `symbiont-d` as a user LaunchAgent when it should remain available
@@ -126,6 +154,7 @@ data/profile.toml      initialization state
 data/autonomy.toml     exploration policy and limits
 data/reflection.toml   background interpretation policy and limits
 data/compute.toml      model and reasoning-lane configuration
+data/codex-bridge.toml explicit Codex task-access permission
 ```
 
 The prototype does not silently import Codex task history. Conversation and
@@ -160,6 +189,7 @@ cargo run --bin pcp -- read rev_...
 ```text
 crates/pcp-core/    protocol types and requests
 crates/pcp-sqlite/ SQLite PCP implementation
+src/bridge.rs       explicit Codex task and symbiont-context bridge
 src/codex/          Codex app-server client, prompts, tools, traces
 src/continuity.rs   conversation ingestion and PCP-facing context policy
 src/conversation.rs in-flight message burst coordination
@@ -168,6 +198,7 @@ src/exploration.rs  autonomous scheduling, budgets, and publication
 src/reflection/     time-aware interaction analysis and projections
 src/web.rs          local HTTP API
 web/                embedded browser interface
+integrations/       installable Codex skill source
 ```
 
 ## Known Limits

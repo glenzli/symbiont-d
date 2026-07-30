@@ -25,6 +25,9 @@ export function initSettings(state) {
   const autonomySaveState = document.querySelector("#autonomy-save-state");
   const statsContent = document.querySelector("#stats-content");
   const quotaState = document.querySelector("#quota-state");
+  const bridgeForm = document.querySelector("#bridge-form");
+  const codexTaskAccess = document.querySelector("#codex-task-access");
+  const bridgeSaveState = document.querySelector("#bridge-save-state");
   const tabButtons = [...dialog.querySelectorAll("[data-settings-tab]")];
   const tabPanels = [...dialog.querySelectorAll("[data-settings-panel]")];
 
@@ -112,6 +115,10 @@ export function initSettings(state) {
     renderAutonomyRuntime();
   }
 
+  function renderBridge() {
+    codexTaskAccess.checked = state.bridge?.codexTaskAccess === true;
+  }
+
   function toggleQuietInputs() {
     quietHoursStart.disabled = !quietHoursEnabled.checked;
     quietHoursEnd.disabled = !quietHoursEnabled.checked;
@@ -179,6 +186,27 @@ export function initSettings(state) {
       renderAutonomy();
     } catch (error) {
       autonomySaveState.textContent = error.message;
+    }
+  }
+
+  async function saveBridge(event) {
+    event.preventDefault();
+    bridgeSaveState.textContent = "保存中";
+    try {
+      state.bridge = await responseJson(
+        await fetch("/api/bridge/config", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            codexTaskAccess: codexTaskAccess.checked,
+          }),
+        }),
+        "保存失败",
+      );
+      bridgeSaveState.textContent = "已保存";
+      renderBridge();
+    } catch (error) {
+      bridgeSaveState.textContent = error.message;
     }
   }
 
@@ -300,6 +328,7 @@ export function initSettings(state) {
   function openSettings(tab = "autonomy") {
     renderCompute();
     renderAutonomy();
+    renderBridge();
     computeSaveState.textContent = "";
     autonomySaveState.textContent = "";
     activateTab(tab);
@@ -314,6 +343,7 @@ export function initSettings(state) {
   });
   computeForm.addEventListener("submit", saveCompute);
   autonomyForm.addEventListener("submit", saveAutonomy);
+  bridgeForm.addEventListener("submit", saveBridge);
   runExploration.addEventListener("click", triggerExploration);
   quietHoursEnabled.addEventListener("change", toggleQuietInputs);
   for (const button of tabButtons) {
@@ -329,6 +359,7 @@ export function initSettings(state) {
     render() {
       renderCompute();
       renderAutonomy();
+      renderBridge();
     },
     renderAutonomy,
     renderAutonomyRuntime,

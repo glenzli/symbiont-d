@@ -44,6 +44,7 @@
             <strong id="memory-size">0</strong>
           </div>
           <button class="quiet-button" id="open-explorations" type="button">探索</button>
+          <button class="quiet-button" id="open-tasks" type="button">任务</button>
           <button class="quiet-button" id="open-archive" type="button">档案</button>
           <button class="quiet-button" id="open-settings" type="button">设置</button>
         </div>
@@ -141,6 +142,7 @@
         <button type="button" role="tab" data-settings-tab="autonomy" aria-selected="true">自主</button>
         <button type="button" role="tab" data-settings-tab="reflection" aria-selected="false">思考</button>
         <button type="button" role="tab" data-settings-tab="models" aria-selected="false">模型</button>
+        <button type="button" role="tab" data-settings-tab="bridge" aria-selected="false">连接</button>
         <button type="button" role="tab" data-settings-tab="stats" aria-selected="false">统计</button>
       </nav>
 
@@ -330,6 +332,28 @@
         </form>
       </section>
 
+      <section class="tab-panel" data-settings-panel="bridge" hidden>
+        <form id="bridge-form">
+          <div class="setting-section">
+            <label class="toggle-row">
+              <span>
+                <strong>读取 Codex 任务</strong>
+                <small>仅在任务面板中点选后读取，不后台扫描，不自动入库</small>
+              </span>
+              <input id="codex-task-access" type="checkbox">
+            </label>
+          </div>
+          <div class="setting-section bridge-note">
+            <strong>Codex 中召唤 symbiont</strong>
+            <p>安装本地 skill 后，在任意 Codex 任务里输入 <code>$symbiont</code>。它只读取限长的画像、近期脉络、开放问题与相关 Page 摘要。</p>
+          </div>
+          <footer class="dialog-actions">
+            <span id="bridge-save-state" role="status"></span>
+            <button class="primary-button" type="submit">保存</button>
+          </footer>
+        </form>
+      </section>
+
       <section class="tab-panel" data-settings-panel="stats" hidden>
         <div class="stats-heading">
           <span id="quota-state">正在读取</span>
@@ -445,6 +469,22 @@
         <button class="icon-button" data-close="exploration-dialog" type="button" aria-label="关闭">×</button>
       </header>
       <div id="exploration-history" class="exploration-history" aria-live="polite"></div>
+    </dialog>
+
+    <dialog id="task-dialog" class="panel-dialog task-dialog">
+      <header class="dialog-header">
+        <div>
+          <h2>Codex 任务</h2>
+          <p id="task-dialog-status">打开后读取任务索引</p>
+        </div>
+        <button class="icon-button" data-close="task-dialog" type="button" aria-label="关闭">×</button>
+      </header>
+      <div class="task-browser">
+        <nav id="task-list" class="task-list" aria-label="Codex 任务列表"></nav>
+        <section id="task-detail" class="task-detail" aria-live="polite">
+          <div class="task-empty">选择一个任务</div>
+        </section>
+      </div>
     </dialog>
 
     <template id="message-template">

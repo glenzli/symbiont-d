@@ -24,6 +24,7 @@ use super::{
         context_maintenance_prompt, developer_instructions, interaction_reflection_prompt,
         profile_review_prompt, summary_maintenance_prompt,
     },
+    task_bridge::{CodexTaskDetail, CodexTaskSummary, parse_task_detail, parse_task_list},
     tool_dedup::{ToolCallPlan, TurnToolDeduplicator},
     tools::{EscalationRequest, SymbiontTools, tool_result},
     trace::{
@@ -277,6 +278,44 @@ impl CodexClient {
 
     pub fn rate_limits(&self) -> Arc<RwLock<Option<RateLimitInfo>>> {
         Arc::clone(&self.rate_limits)
+    }
+
+    pub async fn list_tasks(&mut self, limit: u32) -> Result<Vec<CodexTaskSummary>> {
+        let result = self
+            .request(
+                "thread/list",
+                json!({
+                    "limit": limit.clamp(1, 50),
+                    "sortKey": "updated_at",
+                    "sortDirection": "desc",
+                    "sourceKinds": ["cli", "vscode"],
+                    "archived": false
+                }),
+            )
+            .await
+            .context("list interactive Codex tasks")?;
+        parse_task_list(&result)
+    }
+
+    pub async fn read_task(&mut self, thread_id: &str) -> Result<CodexTaskDetail> {
+        if thread_id.trim().is_empty() || thread_id.len() > 128 {
+            anyhow::bail!("invalid Codex task id");
+        }
+        let result = self
+            .request(
+                "thread/read",
+                json!({
+                    "threadId": thread_id,
+                    "includeTurns": true
+                }),
+            )
+            .await
+            .context("read Codex task")?;
+        let detail = parse_task_detail(&result)?;
+        if !matches!(detail.task.source.as_str(), "cli" | "vscode") {
+            anyhow::bail!("only interactive Codex tasks can be read");
+        }
+        Ok(detail)
     }
 
     pub async fn chat(

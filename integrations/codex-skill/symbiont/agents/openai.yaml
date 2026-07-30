@@ -1,0 +1,7 @@
+interface:
+  display_name: "Symbiont"
+  short_description: "Bring local symbiont context into this task"
+  default_prompt: "Load the relevant symbiont context for this request."
+
+policy:
+  allow_implicit_invocation: false

@@ -1,5 +1,6 @@
 mod asset;
 mod autonomy;
+mod bridge;
 mod codex;
 mod compute;
 mod context_maintenance;
@@ -28,6 +29,7 @@ use std::{
 use anyhow::{Context, Result};
 use asset::AssetStore;
 use autonomy::AutonomyStore;
+use bridge::CodexBridge;
 use codex::{CodexClient, CodexConfig};
 use compute::ComputeStore;
 use continuity::ContinuityHost;
@@ -150,6 +152,22 @@ async fn main() -> Result<()> {
     );
     let rate_limits = codex.rate_limits();
     let codex = Arc::new(Mutex::new(codex));
+    let bridge = Arc::new(
+        CodexBridge::open(
+            resolve_data_path(
+                &workspace,
+                "SYMBIONT_CODEX_BRIDGE_PATH",
+                "codex-bridge.toml",
+            ),
+            Arc::clone(&codex),
+            Arc::clone(&continuity),
+            Arc::clone(&profile),
+            Arc::clone(&context),
+            Arc::clone(&curiosity),
+            Arc::clone(&reflection_store),
+        )
+        .await?,
+    );
     let exploration = ExplorationHandle::start(
         Arc::clone(&autonomy),
         Arc::clone(&profile),
@@ -206,6 +224,7 @@ async fn main() -> Result<()> {
         exploration,
         reflection,
         conversation,
+        bridge,
     );
     let app = web::router(state);
     let bind: SocketAddr = env::var("SYMBIONT_BIND")

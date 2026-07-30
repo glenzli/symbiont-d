@@ -22,6 +22,7 @@ use tokio_stream::{StreamExt, wrappers::ReceiverStream};
 use crate::{
     asset::{AssetStore, MAX_IMAGE_BYTES, MAX_IMAGES_PER_MESSAGE, SavedImage},
     autonomy::{AutonomyConfig, AutonomyStore},
+    bridge::{BridgeConfig, BridgeContextPacket, CodexBridge},
     codex::{ChatInput, CodexClient, RateLimitInfo, RuntimeEvent},
     compute::{ComputeConfig, ComputeStore, ModelInfo},
     continuity::{ContinuityHost, MessageLinks},
@@ -47,6 +48,7 @@ const PRESENTATION_JS: &str = include_str!("../web/presentation.js");
 const PROFILE_UI_JS: &str = include_str!("../web/profile-ui.js");
 const CURIOSITY_UI_JS: &str = include_str!("../web/curiosity-ui.js");
 const SETTINGS_JS: &str = include_str!("../web/settings.js");
+const TASK_UI_JS: &str = include_str!("../web/task-ui.js");
 const EXPLORATION_UI_JS: &str = include_str!("../web/exploration-ui.js");
 const REFLECTION_UI_JS: &str = include_str!("../web/reflection-ui.js");
 const MESSAGE_SYNC_JS: &str = include_str!("../web/message-sync.js");
@@ -72,6 +74,7 @@ pub struct AppState {
     exploration: ExplorationHandle,
     reflection: ReflectionHandle,
     conversation: ConversationCoordinator,
+    bridge: Arc<CodexBridge>,
 }
 
 impl AppState {
@@ -89,6 +92,7 @@ impl AppState {
         exploration: ExplorationHandle,
         reflection: ReflectionHandle,
         conversation: ConversationCoordinator,
+        bridge: Arc<CodexBridge>,
     ) -> Self {
         Self {
             continuity,
@@ -104,6 +108,7 @@ impl AppState {
             exploration,
             reflection,
             conversation,
+            bridge,
         }
     }
 }
@@ -134,6 +139,7 @@ struct BootstrapResponse {
     exploration: ExplorationSnapshot,
     reflection: ReflectionSnapshot,
     conversation: ConversationSnapshot,
+    bridge: BridgeConfig,
 }
 
 #[derive(Serialize)]
@@ -158,6 +164,11 @@ struct RuntimeResponse {
 #[serde(rename_all = "camelCase")]
 struct RuntimeQuery {
     after_revision_id: Option<String>,
+}
+
+#[derive(Default, Deserialize)]
+struct BridgeContextQuery {
+    query: Option<String>,
 }
 
 #[derive(Serialize)]
@@ -283,6 +294,7 @@ pub fn router(state: AppState) -> Router {
         .route("/profile-ui.js", get(profile_ui_js))
         .route("/curiosity-ui.js", get(curiosity_ui_js))
         .route("/settings.js", get(settings_js))
+        .route("/task-ui.js", get(task_ui_js))
         .route("/exploration-ui.js", get(exploration_ui_js))
         .route("/reflection-ui.js", get(reflection_ui_js))
         .route("/message-sync.js", get(message_sync_js))
@@ -310,6 +322,10 @@ pub fn router(state: AppState) -> Router {
         .route("/api/reflection", get(reflection_snapshot))
         .route("/api/reflection/config", post(update_reflection))
         .route("/api/reflection/run", post(trigger_reflection))
+        .route("/api/bridge/config", post(update_bridge_config))
+        .route("/api/bridge/context", get(bridge_context))
+        .route("/api/codex/tasks", get(codex_tasks))
+        .route("/api/codex/tasks/{thread_id}", get(codex_task))
         .route("/api/traces/{trace_id}", get(trace_detail))
         .layer(DefaultBodyLimit::max(MAX_CHAT_BODY_BYTES))
         .with_state(state)
@@ -372,6 +388,13 @@ async fn settings_js() -> impl IntoResponse {
     (
         [(header::CONTENT_TYPE, "text/javascript; charset=utf-8")],
         SETTINGS_JS,
+    )
+}
+
+async fn task_ui_js() -> impl IntoResponse {
+    (
+        [(header::CONTENT_TYPE, "text/javascript; charset=utf-8")],
+        TASK_UI_JS,
     )
 }
 
@@ -462,6 +485,7 @@ async fn bootstrap(State(state): State<AppState>) -> Result<Json<BootstrapRespon
             .await
             .map_err(ApiError::internal)?,
         conversation: state.conversation.snapshot().await,
+        bridge: state.bridge.config().await,
     }))
 }
 
@@ -634,6 +658,65 @@ async fn update_compute(
         .await
         .map(Json)
         .map_err(ApiError::bad_request)
+}
+
+async fn update_bridge_config(
+    State(state): State<AppState>,
+    Json(config): Json<BridgeConfig>,
+) -> Result<Json<BridgeConfig>, ApiError> {
+    state
+        .bridge
+        .update_config(config)
+        .await
+        .map(Json)
+        .map_err(ApiError::internal)
+}
+
+async fn bridge_context(
+    State(state): State<AppState>,
+    Query(query): Query<BridgeContextQuery>,
+) -> Result<Json<BridgeContextPacket>, ApiError> {
+    state
+        .bridge
+        .context_packet(query.query.as_deref())
+        .await
+        .map(Json)
+        .map_err(ApiError::internal)
+}
+
+async fn codex_tasks(
+    State(state): State<AppState>,
+) -> Result<Json<Vec<crate::codex::CodexTaskSummary>>, ApiError> {
+    require_task_access(&state).await?;
+    state
+        .bridge
+        .list_tasks(30)
+        .await
+        .map(Json)
+        .map_err(ApiError::internal)
+}
+
+async fn codex_task(
+    State(state): State<AppState>,
+    AxumPath(thread_id): AxumPath<String>,
+) -> Result<Json<crate::codex::CodexTaskDetail>, ApiError> {
+    require_task_access(&state).await?;
+    state
+        .bridge
+        .read_task(&thread_id)
+        .await
+        .map(Json)
+        .map_err(ApiError::not_found)
+}
+
+async fn require_task_access(state: &AppState) -> Result<(), ApiError> {
+    if state.bridge.task_access_enabled().await {
+        Ok(())
+    } else {
+        Err(ApiError::forbidden(
+            "Codex task access is disabled in settings.",
+        ))
+    }
 }
 
 async fn stats(State(state): State<AppState>) -> Result<Json<StatsResponse>, ApiError> {
@@ -1212,6 +1295,13 @@ impl ApiError {
         tracing::error!(error = %error, "request failed");
         Self {
             status: StatusCode::INTERNAL_SERVER_ERROR,
+            message: error.to_string(),
+        }
+    }
+
+    fn forbidden(error: impl std::fmt::Display) -> Self {
+        Self {
+            status: StatusCode::FORBIDDEN,
             message: error.to_string(),
         }
     }

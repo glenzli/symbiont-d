@@ -6,6 +6,7 @@ import { initExplorationUi } from "/exploration-ui.js";
 import { initMessageActions } from "/message-actions.js";
 import { initMessageSync } from "/message-sync.js";
 import { initSettings } from "/settings.js";
+import { initTaskUi } from "/task-ui.js";
 import { initTraceUi } from "/trace-ui.js";
 
 const appState = {
@@ -23,6 +24,7 @@ const appState = {
   exploration: null,
   reflection: null,
   conversation: null,
+  bridge: { codexTaskAccess: false },
 };
 
 const conversation = document.querySelector("#conversation");
@@ -51,6 +53,15 @@ const MAX_IMAGES = 4;
 const MAX_IMAGE_BYTES = 15 * 1024 * 1024;
 
 const settingsUi = initSettings(appState);
+initTaskUi(
+  appState,
+  (text) => {
+    input.value = text;
+    resizeComposer();
+    input.focus();
+  },
+  settingsUi.open,
+);
 const explorationUi = initExplorationUi(appState);
 const reflectionUi = initReflectionUi(appState);
 const profileUi = initProfileUi(appState, sendMessage);
