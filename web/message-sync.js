@@ -9,8 +9,11 @@ export function initMessageSync({
 }) {
   const persisted = loadState();
   const knownRevisionIds = new Set();
+  const assistantRevisionIds = new Set();
   const unreadRevisionIds = new Set(persisted?.unreadRevisionIds || []);
   const unreadElements = new Map();
+  const seenRevisionIds = new Set();
+  const pendingSeenRevisionIds = new Set();
   const unreadIndicator = document.querySelector("#unread-indicator");
   const unreadCount = document.querySelector("#unread-count");
   let observedAt = persisted?.observedAt || null;
@@ -18,6 +21,7 @@ export function initMessageSync({
   let bootstrapped = false;
   let pollTimer = null;
   let refreshing = false;
+  let seenTimer = null;
 
   const observer = new IntersectionObserver(
     (entries) => {
@@ -35,6 +39,7 @@ export function initMessageSync({
     const revisionId = message.revisionId;
     if (!revisionId) return;
     knownRevisionIds.add(revisionId);
+    if (message.role === "assistant") assistantRevisionIds.add(revisionId);
     cursor = revisionId;
     observer.observe(element);
 
@@ -118,6 +123,7 @@ export function initMessageSync({
   function remove(revisionIds) {
     for (const revisionId of revisionIds) {
       knownRevisionIds.delete(revisionId);
+      assistantRevisionIds.delete(revisionId);
       unreadRevisionIds.delete(revisionId);
       const element = unreadElements.get(revisionId);
       if (element) {
@@ -152,12 +158,44 @@ export function initMessageSync({
   }
 
   function markRead(revisionId) {
-    if (!revisionId || !unreadRevisionIds.delete(revisionId)) return;
+    if (!revisionId) return;
+    queueSeen(revisionId);
+    if (!unreadRevisionIds.delete(revisionId)) return;
     const element = unreadElements.get(revisionId);
     if (element) clearUnreadElement(element);
     unreadElements.delete(revisionId);
     persist();
     renderUnread();
+  }
+
+  function queueSeen(revisionId) {
+    if (!assistantRevisionIds.has(revisionId)) return;
+    if (seenRevisionIds.has(revisionId)) return;
+    seenRevisionIds.add(revisionId);
+    pendingSeenRevisionIds.add(revisionId);
+    clearTimeout(seenTimer);
+    seenTimer = setTimeout(flushSeen, 250);
+  }
+
+  async function flushSeen() {
+    const revisionIds = [...pendingSeenRevisionIds];
+    pendingSeenRevisionIds.clear();
+    if (!revisionIds.length) return;
+    try {
+      await fetch("/api/interaction/seen", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          revisionIds,
+          occurredAt: new Date().toISOString(),
+        }),
+        keepalive: true,
+      });
+    } catch {
+      for (const revisionId of revisionIds) {
+        seenRevisionIds.delete(revisionId);
+      }
+    }
   }
 
   function clearUnreadElement(element) {

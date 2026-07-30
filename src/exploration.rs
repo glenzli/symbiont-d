@@ -16,6 +16,7 @@ use crate::{
     curiosity::CuriosityStore,
     memory::{MemoryEntry, MemoryRole},
     profile::{ProfileStore, SetupStatus},
+    reflection::ReflectionStore,
     symbiont_context::SymbiontContextStore,
     usage::{UsageHeadline, UsageStore},
 };
@@ -115,6 +116,7 @@ impl ExplorationHandle {
         continuity: Arc<ContinuityHost>,
         context: Arc<SymbiontContextStore>,
         curiosity: Arc<CuriosityStore>,
+        reflection: Arc<ReflectionStore>,
         usage: Arc<UsageStore>,
     ) -> Self {
         let state = Arc::new(RwLock::new(ExplorationSnapshot::default()));
@@ -128,6 +130,7 @@ impl ExplorationHandle {
             continuity,
             context,
             curiosity,
+            reflection,
             usage,
             trigger_rx,
         ));
@@ -159,6 +162,7 @@ async fn run_scheduler(
     continuity: Arc<ContinuityHost>,
     context: Arc<SymbiontContextStore>,
     curiosity: Arc<CuriosityStore>,
+    reflection: Arc<ReflectionStore>,
     usage: Arc<UsageStore>,
     mut trigger_rx: mpsc::Receiver<ExplorationTrigger>,
 ) {
@@ -210,6 +214,7 @@ async fn run_scheduler(
                     Arc::clone(&continuity),
                     Arc::clone(&context),
                     Arc::clone(&curiosity),
+                    Arc::clone(&reflection),
                     Arc::clone(&usage),
                     trigger,
                 )
@@ -330,6 +335,7 @@ async fn run_once(
     continuity: Arc<ContinuityHost>,
     context: Arc<SymbiontContextStore>,
     curiosity: Arc<CuriosityStore>,
+    reflection: Arc<ReflectionStore>,
     usage: Arc<UsageStore>,
     trigger: Option<ExplorationTrigger>,
 ) -> Result<()> {
@@ -361,10 +367,11 @@ async fn run_once(
     let recent_messages = continuity.recent_messages(EXPLORATION_CHAT_TAIL).await?;
     let recent_explorations = usage.recent_explorations(EXPLORATION_JOURNAL_RUNS).await?;
     let continuity_context = format!(
-        "{}\n\n{}\n\n{}\n\n{}",
+        "{}\n\n{}\n\n{}\n\n{}\n\n{}",
         continuity.context_seed(None).await,
         context.prompt().await?,
         curiosity.prompt().await?,
+        reflection.prompt().await?,
         exploration_working_context(&recent_messages, &recent_explorations, trigger)
     );
     let (runtime_tx, mut runtime_rx) = mpsc::channel(64);
@@ -430,10 +437,21 @@ async fn run_once(
                 },
             )
             .await?;
+        reflection
+            .record_message(&stored.entry, None, false)
+            .await?;
         Some(stored.entry)
     } else {
         None
     };
+
+    reflection
+        .complete_triggered_follow_ups(if published.is_some() {
+            "messaged"
+        } else {
+            "silent"
+        })
+        .await?;
 
     let mut snapshot = state.write().await;
     snapshot.last_run_at = Some(timestamp(Utc::now()));

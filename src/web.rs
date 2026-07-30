@@ -1,5 +1,6 @@
 use std::{convert::Infallible, sync::Arc};
 
+use anyhow::Context;
 use axum::{
     Json, Router,
     body::{Body, Bytes},
@@ -24,10 +25,14 @@ use crate::{
     codex::{ChatInput, CodexClient, RateLimitInfo, RuntimeEvent},
     compute::{ComputeConfig, ComputeStore, ModelInfo},
     continuity::{ContinuityHost, MessageLinks},
+    conversation::{
+        ConversationCoordinator, ConversationLease, ConversationSnapshot, QueuedUserMessage,
+    },
     curiosity::{CuriositySnapshot, CuriosityStore},
     exploration::{ExplorationHandle, ExplorationSnapshot, today_started_at},
     memory::{MemoryEntry, MemoryRole, MessageDeliveryState},
     profile::{CalibrationMode, ProfileSnapshot, ProfileStore, SetupStatus},
+    reflection::{ReflectionConfig, ReflectionHandle, ReflectionRuntime, ReflectionSnapshot},
     symbiont_context::{
         ContextAuthor, ContextDocumentKind, SymbiontContextSnapshot, SymbiontContextStore,
     },
@@ -43,6 +48,7 @@ const PROFILE_UI_JS: &str = include_str!("../web/profile-ui.js");
 const CURIOSITY_UI_JS: &str = include_str!("../web/curiosity-ui.js");
 const SETTINGS_JS: &str = include_str!("../web/settings.js");
 const EXPLORATION_UI_JS: &str = include_str!("../web/exploration-ui.js");
+const REFLECTION_UI_JS: &str = include_str!("../web/reflection-ui.js");
 const MESSAGE_SYNC_JS: &str = include_str!("../web/message-sync.js");
 const MESSAGE_ACTIONS_JS: &str = include_str!("../web/message-actions.js");
 const TRACE_UI_JS: &str = include_str!("../web/trace-ui.js");
@@ -64,6 +70,8 @@ pub struct AppState {
     usage: Arc<UsageStore>,
     rate_limits: Arc<RwLock<Option<RateLimitInfo>>>,
     exploration: ExplorationHandle,
+    reflection: ReflectionHandle,
+    conversation: ConversationCoordinator,
 }
 
 impl AppState {
@@ -79,6 +87,8 @@ impl AppState {
         usage: Arc<UsageStore>,
         rate_limits: Arc<RwLock<Option<RateLimitInfo>>>,
         exploration: ExplorationHandle,
+        reflection: ReflectionHandle,
+        conversation: ConversationCoordinator,
     ) -> Self {
         Self {
             continuity,
@@ -92,6 +102,8 @@ impl AppState {
             usage,
             rate_limits,
             exploration,
+            reflection,
+            conversation,
         }
     }
 }
@@ -120,6 +132,8 @@ struct BootstrapResponse {
     rate_limits: Option<RateLimitInfo>,
     usage: UsageHeadline,
     exploration: ExplorationSnapshot,
+    reflection: ReflectionSnapshot,
+    conversation: ConversationSnapshot,
 }
 
 #[derive(Serialize)]
@@ -135,6 +149,8 @@ struct StatsResponse {
 struct RuntimeResponse {
     usage: UsageHeadline,
     exploration: ExplorationSnapshot,
+    reflection: ReflectionRuntime,
+    conversation: ConversationSnapshot,
     messages: Vec<MemoryEntry>,
 }
 
@@ -180,6 +196,18 @@ struct ContextDocumentRequest {
     content: String,
 }
 
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct SeenRequest {
+    revision_ids: Vec<String>,
+    occurred_at: Option<String>,
+}
+
+#[derive(Deserialize)]
+struct TypingRequest {
+    typing: bool,
+}
+
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 struct ArchiveResponse {
@@ -189,6 +217,7 @@ struct ArchiveResponse {
     autonomy_permitted: bool,
     context: SymbiontContextSnapshot,
     curiosity: CuriositySnapshot,
+    reflection: ReflectionSnapshot,
     pcp: PcpArchiveResponse,
 }
 
@@ -255,6 +284,7 @@ pub fn router(state: AppState) -> Router {
         .route("/curiosity-ui.js", get(curiosity_ui_js))
         .route("/settings.js", get(settings_js))
         .route("/exploration-ui.js", get(exploration_ui_js))
+        .route("/reflection-ui.js", get(reflection_ui_js))
         .route("/message-sync.js", get(message_sync_js))
         .route("/message-actions.js", get(message_actions_js))
         .route("/trace-ui.js", get(trace_ui_js))
@@ -262,7 +292,10 @@ pub fn router(state: AppState) -> Router {
         .route("/api/health", get(health))
         .route("/api/bootstrap", get(bootstrap))
         .route("/api/chat", post(chat))
+        .route("/api/chat/append", post(append_chat))
         .route("/api/messages/{revision_id}", delete(retract_message))
+        .route("/api/interaction/seen", post(record_seen))
+        .route("/api/interaction/typing", post(record_typing))
         .route("/api/assets/{asset_id}", get(asset))
         .route("/api/onboarding/start", post(start_onboarding))
         .route("/api/archive", get(archive))
@@ -274,6 +307,9 @@ pub fn router(state: AppState) -> Router {
         .route("/api/compute", post(update_compute))
         .route("/api/stats", get(stats))
         .route("/api/runtime", get(runtime))
+        .route("/api/reflection", get(reflection_snapshot))
+        .route("/api/reflection/config", post(update_reflection))
+        .route("/api/reflection/run", post(trigger_reflection))
         .route("/api/traces/{trace_id}", get(trace_detail))
         .layer(DefaultBodyLimit::max(MAX_CHAT_BODY_BYTES))
         .with_state(state)
@@ -346,6 +382,13 @@ async fn exploration_ui_js() -> impl IntoResponse {
     )
 }
 
+async fn reflection_ui_js() -> impl IntoResponse {
+    (
+        [(header::CONTENT_TYPE, "text/javascript; charset=utf-8")],
+        REFLECTION_UI_JS,
+    )
+}
+
 async fn message_sync_js() -> impl IntoResponse {
     (
         [(header::CONTENT_TYPE, "text/javascript; charset=utf-8")],
@@ -413,6 +456,12 @@ async fn bootstrap(State(state): State<AppState>) -> Result<Json<BootstrapRespon
         rate_limits: state.rate_limits.read().await.clone(),
         usage,
         exploration,
+        reflection: state
+            .reflection
+            .snapshot()
+            .await
+            .map_err(ApiError::internal)?,
+        conversation: state.conversation.snapshot().await,
     }))
 }
 
@@ -447,6 +496,11 @@ async fn archive(State(state): State<AppState>) -> Result<Json<ArchiveResponse>,
     let context = state.context.snapshot().await.map_err(ApiError::internal)?;
     let curiosity = state
         .curiosity
+        .snapshot()
+        .await
+        .map_err(ApiError::internal)?;
+    let reflection = state
+        .reflection
         .snapshot()
         .await
         .map_err(ApiError::internal)?;
@@ -502,6 +556,7 @@ async fn archive(State(state): State<AppState>) -> Result<Json<ArchiveResponse>,
         autonomy_permitted,
         context,
         curiosity,
+        reflection,
         pcp: PcpArchiveResponse {
             scopes,
             pages,
@@ -612,8 +667,69 @@ async fn runtime(
     Ok(Json(RuntimeResponse {
         usage,
         exploration: state.exploration.snapshot().await,
+        reflection: state.reflection.runtime().await,
+        conversation: state.conversation.snapshot().await,
         messages,
     }))
+}
+
+async fn reflection_snapshot(
+    State(state): State<AppState>,
+) -> Result<Json<ReflectionSnapshot>, ApiError> {
+    state
+        .reflection
+        .snapshot()
+        .await
+        .map(Json)
+        .map_err(ApiError::internal)
+}
+
+async fn update_reflection(
+    State(state): State<AppState>,
+    Json(config): Json<ReflectionConfig>,
+) -> Result<Json<ReflectionConfig>, ApiError> {
+    state
+        .reflection
+        .update_config(config)
+        .await
+        .map(Json)
+        .map_err(ApiError::bad_request)
+}
+
+async fn trigger_reflection(State(state): State<AppState>) -> Json<TriggerResponse> {
+    Json(TriggerResponse {
+        accepted: state.reflection.trigger(),
+    })
+}
+
+async fn record_seen(
+    State(state): State<AppState>,
+    Json(request): Json<SeenRequest>,
+) -> Result<StatusCode, ApiError> {
+    if request.revision_ids.len() > 100 {
+        return Err(ApiError::bad_request(
+            "At most 100 message revisions can be marked seen at once.",
+        ));
+    }
+    let occurred_at = request
+        .occurred_at
+        .unwrap_or_else(|| chrono::Utc::now().to_rfc3339());
+    chrono::DateTime::parse_from_rfc3339(&occurred_at)
+        .map_err(|_| ApiError::bad_request("Seen time must be RFC 3339."))?;
+    state
+        .reflection
+        .record_seen(request.revision_ids, occurred_at)
+        .await
+        .map_err(ApiError::internal)?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+async fn record_typing(
+    State(state): State<AppState>,
+    Json(request): Json<TypingRequest>,
+) -> StatusCode {
+    state.conversation.note_typing(request.typing).await;
+    StatusCode::NO_CONTENT
 }
 
 async fn trigger_exploration(
@@ -695,6 +811,11 @@ async fn retract_message(
         .await
         .map_err(ApiError::conflict)?;
     state
+        .reflection
+        .record_retraction(&result.message_revision_ids)
+        .await
+        .map_err(ApiError::internal)?;
+    state
         .codex
         .lock()
         .await
@@ -721,31 +842,28 @@ async fn chat(State(state): State<AppState>, multipart: Multipart) -> Result<Res
             "Start the initial conversation before sending a message.",
         ));
     }
-    let incoming = parse_chat_request(multipart).await?;
-    let message = incoming.message.trim().to_owned();
-    if message.is_empty() && incoming.images.is_empty() {
-        return Err(ApiError::bad_request(
-            "A message requires text or an image.",
+    if state.conversation.snapshot().await.active {
+        return Err(ApiError::conflict(
+            "A response is already active; append this message to it.",
         ));
     }
-    if message.chars().count() > MAX_USER_MESSAGE_CHARS {
-        return Err(ApiError::bad_request(format!(
-            "Message exceeds {MAX_USER_MESSAGE_CHARS} characters."
-        )));
-    }
-    let mut images = Vec::with_capacity(incoming.images.len());
-    for (filename, bytes) in incoming.images {
-        images.push(
-            state
-                .assets
-                .save_image(filename.as_deref(), &bytes)
-                .await
-                .map_err(ApiError::bad_request)?,
-        );
-    }
-    let request = ChatRequest { message, images };
+    let request = prepare_chat_request(&state, parse_chat_request(multipart).await?).await?;
+    let queued = store_user_message(&state, request).await?;
+    let lease = state
+        .conversation
+        .start(queued.clone())
+        .await
+        .map_err(ApiError::conflict)?;
 
     let (wire_tx, wire_rx) = mpsc::channel::<WireEvent>(64);
+    let mut accepted_message = queued.stored.entry.clone();
+    accepted_message.delivery_state = Some(MessageDeliveryState::Pending);
+    wire_tx
+        .send(WireEvent::Accepted {
+            message: accepted_message,
+        })
+        .await
+        .map_err(|_| ApiError::internal("Could not start the response stream."))?;
     let (runtime_tx, mut runtime_rx) = mpsc::channel::<RuntimeEvent>(64);
     let runtime_wire_tx = wire_tx.clone();
     let runtime_forwarder = tokio::spawn(async move {
@@ -757,15 +875,11 @@ async fn chat(State(state): State<AppState>, multipart: Multipart) -> Result<Res
     });
 
     tokio::spawn(async move {
-        if let Err(error) = run_chat(
-            state,
-            request,
-            runtime_tx,
-            runtime_forwarder,
-            wire_tx.clone(),
-        )
-        .await
+        let coordinator = state.conversation.clone();
+        if let Err(error) =
+            run_chat(state, lease, runtime_tx, runtime_forwarder, wire_tx.clone()).await
         {
+            coordinator.abort(lease).await;
             tracing::error!(%error, "chat stream failed");
             let _ = wire_tx
                 .send(WireEvent::Error {
@@ -788,6 +902,36 @@ async fn chat(State(state): State<AppState>, multipart: Multipart) -> Result<Res
         .header(header::CACHE_CONTROL, "no-store")
         .body(Body::from_stream(stream))
         .expect("valid streaming response"))
+}
+
+async fn append_chat(
+    State(state): State<AppState>,
+    multipart: Multipart,
+) -> Result<Json<MemoryEntry>, ApiError> {
+    let request = prepare_chat_request(&state, parse_chat_request(multipart).await?).await?;
+    let reservation = state
+        .conversation
+        .reserve_append()
+        .await
+        .map_err(ApiError::conflict)?;
+    let queued = match store_user_message(&state, request).await {
+        Ok(queued) => queued,
+        Err(error) => {
+            state.conversation.cancel_append(reservation).await;
+            return Err(error);
+        }
+    };
+    if let Err(error) = state
+        .conversation
+        .append_reserved(reservation, queued.clone())
+        .await
+    {
+        state.conversation.cancel_append(reservation).await;
+        return Err(ApiError::conflict(error));
+    }
+    let mut entry = queued.stored.entry;
+    entry.delivery_state = Some(MessageDeliveryState::Pending);
+    Ok(Json(entry))
 }
 
 async fn parse_chat_request(mut multipart: Multipart) -> Result<IncomingChatRequest, ApiError> {
@@ -823,20 +967,49 @@ async fn parse_chat_request(mut multipart: Multipart) -> Result<IncomingChatRequ
     Ok(IncomingChatRequest { message, images })
 }
 
-async fn run_chat(
-    state: AppState,
+async fn prepare_chat_request(
+    state: &AppState,
+    incoming: IncomingChatRequest,
+) -> Result<ChatRequest, ApiError> {
+    let message = incoming.message.trim().to_owned();
+    if message.is_empty() && incoming.images.is_empty() {
+        return Err(ApiError::bad_request(
+            "A message requires text or an image.",
+        ));
+    }
+    if message.chars().count() > MAX_USER_MESSAGE_CHARS {
+        return Err(ApiError::bad_request(format!(
+            "Message exceeds {MAX_USER_MESSAGE_CHARS} characters."
+        )));
+    }
+    let mut images = Vec::with_capacity(incoming.images.len());
+    for (filename, bytes) in incoming.images {
+        images.push(
+            state
+                .assets
+                .save_image(filename.as_deref(), &bytes)
+                .await
+                .map_err(ApiError::bad_request)?,
+        );
+    }
+    Ok(ChatRequest { message, images })
+}
+
+async fn store_user_message(
+    state: &AppState,
     request: ChatRequest,
-    runtime_tx: mpsc::Sender<RuntimeEvent>,
-    runtime_forwarder: JoinHandle<()>,
-    wire_tx: mpsc::Sender<WireEvent>,
-) -> anyhow::Result<()> {
-    let image_paths = request
+) -> Result<QueuedUserMessage, ApiError> {
+    let local_images = request
         .images
         .iter()
         .map(|image| image.path.clone())
         .collect();
-    let reply_to_revision_id = state.continuity.latest_assistant_revision().await?;
-    let user_message = state
+    let reply_to_revision_id = state
+        .continuity
+        .latest_assistant_revision()
+        .await
+        .map_err(ApiError::internal)?;
+    let stored = state
         .continuity
         .ingest_message(
             MemoryRole::User,
@@ -848,44 +1021,90 @@ async fn run_chat(
                 input_revision_ids: Vec::new(),
             },
         )
-        .await?;
-    let mut accepted_message = user_message.entry.clone();
-    accepted_message.delivery_state = Some(MessageDeliveryState::Pending);
-    let _ = wire_tx
-        .send(WireEvent::Accepted {
-            message: accepted_message,
-        })
-        .await;
-    let compute = state.compute.snapshot().await;
-    let profile = state.profile.snapshot().await;
-    let continuity_context = format!(
-        "{}\n\n{}\n\n{}",
-        state.continuity.context_seed(Some(&user_message)).await,
-        state.context.prompt().await?,
-        state.curiosity.prompt().await?
-    );
-    let outcome = state
-        .codex
-        .lock()
         .await
-        .chat(
-            ChatInput {
-                text: request.message,
-                local_images: image_paths,
-                current_revision_id: user_message.page.revision_id.clone(),
-                reply_to_revision_id,
-            },
-            &compute,
-            &profile,
-            &continuity_context,
-            runtime_tx,
-        )
-        .await;
+        .map_err(ApiError::internal)?;
+    state
+        .reflection
+        .record_message(&stored.entry, reply_to_revision_id.as_deref())
+        .await
+        .map_err(ApiError::internal)?;
+    Ok(QueuedUserMessage {
+        text: request.message,
+        local_images,
+        stored,
+        reply_to_revision_id,
+    })
+}
+
+async fn run_chat(
+    state: AppState,
+    lease: ConversationLease,
+    runtime_tx: mpsc::Sender<RuntimeEvent>,
+    runtime_forwarder: JoinHandle<()>,
+    wire_tx: mpsc::Sender<WireEvent>,
+) -> anyhow::Result<()> {
+    let mut source_revision_ids = Vec::new();
+    let mut hunch_touched = false;
+    let mut first_batch = true;
+    let (outcome, last_user_revision_id) = loop {
+        let batch = state.conversation.settle_and_take(lease).await?;
+        let current = batch
+            .last()
+            .context("conversation batch omitted its current message")?;
+        let reply_to_revision_id = batch
+            .first()
+            .and_then(|message| message.reply_to_revision_id.clone());
+        for message in &batch {
+            source_revision_ids.push(message.stored.page.revision_id.clone());
+            source_revision_ids.extend(message.stored.attachment_revision_ids.clone());
+        }
+        let compute = state.compute.snapshot().await;
+        let profile = state.profile.snapshot().await;
+        let continuity_context = format!(
+            "{}\n\n{}\n\n{}\n\n{}",
+            state.continuity.context_seed(Some(&current.stored)).await,
+            state.context.prompt().await?,
+            state.curiosity.prompt().await?,
+            state.reflection.store().prompt().await?
+        );
+        let mut outcome = state
+            .codex
+            .lock()
+            .await
+            .chat(
+                ChatInput {
+                    text: conversation_batch_text(&batch, first_batch),
+                    local_images: batch
+                        .iter()
+                        .flat_map(|message| message.local_images.clone())
+                        .collect(),
+                    current_revision_id: current.stored.page.revision_id.clone(),
+                    reply_to_revision_id: reply_to_revision_id.clone(),
+                },
+                &compute,
+                &profile,
+                &continuity_context,
+                runtime_tx.clone(),
+            )
+            .await?;
+        hunch_touched |= outcome.hunch_touched;
+        if state.conversation.has_pending(lease).await?
+            || !state.conversation.finish_if_idle(lease).await?
+        {
+            for invocation in &mut outcome.invocations {
+                invocation.produced_message = false;
+            }
+            state.usage.record_all(&outcome.invocations).await?;
+            let _ = wire_tx.send(WireEvent::Reset).await;
+            first_batch = false;
+            continue;
+        }
+        break (outcome, current.stored.page.revision_id.clone());
+    };
+    drop(runtime_tx);
     runtime_forwarder.await?;
-    let outcome = outcome?;
-    let hunch_touched = outcome.hunch_touched;
     state.usage.record_all(&outcome.invocations).await?;
-    let mut input_revision_ids = user_message.attachment_revision_ids;
+    let mut input_revision_ids = source_revision_ids;
     input_revision_ids.extend(outcome.context_revision_ids);
     input_revision_ids.sort();
     input_revision_ids.dedup();
@@ -897,7 +1116,7 @@ async fn run_chat(
             Vec::new(),
             Some(outcome.metadata),
             MessageLinks {
-                responds_to: Some(user_message.page.revision_id.clone()),
+                responds_to: Some(last_user_revision_id.clone()),
                 input_revision_ids,
             },
         )
@@ -907,6 +1126,10 @@ async fn run_chat(
         .lock()
         .await
         .mark_interactive_revision(stored_message.page.revision_id.clone());
+    state
+        .reflection
+        .record_message(&stored_message.entry, Some(&last_user_revision_id))
+        .await?;
     let message = stored_message.entry;
     let memory_chars = state.continuity.memory_chars().await?;
     let profile = state.profile.snapshot().await;
@@ -930,6 +1153,29 @@ async fn run_chat(
         })
         .await;
     Ok(())
+}
+
+fn conversation_batch_text(batch: &[QueuedUserMessage], first_batch: bool) -> String {
+    if first_batch && batch.len() == 1 {
+        return batch[0].text.clone();
+    }
+    let messages = batch
+        .iter()
+        .map(|message| {
+            serde_json::json!({
+                "at": message.stored.entry.at,
+                "revisionId": message.stored.page.revision_id,
+                "text": message.text,
+                "images": message.local_images.len()
+            })
+        })
+        .collect::<Vec<_>>();
+    format!(
+        "The user sent these messages as one continuing burst before a reply was published. \
+         Reconsider the whole conversation through the latest message and answer naturally without \
+         mentioning batching or an earlier draft.\n\n{}",
+        serde_json::to_string_pretty(&messages).unwrap_or_default()
+    )
 }
 
 impl From<RuntimeEvent> for WireEvent {

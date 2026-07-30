@@ -5,6 +5,7 @@
 /data/profile.toml
 /data/orientation.md
 /data/autonomy.toml
+/data/reflection.toml
 /data/*.sqlite3
 /data/*.sqlite3-shm
 /data/*.sqlite3-wal

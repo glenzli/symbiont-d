@@ -1,4 +1,5 @@
 import { initProfileUi } from "/profile-ui.js";
+import { initReflectionUi } from "/reflection-ui.js";
 import { formatDuration, formatMemorySize, formatTokens } from "/presentation.js";
 import { renderMessageContent, renderRichText } from "/rich-text.js";
 import { initExplorationUi } from "/exploration-ui.js";
@@ -13,8 +14,15 @@ const appState = {
   profile: { status: "unconfigured", mode: null, orientation: "" },
   autonomy: null,
   autonomyPermitted: false,
-  usage: { totalTokens: 0, autonomousTokensToday: 0, autonomousMessagesToday: 0 },
+  usage: {
+    totalTokens: 0,
+    autonomousTokensToday: 0,
+    autonomousMessagesToday: 0,
+    reflectionTokensToday: 0,
+  },
   exploration: null,
+  reflection: null,
+  conversation: null,
 };
 
 const conversation = document.querySelector("#conversation");
@@ -35,12 +43,16 @@ let busy = false;
 let activityStartedAt = 0;
 let activityTimer = null;
 let selectedImages = [];
+let activeOutgoing = [];
+let activePending = null;
+let typingSignalTimer = null;
 
 const MAX_IMAGES = 4;
 const MAX_IMAGE_BYTES = 15 * 1024 * 1024;
 
 const settingsUi = initSettings(appState);
 const explorationUi = initExplorationUi(appState);
+const reflectionUi = initReflectionUi(appState);
 const profileUi = initProfileUi(appState, sendMessage);
 initTraceUi();
 const messageSync = initMessageSync({
@@ -124,9 +136,7 @@ function resizeComposer() {
 
 function setBusy(nextBusy) {
   busy = nextBusy;
-  input.disabled = nextBusy;
-  sendButton.disabled = nextBusy;
-  addImageButton.disabled = nextBusy;
+  composer.classList.toggle("response-active", nextBusy);
   messageActions.refresh();
   if (!nextBusy) {
     renderRuntimeStatus();
@@ -210,16 +220,27 @@ function renderRuntimeStatus() {
       exploration.nextRunAt,
     ).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}`;
   } else {
-    connectionStatus.textContent = "在线";
+    const reflection = appState.reflection?.runtime || appState.reflection;
+    connectionStatus.textContent =
+      reflection?.phase === "reflecting"
+        ? reflection.currentActivity || "正在整理近期对话"
+        : "在线";
   }
 }
 
 function applyRuntime(payload) {
   appState.usage = payload.usage || appState.usage;
   appState.exploration = payload.exploration || appState.exploration;
+  if (payload.reflection) {
+    appState.reflection = appState.reflection?.config
+      ? { ...appState.reflection, runtime: payload.reflection }
+      : payload.reflection;
+  }
+  appState.conversation = payload.conversation || appState.conversation;
   renderUsage();
   renderRuntimeStatus();
   settingsUi.renderAutonomyRuntime();
+  reflectionUi.renderRuntime();
   explorationUi.runtimeUpdated();
 }
 
@@ -235,6 +256,7 @@ async function bootstrap() {
     renderUsage();
     renderRuntimeStatus();
     settingsUi.render();
+    reflectionUi.render();
     profileUi.render();
     messageSync.start();
   } catch (error) {
@@ -293,7 +315,9 @@ async function consumeStream(response, pending, outgoing) {
         pending.querySelector(".message-body").textContent = "正在深入处理";
       } else if (event.type === "complete") {
         completed = true;
-        messageActions.update(outgoing, null, { deliveryState: "delivered" });
+        for (const message of activeOutgoing) {
+          messageActions.update(message, null, { deliveryState: "delivered" });
+        }
         applyComplete(pending, event.message);
         memorySize.textContent = formatMemorySize(event.memoryChars);
         appState.profile = event.profile;
@@ -313,8 +337,83 @@ async function consumeStream(response, pending, outgoing) {
 }
 
 async function sendMessage(text, images = []) {
-  if ((!text.trim() && !images.length) || busy) return;
-  const localEntry = {
+  if (!text.trim() && !images.length) return;
+  if (busy) {
+    await appendToActiveResponse(text, images);
+    return;
+  }
+  const localEntry = localUserEntry(text, images);
+  const outgoing = appendMessage(localEntry, { deliveryState: "pending" });
+  activeOutgoing = [outgoing];
+  const pending = appendMessage(
+    {
+      role: "assistant",
+      at: new Date().toISOString(),
+      content: "等你说完",
+    },
+    { pending: true },
+  );
+  activePending = pending;
+  activityStartedAt = Date.now();
+  setBusy(true);
+
+  try {
+    const response = await fetch("/api/chat", {
+      method: "POST",
+      body: chatBody(text, images),
+    });
+    await consumeStream(response, pending, outgoing);
+  } catch (error) {
+    pending.remove();
+    for (const message of activeOutgoing) {
+      messageActions.update(message, null, {
+        deliveryState: "failed",
+        failureReason: error.message,
+      });
+    }
+  } finally {
+    activeOutgoing = [];
+    activePending = null;
+    signalTyping(false);
+    setBusy(false);
+    if (!composer.hidden) input.focus();
+  }
+}
+
+async function appendToActiveResponse(text, images) {
+  const outgoing = appendMessage(localUserEntry(text, images), {
+    deliveryState: "pending",
+  });
+  if (activePending?.isConnected) {
+    conversation.append(activePending);
+    conversation.scrollTop = conversation.scrollHeight;
+  }
+  activeOutgoing.push(outgoing);
+  signalTyping(false);
+  try {
+    const response = await fetch("/api/chat/append", {
+      method: "POST",
+      body: chatBody(text, images),
+    });
+    const entry = await response.json();
+    if (!response.ok) throw new Error(entry.error || "无法追加消息。");
+    applyAccepted(outgoing, entry);
+    composerState.textContent = "已接入当前思考";
+    window.setTimeout(() => {
+      if (composerState.textContent === "已接入当前思考") {
+        composerState.textContent = "";
+      }
+    }, 1200);
+  } catch (error) {
+    messageActions.update(outgoing, null, {
+      deliveryState: "failed",
+      failureReason: error.message,
+    });
+  }
+}
+
+function localUserEntry(text, images) {
+  return {
     role: "user",
     at: new Date().toISOString(),
     content: text,
@@ -334,36 +433,26 @@ async function sendMessage(text, images = []) {
     ],
     deliveryState: "pending",
   };
-  const outgoing = appendMessage(localEntry, { deliveryState: "pending" });
-  const pending = appendMessage(
-    {
-      role: "assistant",
-      at: new Date().toISOString(),
-      content: "准备中",
-    },
-    { pending: true },
-  );
-  activityStartedAt = Date.now();
-  setBusy(true);
+}
 
-  try {
-    const body = new FormData();
-    body.append("message", text);
-    for (const image of images) body.append("image", image.file, image.file.name);
-    const response = await fetch("/api/chat", {
-      method: "POST",
-      body,
-    });
-    await consumeStream(response, pending, outgoing);
-  } catch (error) {
-    pending.remove();
-    messageActions.update(outgoing, null, {
-      deliveryState: "failed",
-      failureReason: error.message,
-    });
-  } finally {
-    setBusy(false);
-    if (!composer.hidden) input.focus();
+function chatBody(text, images) {
+  const body = new FormData();
+  body.append("message", text);
+  for (const image of images) body.append("image", image.file, image.file.name);
+  return body;
+}
+
+function signalTyping(typing) {
+  clearTimeout(typingSignalTimer);
+  if (!busy) return;
+  fetch("/api/interaction/typing", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ typing }),
+    keepalive: true,
+  }).catch(() => {});
+  if (typing) {
+    typingSignalTimer = setTimeout(() => signalTyping(false), 2200);
   }
 }
 
@@ -441,16 +530,20 @@ composer.addEventListener("submit", (event) => {
   event.preventDefault();
   const text = input.value.trim();
   const images = selectedImages;
-  if ((!text && !images.length) || busy) return;
+  if (!text && !images.length) return;
   input.value = "";
   selectedImages = [];
   composerState.textContent = "";
   renderAttachmentTray();
   resizeComposer();
+  signalTyping(false);
   sendMessage(text, images);
 });
 
-input.addEventListener("input", resizeComposer);
+input.addEventListener("input", () => {
+  resizeComposer();
+  if (busy) signalTyping(Boolean(input.value.trim()));
+});
 input.addEventListener("keydown", (event) => {
   if (event.key === "Enter" && !event.shiftKey) {
     event.preventDefault();

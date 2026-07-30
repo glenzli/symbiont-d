@@ -71,6 +71,10 @@ fn is_symbiont_context_mutation(tool: &str) -> bool {
             | "open_hunch"
             | "revise_hunch"
             | "retire_hunch"
+            | "upsert_episode"
+            | "upsert_interaction_hypothesis"
+            | "schedule_follow_up"
+            | "complete_reflection"
     )
 }
 

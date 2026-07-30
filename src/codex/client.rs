@@ -21,8 +21,8 @@ use tracing::{debug, warn};
 use super::{
     prompts::{
         additional_context_value, autonomous_exploration_prompt, context_fragments,
-        context_maintenance_prompt, developer_instructions, profile_review_prompt,
-        summary_maintenance_prompt,
+        context_maintenance_prompt, developer_instructions, interaction_reflection_prompt,
+        profile_review_prompt, summary_maintenance_prompt,
     },
     tool_dedup::{ToolCallPlan, TurnToolDeduplicator},
     tools::{EscalationRequest, SymbiontTools, tool_result},
@@ -37,6 +37,7 @@ use crate::{
     diagnostics::{ContextSnapshot, ExecutionTraceEvent, NativeThreadSnapshot, TraceEventKind},
     memory::{MessageMetadata, MessageRunMetadata},
     profile::{ProfileSnapshot, ProfileStore},
+    reflection::ReflectionStore,
     rollover::{self, NativeThreadCursor, RolloverDecision, ThreadContextPressure},
     symbiont_context::SymbiontContextStore,
     usage::{InvocationRecord, ToolTraceStep},
@@ -47,6 +48,7 @@ const AUTONOMOUS_SILENT_MARKER: &str = "<symbiont-silent/>";
 const MAINTENANCE_COMPLETE_MARKER: &str = "<symbiont-maintained/>";
 const CONTEXT_MAINTENANCE_COMPLETE_MARKER: &str = "<symbiont-context-maintained/>";
 const PROFILE_REVIEW_COMPLETE_MARKER: &str = "<symbiont-profile-reviewed/>";
+const REFLECTION_COMPLETE_MARKER: &str = "<symbiont-reflected/>";
 
 #[derive(Clone)]
 pub struct CodexConfig {
@@ -119,6 +121,12 @@ pub struct ProfileReviewOutcome {
     pub context_revision_ids: Vec<String>,
 }
 
+pub struct ReflectionOutcome {
+    pub invocations: Vec<InvocationRecord>,
+    pub summary: Option<String>,
+    pub actions: Vec<String>,
+}
+
 pub struct ChatInput {
     pub text: String,
     pub local_images: Vec<PathBuf>,
@@ -174,6 +182,7 @@ impl CodexClient {
         profile: Arc<ProfileStore>,
         context: Arc<SymbiontContextStore>,
         curiosity: Arc<CuriosityStore>,
+        reflection: Arc<ReflectionStore>,
     ) -> Result<Self> {
         let mut last_error = None;
         for attempt in 1..=3 {
@@ -185,6 +194,7 @@ impl CodexClient {
                     Arc::clone(&profile),
                     Arc::clone(&context),
                     Arc::clone(&curiosity),
+                    Arc::clone(&reflection),
                 ),
             )
             .await
@@ -212,6 +222,7 @@ impl CodexClient {
         profile: Arc<ProfileStore>,
         context: Arc<SymbiontContextStore>,
         curiosity: Arc<CuriosityStore>,
+        reflection: Arc<ReflectionStore>,
     ) -> Result<Self> {
         let mut child = Command::new(&config.binary)
             .arg("app-server")
@@ -243,7 +254,7 @@ impl CodexClient {
             workspace: config.workspace.clone(),
             continuity: Arc::clone(&continuity),
             interactive_cursor: NativeThreadCursor::new(),
-            tools: SymbiontTools::new(continuity, profile, context, curiosity),
+            tools: SymbiontTools::new(continuity, profile, context, curiosity, reflection),
             models: Vec::new(),
             thread_usage: HashMap::new(),
             thread_turns: HashMap::new(),
@@ -567,6 +578,76 @@ impl CodexClient {
             clarification_question,
             metadata,
             context_revision_ids,
+        })
+    }
+
+    pub async fn reflect_interaction(
+        &mut self,
+        source_bundle: &str,
+        compute: &ComputeConfig,
+        profile: &ProfileSnapshot,
+        continuity_context: &str,
+        events: mpsc::Sender<RuntimeEvent>,
+    ) -> Result<ReflectionOutcome> {
+        let prompt = interaction_reflection_prompt(source_bundle, REFLECTION_COMPLETE_MARKER);
+        let thread_id = self.maintenance_thread_id.clone();
+        let outcome = self
+            .run_request(
+                thread_id.clone(),
+                text_input_items(&prompt),
+                ComputeLane::Observe,
+                "reflection",
+                compute,
+                profile,
+                continuity_context,
+                None,
+                None,
+                false,
+                &events,
+            )
+            .await;
+        self.renew_background_thread(&thread_id, BackgroundThread::Maintenance)
+            .await;
+        let mut outcome = outcome?;
+        let reflection_steps = outcome
+            .invocations
+            .iter()
+            .flat_map(|invocation| invocation.trace_steps.iter())
+            .filter(|step| {
+                step.namespace == "symbiont"
+                    && matches!(
+                        step.tool.as_str(),
+                        "upsert_episode"
+                            | "upsert_interaction_hypothesis"
+                            | "schedule_follow_up"
+                            | "update_current_map"
+                            | "update_open_loops"
+                            | "complete_reflection"
+                    )
+                    && step.succeeded
+            })
+            .collect::<Vec<_>>();
+        let summary = reflection_steps
+            .iter()
+            .rev()
+            .find(|step| step.tool == "complete_reflection")
+            .and_then(|step| step.arguments.get("summary"))
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|summary| !summary.is_empty())
+            .map(str::to_owned);
+        let actions = reflection_steps
+            .iter()
+            .filter(|step| step.tool != "complete_reflection")
+            .map(|step| format!("symbiont.{}", step.tool))
+            .collect();
+        for invocation in &mut outcome.invocations {
+            invocation.produced_message = false;
+        }
+        Ok(ReflectionOutcome {
+            invocations: outcome.invocations,
+            summary,
+            actions,
         })
     }
 

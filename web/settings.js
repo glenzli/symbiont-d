@@ -200,7 +200,7 @@ export function initSettings(state) {
         "读取失败",
       );
       state.usage = payload.headline;
-      quotaState.textContent = `${quotaText(payload.rateLimits)} · 今日自主 ${formatTokens(payload.headline.autonomousTokensToday)}`;
+      quotaState.textContent = `${quotaText(payload.rateLimits)} · 今日自主 ${formatTokens(payload.headline.autonomousTokensToday)} · 后台理解 ${formatTokens(payload.headline.reflectionTokensToday || 0)}`;
       renderStats(payload.usage);
     } catch (error) {
       statsContent.textContent = error.message;
@@ -249,7 +249,13 @@ export function initSettings(state) {
     recentList.className = "recent-list";
     if (!usage.recent.length) recentList.textContent = "还没有调用记录";
     for (const invocation of usage.recent.slice(0, 12)) {
-      const origin = invocation.origin === "autonomous" ? "主动" : "对话";
+      const origin =
+        {
+          autonomous: "主动",
+          reflection: "后台理解",
+          maintenance: "记忆维护",
+          interactive: "对话",
+        }[invocation.origin] || invocation.origin;
       recentList.append(
         usageRow(
           `${invocation.modelDisplayName} · ${invocation.effort}`,

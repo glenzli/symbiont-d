@@ -100,6 +100,7 @@ pub struct UsageHeadline {
     pub total_tokens: u64,
     pub autonomous_tokens_today: u64,
     pub autonomous_messages_today: u64,
+    pub reflection_tokens_today: u64,
 }
 
 pub struct UsageStore {
@@ -441,6 +442,13 @@ impl UsageStore {
                                      AND produced_message = 1
                                 THEN 1 ELSE 0
                             END
+                        ), 0),
+                        COALESCE(SUM(
+                            CASE
+                                WHEN origin = 'reflection'
+                                     AND completed_at >= ?1
+                                THEN total_tokens ELSE 0
+                            END
                         ), 0)
                     FROM invocations
                     ",
@@ -450,6 +458,7 @@ impl UsageStore {
                             total_tokens: row.get::<_, i64>(0)? as u64,
                             autonomous_tokens_today: row.get::<_, i64>(1)? as u64,
                             autonomous_messages_today: row.get::<_, i64>(2)? as u64,
+                            reflection_tokens_today: row.get::<_, i64>(3)? as u64,
                         })
                     },
                 )

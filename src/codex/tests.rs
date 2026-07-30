@@ -8,14 +8,19 @@ use super::{
         ChatInput, autonomous_response_is_silent, extract_completed_response_text,
         extract_final_agent_message, multimodal_input_items,
     },
-    prompts::{autonomous_exploration_prompt, developer_instructions, summary_maintenance_prompt},
+    prompts::{
+        autonomous_exploration_prompt, developer_instructions, interaction_reflection_prompt,
+        summary_maintenance_prompt,
+    },
     tools::SymbiontTools,
     trace::observable_item_event,
 };
 use crate::{
-    continuity::ContinuityHost,
+    continuity::{ContinuityHost, MessageLinks},
     curiosity::CuriosityStore,
+    memory::MemoryRole,
     profile::{CalibrationMode, ProfileStore, SetupStatus},
+    reflection::ReflectionStore,
     symbiont_context::SymbiontContextStore,
 };
 use pcp_sqlite::SqlitePcpStore;
@@ -40,6 +45,20 @@ fn dynamic_tools_expose_host_and_pcp_namespaces() {
             .unwrap()
             .iter()
             .any(|tool| tool["name"] == "open_hunch")
+    );
+    assert!(
+        specs[0]["tools"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|tool| tool["name"] == "upsert_episode")
+    );
+    assert!(
+        specs[0]["tools"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|tool| tool["name"] == "upsert_interaction_hypothesis")
     );
     assert!(
         specs[0]["tools"]
@@ -113,6 +132,18 @@ fn autonomous_exploration_is_silent_or_starts_one_conversation() {
 }
 
 #[test]
+fn reflection_prompt_preserves_facts_uncertainty_and_profile_boundaries() {
+    let prompt = interaction_reflection_prompt("<events/>", "<done/>");
+    assert!(prompt.contains("Separate observed facts from inference"));
+    assert!(prompt.contains("never ratings"));
+    assert!(prompt.contains("Keep alternative explanations"));
+    assert!(prompt.contains("do not force a tree"));
+    assert!(prompt.contains("never promote temporary behavior directly"));
+    assert!(prompt.contains("publication gate will still decide whether to speak"));
+    assert!(prompt.chars().count() < 2_500);
+}
+
+#[test]
 fn codex_input_preserves_text_and_local_images() {
     let input = multimodal_input_items(&ChatInput {
         text: "What is shown here?".to_owned(),
@@ -174,7 +205,21 @@ async fn orientation_tool_requires_active_calibration() {
     );
     let context = Arc::new(SymbiontContextStore::new(Arc::clone(&continuity)));
     let curiosity = Arc::new(CuriosityStore::new(Arc::clone(&continuity)));
-    let tools = SymbiontTools::new(continuity, Arc::clone(&profile), context, curiosity);
+    let reflection = Arc::new(
+        ReflectionStore::open(
+            root.join("reflection.sqlite3"),
+            root.join("reflection.toml"),
+        )
+        .await
+        .expect("open Reflection store"),
+    );
+    let tools = SymbiontTools::new(
+        continuity,
+        Arc::clone(&profile),
+        context,
+        curiosity,
+        reflection,
+    );
     let call = json!({
         "namespace": "symbiont",
         "tool": "complete_orientation",
@@ -221,7 +266,15 @@ async fn pcp_tools_write_search_and_read_through_the_dynamic_bridge() {
     );
     let context = Arc::new(SymbiontContextStore::new(Arc::clone(&continuity)));
     let curiosity = Arc::new(CuriosityStore::new(Arc::clone(&continuity)));
-    let tools = SymbiontTools::new(continuity, profile, context, curiosity);
+    let reflection = Arc::new(
+        ReflectionStore::open(
+            root.join("reflection.sqlite3"),
+            root.join("reflection.toml"),
+        )
+        .await
+        .expect("open Reflection store"),
+    );
+    let tools = SymbiontTools::new(continuity, profile, context, curiosity, reflection);
 
     let written = tools
         .execute(&json!({
@@ -400,6 +453,71 @@ async fn pcp_tools_write_search_and_read_through_the_dynamic_bridge() {
 }
 
 #[tokio::test]
+async fn reflection_tools_accept_recalled_conversation_revisions_outside_the_event_tail() {
+    let nonce = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .expect("clock")
+        .as_nanos();
+    let root = std::env::temp_dir().join(format!("symbiont-reflection-tools-{nonce}"));
+    let store = Arc::new(
+        SqlitePcpStore::open(root.join("context.sqlite3"))
+            .await
+            .expect("open PCP store"),
+    );
+    let continuity = Arc::new(
+        ContinuityHost::open(store)
+            .await
+            .expect("open continuity host"),
+    );
+    let recalled = continuity
+        .ingest_message(
+            MemoryRole::User,
+            "An older conversation Revision can still support a new Episode.",
+            Vec::new(),
+            None,
+            MessageLinks::default(),
+        )
+        .await
+        .expect("ingest recalled conversation source");
+    let profile = Arc::new(
+        ProfileStore::open(root.join("profile.toml"), root.join("orientation.md"))
+            .await
+            .expect("open profile"),
+    );
+    let context = Arc::new(SymbiontContextStore::new(Arc::clone(&continuity)));
+    let curiosity = Arc::new(CuriosityStore::new(Arc::clone(&continuity)));
+    let reflection = Arc::new(
+        ReflectionStore::open(
+            root.join("reflection.sqlite3"),
+            root.join("reflection.toml"),
+        )
+        .await
+        .expect("open Reflection store"),
+    );
+    let tools = SymbiontTools::new(continuity, profile, context, curiosity, reflection);
+
+    let result = tools
+        .execute_for_model(
+            &json!({
+                "namespace": "symbiont",
+                "tool": "upsert_episode",
+                "arguments": {
+                    "title": "Recalled design line",
+                    "summary": "The source is outside Reflection's imported event tail but remains auditable through PCP.",
+                    "state": "active",
+                    "source_revision_ids": [recalled.page.revision_id]
+                }
+            }),
+            Some("test-model"),
+            "reflection",
+        )
+        .await;
+    assert_eq!(result.response["success"], true);
+
+    let _ = tokio::fs::remove_dir_all(root).await;
+}
+
+#[tokio::test]
 async fn hunch_tools_preserve_model_owned_state_and_record_autonomous_exploration() {
     let nonce = SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -433,7 +551,21 @@ async fn hunch_tools_preserve_model_owned_state_and_record_autonomous_exploratio
     );
     let context = Arc::new(SymbiontContextStore::new(Arc::clone(&continuity)));
     let curiosity = Arc::new(CuriosityStore::new(Arc::clone(&continuity)));
-    let tools = SymbiontTools::new(continuity, profile, context, Arc::clone(&curiosity));
+    let reflection = Arc::new(
+        ReflectionStore::open(
+            root.join("reflection.sqlite3"),
+            root.join("reflection.toml"),
+        )
+        .await
+        .expect("open Reflection store"),
+    );
+    let tools = SymbiontTools::new(
+        continuity,
+        profile,
+        context,
+        Arc::clone(&curiosity),
+        reflection,
+    );
 
     let opened = tools
         .execute(&json!({

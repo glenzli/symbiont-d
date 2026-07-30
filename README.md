@@ -14,6 +14,8 @@ user's attention into a feed.
 ## Current Prototype
 
 - Local chat interface with streaming responses.
+- Continuous message bursts can join an in-flight response; a superseded draft
+  is reconsidered against the newest message before publication.
 - Latest-message recall, edit-as-resend, and recovery for interrupted sends.
 - Direct connection to `codex app-server`; no separate model API pipeline.
 - Live model catalog and configurable compute lanes.
@@ -22,6 +24,12 @@ user's attention into a feed.
   store with immutable revisions and provenance.
 - Optional model-written Summary entries for routing to longer Detail.
 - Current Map, Open Loops, and a cautious long-term profile review.
+- A separate Reflection pipeline that records interaction facts, then uses a
+  model to maintain temporal Episodes, revisable hypotheses, and optional
+  delayed follow-ups.
+- Exact local time is injected into every model run; reply delay, message
+  length, continuation, correction, and read state remain contextual evidence,
+  never numeric ratings.
 - Model-owned Hunches collected in a visible Curiosity Map.
 - Scheduled, manual, and conversation-triggered autonomous exploration.
 - Silent exploration when there is nothing worth interrupting for.
@@ -38,6 +46,7 @@ symbiont-d host
   |-- Codex app-server: reasoning, web search, model routing
   |-- PCP store: messages, summaries, provenance, long-term Pages
   |-- Symbiont Context: current map, open loops, profile review
+  |-- Reflection: raw interaction events -> Episodes -> working hypotheses
   |-- Curiosity: model-owned questions and their lifecycle
   `-- local UI: conversation, settings, archive, usage, traces
 ```
@@ -49,6 +58,15 @@ model instead of being appended to every request.
 A Hunch belongs to `symbiont-d`, not to the user profile. Conversation may
 create or revise one, which can wake an exploration cycle. Exploration still
 obeys the autonomy switch, daily token budget, and proactive-message limit.
+
+Reflection is deliberately separate from PCP. PCP is the durable information
+archive; Reflection is symbiont-d's time-aware working model of the
+relationship. Raw observations and model interpretations live in separate
+records. Episodes can overlap and form an acyclic parent graph. Hypotheses
+retain evidence and alternatives, and a stable candidate reaches the
+long-term profile only through the existing critical review path. A scheduled
+follow-up only wakes exploration; the normal publication gate can still remain
+silent.
 
 ## Requirements
 
@@ -101,10 +119,12 @@ Runtime data stays under `data/` by default and is ignored by Git:
 ```text
 data/context.sqlite3   PCP Pages and revisions
 data/symbiont.sqlite3  usage and temporary trace details
+data/reflection.sqlite3 interaction facts, Episodes, hypotheses, follow-ups
 data/assets/           content-addressed image files
 data/orientation.md    visible user orientation
 data/profile.toml      initialization state
 data/autonomy.toml     exploration policy and limits
+data/reflection.toml   background interpretation policy and limits
 data/compute.toml      model and reasoning-lane configuration
 ```
 
@@ -142,8 +162,10 @@ crates/pcp-core/    protocol types and requests
 crates/pcp-sqlite/ SQLite PCP implementation
 src/codex/          Codex app-server client, prompts, tools, traces
 src/continuity.rs   conversation ingestion and PCP-facing context policy
+src/conversation.rs in-flight message burst coordination
 src/curiosity.rs    Hunch storage and Curiosity Map
 src/exploration.rs  autonomous scheduling, budgets, and publication
+src/reflection/     time-aware interaction analysis and projections
 src/web.rs          local HTTP API
 web/                embedded browser interface
 ```

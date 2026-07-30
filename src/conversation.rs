@@ -1,0 +1,296 @@
+use std::{
+    sync::{
+        Arc,
+        atomic::{AtomicU64, Ordering},
+    },
+    time::Duration,
+};
+
+use anyhow::Result;
+use serde::Serialize;
+use tokio::{
+    sync::{Mutex, Notify},
+    time::{Instant, sleep_until},
+};
+
+use crate::continuity::StoredMessage;
+
+const QUIET_WINDOW: Duration = Duration::from_millis(1_500);
+const TYPING_GRACE: Duration = Duration::from_millis(2_500);
+const MAX_SETTLE: Duration = Duration::from_secs(8);
+static CONVERSATION_ID: AtomicU64 = AtomicU64::new(1);
+
+#[derive(Clone, Debug)]
+pub struct QueuedUserMessage {
+    pub text: String,
+    pub local_images: Vec<std::path::PathBuf>,
+    pub stored: StoredMessage,
+    pub reply_to_revision_id: Option<String>,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct ConversationLease {
+    id: u64,
+}
+
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ConversationSnapshot {
+    pub active: bool,
+    pub pending_messages: usize,
+    pub started_at: Option<String>,
+}
+
+#[derive(Clone)]
+pub struct ConversationCoordinator {
+    state: Arc<Mutex<State>>,
+    changed: Arc<Notify>,
+}
+
+struct State {
+    active: Option<ActiveConversation>,
+}
+
+struct ActiveConversation {
+    id: u64,
+    pending: Vec<QueuedUserMessage>,
+    append_reservations: usize,
+    last_input_at: Instant,
+    typing_until: Option<Instant>,
+    started_at: String,
+}
+
+impl ConversationCoordinator {
+    pub fn new() -> Self {
+        Self {
+            state: Arc::new(Mutex::new(State { active: None })),
+            changed: Arc::new(Notify::new()),
+        }
+    }
+
+    pub async fn start(&self, message: QueuedUserMessage) -> Result<ConversationLease> {
+        let mut state = self.state.lock().await;
+        if state.active.is_some() {
+            anyhow::bail!("a conversation response is already active");
+        }
+        let id = CONVERSATION_ID.fetch_add(1, Ordering::Relaxed);
+        state.active = Some(ActiveConversation {
+            id,
+            pending: vec![message],
+            append_reservations: 0,
+            last_input_at: Instant::now(),
+            typing_until: None,
+            started_at: chrono::Utc::now().to_rfc3339(),
+        });
+        self.changed.notify_waiters();
+        Ok(ConversationLease { id })
+    }
+
+    pub async fn reserve_append(&self) -> Result<ConversationLease> {
+        let mut state = self.state.lock().await;
+        let active = state
+            .active
+            .as_mut()
+            .ok_or_else(|| anyhow::anyhow!("no active conversation response"))?;
+        active.append_reservations += 1;
+        Ok(ConversationLease { id: active.id })
+    }
+
+    pub async fn append_reserved(
+        &self,
+        lease: ConversationLease,
+        message: QueuedUserMessage,
+    ) -> Result<()> {
+        let mut state = self.state.lock().await;
+        let active = matching_active_mut(&mut state, lease)?;
+        if active.append_reservations == 0 {
+            anyhow::bail!("conversation append was not reserved");
+        }
+        active.append_reservations -= 1;
+        active.pending.push(message);
+        active.last_input_at = Instant::now();
+        self.changed.notify_waiters();
+        Ok(())
+    }
+
+    pub async fn cancel_append(&self, lease: ConversationLease) {
+        let mut state = self.state.lock().await;
+        let Ok(active) = matching_active_mut(&mut state, lease) else {
+            return;
+        };
+        active.append_reservations = active.append_reservations.saturating_sub(1);
+        self.changed.notify_waiters();
+    }
+
+    pub async fn note_typing(&self, typing: bool) {
+        let mut state = self.state.lock().await;
+        let Some(active) = state.active.as_mut() else {
+            return;
+        };
+        active.typing_until = typing.then(|| Instant::now() + TYPING_GRACE);
+        self.changed.notify_waiters();
+    }
+
+    pub async fn settle_and_take(
+        &self,
+        lease: ConversationLease,
+    ) -> Result<Vec<QueuedUserMessage>> {
+        let maximum = Instant::now() + MAX_SETTLE;
+        loop {
+            let deadline = {
+                let state = self.state.lock().await;
+                let active = matching_active(&state, lease)?;
+                let quiet = active.last_input_at + QUIET_WINDOW;
+                active
+                    .typing_until
+                    .map(|typing| quiet.max(typing))
+                    .unwrap_or(quiet)
+                    .min(maximum)
+            };
+            if Instant::now() >= deadline {
+                let mut state = self.state.lock().await;
+                let active = matching_active_mut(&mut state, lease)?;
+                if !active.pending.is_empty() {
+                    return Ok(std::mem::take(&mut active.pending));
+                }
+                anyhow::bail!("conversation batch settled without pending messages");
+            }
+            tokio::select! {
+                _ = sleep_until(deadline) => {}
+                _ = self.changed.notified() => {}
+            }
+        }
+    }
+
+    pub async fn has_pending(&self, lease: ConversationLease) -> Result<bool> {
+        let state = self.state.lock().await;
+        Ok(!matching_active(&state, lease)?.pending.is_empty())
+    }
+
+    pub async fn finish_if_idle(&self, lease: ConversationLease) -> Result<bool> {
+        let mut state = self.state.lock().await;
+        let active = matching_active(&state, lease)?;
+        if !active.pending.is_empty() || active.append_reservations > 0 {
+            return Ok(false);
+        }
+        state.active = None;
+        self.changed.notify_waiters();
+        Ok(true)
+    }
+
+    pub async fn abort(&self, lease: ConversationLease) {
+        let mut state = self.state.lock().await;
+        if state
+            .active
+            .as_ref()
+            .is_some_and(|active| active.id == lease.id)
+        {
+            state.active = None;
+            self.changed.notify_waiters();
+        }
+    }
+
+    pub async fn snapshot(&self) -> ConversationSnapshot {
+        let state = self.state.lock().await;
+        ConversationSnapshot {
+            active: state.active.is_some(),
+            pending_messages: state
+                .active
+                .as_ref()
+                .map(|active| active.pending.len() + active.append_reservations)
+                .unwrap_or_default(),
+            started_at: state
+                .active
+                .as_ref()
+                .map(|active| active.started_at.clone()),
+        }
+    }
+}
+
+fn matching_active(state: &State, lease: ConversationLease) -> Result<&ActiveConversation> {
+    state
+        .active
+        .as_ref()
+        .filter(|active| active.id == lease.id)
+        .ok_or_else(|| anyhow::anyhow!("conversation lease is no longer active"))
+}
+
+fn matching_active_mut(
+    state: &mut State,
+    lease: ConversationLease,
+) -> Result<&mut ActiveConversation> {
+    state
+        .active
+        .as_mut()
+        .filter(|active| active.id == lease.id)
+        .ok_or_else(|| anyhow::anyhow!("conversation lease is no longer active"))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{
+        continuity::StoredMessage,
+        memory::{MemoryEntry, MemoryRole},
+    };
+    use pcp_core::WriteResult;
+
+    fn message(revision: &str) -> QueuedUserMessage {
+        QueuedUserMessage {
+            text: revision.to_owned(),
+            local_images: Vec::new(),
+            stored: StoredMessage {
+                entry: MemoryEntry {
+                    role: MemoryRole::User,
+                    at: chrono::Utc::now().to_rfc3339(),
+                    content: revision.to_owned(),
+                    revision_id: Some(revision.to_owned()),
+                    parts: Vec::new(),
+                    metadata: None,
+                    delivery_state: None,
+                },
+                page: WriteResult {
+                    page_id: format!("page-{revision}"),
+                    revision_id: revision.to_owned(),
+                    created: true,
+                },
+                attachment_revision_ids: Vec::new(),
+            },
+            reply_to_revision_id: None,
+        }
+    }
+
+    #[tokio::test]
+    async fn appends_messages_to_one_active_response() {
+        let coordinator = ConversationCoordinator::new();
+        let lease = coordinator.start(message("one")).await.unwrap();
+        let reservation = coordinator.reserve_append().await.unwrap();
+        coordinator
+            .append_reserved(reservation, message("two"))
+            .await
+            .unwrap();
+        let batch = coordinator.settle_and_take(lease).await.unwrap();
+        assert_eq!(batch.len(), 2);
+        assert!(coordinator.finish_if_idle(lease).await.unwrap());
+        assert!(!coordinator.snapshot().await.active);
+    }
+
+    #[tokio::test]
+    async fn reserved_append_keeps_the_response_open_until_storage_finishes() {
+        let coordinator = ConversationCoordinator::new();
+        let lease = coordinator.start(message("one")).await.unwrap();
+        let batch = coordinator.settle_and_take(lease).await.unwrap();
+        assert_eq!(batch.len(), 1);
+
+        let reservation = coordinator.reserve_append().await.unwrap();
+        assert!(!coordinator.finish_if_idle(lease).await.unwrap());
+        coordinator
+            .append_reserved(reservation, message("two"))
+            .await
+            .unwrap();
+
+        let batch = coordinator.settle_and_take(lease).await.unwrap();
+        assert_eq!(batch[0].text, "two");
+        assert!(coordinator.finish_if_idle(lease).await.unwrap());
+    }
+}

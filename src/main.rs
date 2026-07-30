@@ -4,12 +4,14 @@ mod codex;
 mod compute;
 mod context_maintenance;
 mod continuity;
+mod conversation;
 mod curiosity;
 mod diagnostics;
 mod exploration;
 mod maintenance;
 mod memory;
 mod profile;
+mod reflection;
 mod rollover;
 mod symbiont_context;
 mod usage;
@@ -29,11 +31,13 @@ use autonomy::AutonomyStore;
 use codex::{CodexClient, CodexConfig};
 use compute::ComputeStore;
 use continuity::ContinuityHost;
+use conversation::ConversationCoordinator;
 use curiosity::CuriosityStore;
 use exploration::ExplorationHandle;
 use memory::MemoryStore;
 use pcp_sqlite::SqlitePcpStore;
 use profile::ProfileStore;
+use reflection::{ReflectionHandle, ReflectionStore};
 use symbiont_context::SymbiontContextStore;
 use tokio::{net::TcpListener, sync::Mutex};
 use tracing::info;
@@ -99,6 +103,21 @@ async fn main() -> Result<()> {
         orientation_ready = migration.orientation.is_some(),
         "PCP continuity store is ready"
     );
+    let reflection_store = Arc::new(
+        ReflectionStore::open(
+            resolve_data_path(&workspace, "SYMBIONT_REFLECTION_PATH", "reflection.sqlite3"),
+            resolve_data_path(
+                &workspace,
+                "SYMBIONT_REFLECTION_CONFIG_PATH",
+                "reflection.toml",
+            ),
+        )
+        .await?,
+    );
+    reflection_store
+        .backfill_messages(&continuity.recent_messages(100).await?)
+        .await
+        .context("backfill recent conversation into Reflection")?;
 
     let codex = CodexClient::start(
         CodexConfig {
@@ -109,6 +128,7 @@ async fn main() -> Result<()> {
         Arc::clone(&profile),
         Arc::clone(&context),
         Arc::clone(&curiosity),
+        Arc::clone(&reflection_store),
     )
     .await
     .context("start the Codex app-server session")?;
@@ -138,7 +158,20 @@ async fn main() -> Result<()> {
         Arc::clone(&continuity),
         Arc::clone(&context),
         Arc::clone(&curiosity),
+        Arc::clone(&reflection_store),
         Arc::clone(&usage),
+    );
+    let reflection = ReflectionHandle::start(
+        Arc::clone(&reflection_store),
+        Arc::clone(&autonomy),
+        Arc::clone(&profile),
+        Arc::clone(&codex),
+        Arc::clone(&compute),
+        Arc::clone(&continuity),
+        Arc::clone(&context),
+        Arc::clone(&curiosity),
+        Arc::clone(&usage),
+        exploration.clone(),
     );
     maintenance::start(
         Arc::clone(&autonomy),
@@ -155,8 +188,10 @@ async fn main() -> Result<()> {
         Arc::clone(&compute),
         Arc::clone(&continuity),
         Arc::clone(&context),
+        Arc::clone(&reflection_store),
         Arc::clone(&usage),
     );
+    let conversation = ConversationCoordinator::new();
     let state = AppState::new(
         continuity,
         assets,
@@ -169,6 +204,8 @@ async fn main() -> Result<()> {
         usage,
         rate_limits,
         exploration,
+        reflection,
+        conversation,
     );
     let app = web::router(state);
     let bind: SocketAddr = env::var("SYMBIONT_BIND")

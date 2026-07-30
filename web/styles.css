@@ -654,6 +654,10 @@ input:focus-visible {
   margin-top: 5px;
 }
 
+.composer.response-active {
+  box-shadow: inset 0 1px 0 var(--border);
+}
+
 .composer.dragging {
   box-shadow: inset 0 0 0 2px var(--focus);
 }
@@ -1604,6 +1608,106 @@ button:disabled {
 
 .profile-review-document .archive-empty {
   padding-block: 14px;
+}
+
+.reflection-toggles .toggle-row + .toggle-row {
+  border-top: 1px solid var(--border);
+}
+
+.reflection-archive {
+  display: grid;
+  gap: 28px;
+}
+
+.reflection-section {
+  min-width: 0;
+}
+
+.reflection-section > h3 {
+  margin: 0 0 8px;
+  color: var(--text-soft);
+  font-size: 10px;
+  font-weight: 650;
+  letter-spacing: 0;
+  text-transform: uppercase;
+}
+
+.reflection-item,
+.reflection-run {
+  padding: 13px 0;
+  border-top: 1px solid var(--border);
+}
+
+.reflection-item > header,
+.reflection-run > header {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: start;
+  gap: 8px 16px;
+}
+
+.reflection-item > header strong,
+.reflection-run > header strong {
+  min-width: 0;
+  overflow-wrap: anywhere;
+  font-size: 11px;
+  font-weight: 620;
+}
+
+.reflection-item > header small,
+.reflection-run > header small,
+.reflection-actions {
+  color: var(--text-soft);
+  font-size: 9px;
+}
+
+.reflection-item-body {
+  margin-top: 8px;
+  color: var(--text-soft);
+}
+
+.reflection-item-body > :first-child {
+  margin-top: 0;
+}
+
+.reflection-item-body > :last-child {
+  margin-bottom: 0;
+}
+
+.reflection-graph {
+  display: block;
+  margin-top: 8px;
+  color: var(--text-faint);
+  font-size: 9px;
+}
+
+.reflection-evidence {
+  display: grid;
+  grid-template-columns: max-content minmax(0, 1fr);
+  gap: 5px 12px;
+  margin: 10px 0 0;
+  font-size: 10px;
+}
+
+.reflection-evidence dt {
+  color: var(--text-faint);
+}
+
+.reflection-evidence dd {
+  margin: 0;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+.reflection-item.profile-candidate {
+  padding-left: 12px;
+  border-left: 2px solid var(--text);
+}
+
+.reflection-actions {
+  display: block;
+  margin-top: 6px;
+  overflow-wrap: anywhere;
 }
 
 .archive-curiosity {

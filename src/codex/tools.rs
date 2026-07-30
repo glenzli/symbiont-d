@@ -12,6 +12,10 @@ use crate::{
     continuity::ContinuityHost,
     curiosity::{CuriosityStore, HunchOrigin, HunchPatch, HunchState, NewHunch},
     profile::ProfileStore,
+    reflection::{
+        EpisodeInput, EpisodeState, FollowUpInput, HypothesisHorizon, HypothesisInput,
+        HypothesisStatus, ReflectionStore,
+    },
     symbiont_context::{ContextAuthor, ContextDocumentKind, SymbiontContextStore},
 };
 
@@ -21,6 +25,7 @@ pub(super) struct SymbiontTools {
     profile: Arc<ProfileStore>,
     context: Arc<SymbiontContextStore>,
     curiosity: Arc<CuriosityStore>,
+    reflection: Arc<ReflectionStore>,
 }
 
 pub(super) struct ToolExecution {
@@ -42,12 +47,14 @@ impl SymbiontTools {
         profile: Arc<ProfileStore>,
         context: Arc<SymbiontContextStore>,
         curiosity: Arc<CuriosityStore>,
+        reflection: Arc<ReflectionStore>,
     ) -> Self {
         Self {
             continuity,
             profile,
             context,
             curiosity,
+            reflection,
         }
     }
 
@@ -255,6 +262,137 @@ impl SymbiontTools {
                                 }
                             },
                             "required": ["page_id", "expected_revision_id", "state", "resolution"],
+                            "additionalProperties": false
+                        }
+                    },
+                    {
+                        "type": "function",
+                        "name": "upsert_episode",
+                        "description": "Create or revise one overlapping conversation Episode during a background reflection run. Episodes are temporal interpretations linked to exact message Revisions, not exclusive topic folders.",
+                        "inputSchema": {
+                            "type": "object",
+                            "properties": {
+                                "episode_id": {
+                                    "type": "string",
+                                    "description": "Existing Episode ID when revising; omit only for a genuinely new Episode."
+                                },
+                                "title": {"type": "string"},
+                                "summary": {
+                                    "type": "string",
+                                    "description": "Compact account of how the discussion is developing, including unresolved movement rather than a transcript recap."
+                                },
+                                "state": {
+                                    "type": "string",
+                                    "enum": ["forming", "active", "dormant", "closed"]
+                                },
+                                "source_revision_ids": {
+                                    "type": "array",
+                                    "items": {"type": "string"},
+                                    "minItems": 1,
+                                    "maxItems": 50
+                                },
+                                "parent_episode_ids": {
+                                    "type": "array",
+                                    "items": {"type": "string"},
+                                    "maxItems": 20,
+                                    "description": "Directed parent Episodes summarized or continued by this Episode. The host rejects cycles."
+                                }
+                            },
+                            "required": ["title", "summary", "state", "source_revision_ids"],
+                            "additionalProperties": false
+                        }
+                    },
+                    {
+                        "type": "function",
+                        "name": "upsert_interaction_hypothesis",
+                        "description": "Create or revise a provisional interpretation of interaction evidence during background reflection. Preserve alternatives and explicitly retire contradicted or superseded interpretations. This never changes the user profile.",
+                        "inputSchema": {
+                            "type": "object",
+                            "properties": {
+                                "hypothesis_id": {
+                                    "type": "string",
+                                    "description": "Existing hypothesis ID when revising; omit only for a distinct interpretation."
+                                },
+                                "statement": {"type": "string"},
+                                "evidence": {
+                                    "type": "string",
+                                    "description": "Observed behavior and exact conversational evidence, without converting it into a rating."
+                                },
+                                "alternatives": {
+                                    "type": "string",
+                                    "description": "Plausible competing interpretations. Use an explicit none only when the evidence is direct."
+                                },
+                                "status": {
+                                    "type": "string",
+                                    "enum": ["tentative", "working", "contradicted", "superseded"]
+                                },
+                                "horizon": {
+                                    "type": "string",
+                                    "enum": ["momentary", "current", "stable_candidate"]
+                                },
+                                "revisit_after": {
+                                    "type": "string",
+                                    "description": "Optional RFC 3339 time after which this interpretation deserves another look."
+                                },
+                                "source_revision_ids": {
+                                    "type": "array",
+                                    "items": {"type": "string"},
+                                    "minItems": 1,
+                                    "maxItems": 50
+                                }
+                            },
+                            "required": [
+                                "statement", "evidence", "alternatives", "status",
+                                "horizon", "source_revision_ids"
+                            ],
+                            "additionalProperties": false
+                        }
+                    },
+                    {
+                        "type": "function",
+                        "name": "schedule_follow_up",
+                        "description": "Schedule one possible future conversational follow-up from background reflection. Use only when waiting could materially change the value; this creates a candidate, not a guaranteed message.",
+                        "inputSchema": {
+                            "type": "object",
+                            "properties": {
+                                "reason": {
+                                    "type": "string",
+                                    "description": "What should be reconsidered later and why that later moment matters."
+                                },
+                                "not_before": {
+                                    "type": "string",
+                                    "description": "RFC 3339 time between one minute and 30 days from now."
+                                },
+                                "source_revision_ids": {
+                                    "type": "array",
+                                    "items": {"type": "string"},
+                                    "minItems": 1,
+                                    "maxItems": 50
+                                }
+                            },
+                            "required": ["reason", "not_before", "source_revision_ids"],
+                            "additionalProperties": false
+                        }
+                    },
+                    {
+                        "type": "function",
+                        "name": "complete_reflection",
+                        "description": "Complete one background interaction reflection with a concise human-visible summary. Call exactly once even when no state changed.",
+                        "inputSchema": {
+                            "type": "object",
+                            "properties": {
+                                "summary": {
+                                    "type": "string",
+                                    "description": "What changed in symbiont-d's current understanding, or why no change was warranted."
+                                },
+                                "source_revision_ids": {
+                                    "type": "array",
+                                    "items": {"type": "string"},
+                                    "minItems": 1,
+                                    "maxItems": 50
+                                }
+                            },
+                            "required": ["summary", "source_revision_ids"],
                             "additionalProperties": false
                         }
                     },
@@ -783,6 +921,77 @@ impl SymbiontTools {
                     None,
                 ))
             }
+            "upsert_episode" => {
+                require_reflection_origin(run_origin, tool)?;
+                let state = EpisodeState::parse(required_text(arguments, "state")?)
+                    .context("unknown Episode state")?;
+                let source_revision_ids = string_array(arguments, "source_revision_ids")?;
+                self.ensure_reflection_sources(&source_revision_ids).await?;
+                let episode = self
+                    .reflection
+                    .upsert_episode(EpisodeInput {
+                        id: optional_text(arguments, "episode_id").map(str::to_owned),
+                        title: required_text(arguments, "title")?.to_owned(),
+                        summary: required_text(arguments, "summary")?.to_owned(),
+                        state,
+                        source_revision_ids,
+                        parent_episode_ids: string_array(arguments, "parent_episode_ids")?,
+                    })
+                    .await?;
+                Ok((serde_json::to_string(&episode)?, None))
+            }
+            "upsert_interaction_hypothesis" => {
+                require_reflection_origin(run_origin, tool)?;
+                let status = HypothesisStatus::parse(required_text(arguments, "status")?)
+                    .context("unknown interaction hypothesis status")?;
+                let horizon = HypothesisHorizon::parse(required_text(arguments, "horizon")?)
+                    .context("unknown interaction hypothesis horizon")?;
+                let source_revision_ids = string_array(arguments, "source_revision_ids")?;
+                self.ensure_reflection_sources(&source_revision_ids).await?;
+                let hypothesis = self
+                    .reflection
+                    .upsert_hypothesis(HypothesisInput {
+                        id: optional_text(arguments, "hypothesis_id").map(str::to_owned),
+                        statement: required_text(arguments, "statement")?.to_owned(),
+                        evidence: required_text(arguments, "evidence")?.to_owned(),
+                        alternatives: required_text(arguments, "alternatives")?.to_owned(),
+                        status,
+                        horizon,
+                        revisit_after: optional_text(arguments, "revisit_after").map(str::to_owned),
+                        source_revision_ids,
+                    })
+                    .await?;
+                Ok((serde_json::to_string(&hypothesis)?, None))
+            }
+            "schedule_follow_up" => {
+                require_reflection_origin(run_origin, tool)?;
+                let source_revision_ids = string_array(arguments, "source_revision_ids")?;
+                self.ensure_reflection_sources(&source_revision_ids).await?;
+                let follow_up = self
+                    .reflection
+                    .schedule_follow_up(FollowUpInput {
+                        reason: required_text(arguments, "reason")?.to_owned(),
+                        not_before: required_text(arguments, "not_before")?.to_owned(),
+                        source_revision_ids,
+                    })
+                    .await?;
+                Ok((serde_json::to_string(&follow_up)?, None))
+            }
+            "complete_reflection" => {
+                require_reflection_origin(run_origin, tool)?;
+                let summary = required_text(arguments, "summary")?;
+                let sources = string_array(arguments, "source_revision_ids")?;
+                self.ensure_reflection_sources(&sources).await?;
+                self.reflection.ensure_known_revisions(&sources).await?;
+                Ok((
+                    serde_json::to_string(&json!({
+                        "accepted": true,
+                        "summary": summary,
+                        "sourceRevisionIds": sources
+                    }))?,
+                    None,
+                ))
+            }
             "escalate" => {
                 let lane = match arguments.get("lane").and_then(Value::as_str) {
                     Some("investigate") => ComputeLane::Investigate,
@@ -924,6 +1133,47 @@ impl SymbiontTools {
         };
         Ok((serde_json::to_string_pretty(&result)?, None))
     }
+
+    async fn ensure_reflection_sources(&self, revision_ids: &[String]) -> Result<()> {
+        let unknown = self.reflection.unknown_revisions(revision_ids).await?;
+        if unknown.is_empty() {
+            return Ok(());
+        }
+        for chunk in unknown.chunks(20) {
+            let pages = self
+                .continuity
+                .read(ReadPagesRequest {
+                    revision_ids: chunk.to_vec(),
+                    projections: vec![Projection::Facets],
+                    max_chars: 256,
+                })
+                .await
+                .context("verify recalled Reflection source through PCP")?;
+            for page in pages {
+                let facets = page.revision.facets.as_ref();
+                let kind = facets
+                    .and_then(|value| value.get("kind"))
+                    .and_then(Value::as_str);
+                let role = facets
+                    .and_then(|value| value.get("role"))
+                    .and_then(Value::as_str);
+                if kind != Some("conversation_event") || !matches!(role, Some("user" | "assistant"))
+                {
+                    anyhow::bail!(
+                        "Reflection sources must be user or assistant conversation Revisions"
+                    );
+                }
+            }
+        }
+        self.reflection.register_verified_revisions(&unknown).await
+    }
+}
+
+fn require_reflection_origin(run_origin: &str, tool: &str) -> Result<()> {
+    if run_origin != "reflection" {
+        anyhow::bail!("{tool} is available only to the background Reflection pipeline");
+    }
+    Ok(())
 }
 
 fn required_text<'a>(arguments: &'a Value, field: &str) -> Result<&'a str> {

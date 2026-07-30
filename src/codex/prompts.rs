@@ -18,6 +18,11 @@ pub(super) fn context_fragments(
 ) -> Vec<ContextFragment> {
     let mut fragments = vec![
         ContextFragment {
+            source: "symbiont.time".to_owned(),
+            kind: "application".to_owned(),
+            value: temporal_orientation(),
+        },
+        ContextFragment {
             source: "symbiont.compute".to_owned(),
             kind: "application".to_owned(),
             value: compute_context(lane, allow_escalation),
@@ -92,6 +97,33 @@ Use `symbiont.escalate` only when deeper reasoning can materially change the res
 The workspace is read-only. Discussion, research, and PCP memory operations remain available.
 "#
     .to_owned()
+}
+
+pub(super) fn interaction_reflection_prompt(
+    source_bundle: &str,
+    completion_marker: &str,
+) -> String {
+    format!(
+        "Reflect on the bounded interaction evidence below. This is private background \
+         interpretation, not a user response. Do not search the web. Separate observed facts from \
+         inference; timing, length, correction, continuation, and silence are contextual evidence, \
+         never ratings. Keep alternative explanations. Prefer no durable change when evidence is \
+         weak, and never promote temporary behavior directly into the user orientation.\n\n\
+         Maintain the smallest useful set of overlapping conversation Episodes with \
+         `symbiont.upsert_episode`. Use directed parents only when a new Episode continues or \
+         consolidates earlier Episodes; do not force a tree. Maintain only genuinely useful provisional interpretations with \
+         `symbiont.upsert_interaction_hypothesis`; revise existing IDs instead of duplicating them, \
+         and mark contradicted or superseded interpretations explicitly. A stable_candidate is only \
+         a proposal for later critical review.\n\n\
+         Refresh Current Map and Open Loops when the new evidence changes them. A delayed follow-up \
+         may be scheduled only when a distinct future moment could change the value of the \
+         conversation; do not use it as a generic reminder or notification. The later autonomous \
+         publication gate will still decide whether to speak.\n\n\
+         Finish by calling `symbiont.complete_reflection` exactly once with a concise, human-visible \
+         account of what changed or why nothing changed, plus exact source Revisions. Then return \
+         exactly `{completion_marker}`.\n\n\
+         <reflection-source-bundle>\n{source_bundle}\n</reflection-source-bundle>"
+    )
 }
 
 pub(super) fn autonomous_exploration_prompt(silent_marker: &str) -> String {
@@ -216,4 +248,14 @@ fn compute_context(lane: ComputeLane, allow_escalation: bool) -> String {
             lane.as_str()
         )
     }
+}
+
+fn temporal_orientation() -> String {
+    let now = chrono::Local::now();
+    format!(
+        "Current local time: {} ({}). Treat event time, observation time, and validity time as \
+         distinct. Relative timing is evidence only in context; silence has no single meaning.",
+        now.to_rfc3339_opts(chrono::SecondsFormat::Secs, false),
+        now.format("%Z")
+    )
 }

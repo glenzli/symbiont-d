@@ -16,6 +16,7 @@ use crate::{
     exploration::today_started_at,
     memory::{MemoryEntry, MemoryRole},
     profile::{ProfileStore, SetupStatus},
+    reflection::ReflectionStore,
     symbiont_context::{ContextDocument, ContextDocumentKind, SymbiontContextStore},
     usage::UsageStore,
 };
@@ -35,10 +36,11 @@ pub fn start(
     compute: Arc<ComputeStore>,
     continuity: Arc<ContinuityHost>,
     context: Arc<SymbiontContextStore>,
+    reflection: Arc<ReflectionStore>,
     usage: Arc<UsageStore>,
 ) {
     tokio::spawn(run(
-        autonomy, profile, codex, compute, continuity, context, usage,
+        autonomy, profile, codex, compute, continuity, context, reflection, usage,
     ));
 }
 
@@ -49,6 +51,7 @@ async fn run(
     compute: Arc<ComputeStore>,
     continuity: Arc<ContinuityHost>,
     context: Arc<SymbiontContextStore>,
+    reflection: Arc<ReflectionStore>,
     usage: Arc<UsageStore>,
 ) {
     sleep(INITIAL_DELAY).await;
@@ -60,6 +63,7 @@ async fn run(
             &compute,
             &continuity,
             &context,
+            &reflection,
             &usage,
         )
         .await
@@ -88,6 +92,7 @@ async fn maintain_one(
     compute: &ComputeStore,
     continuity: &ContinuityHost,
     context: &SymbiontContextStore,
+    reflection: &ReflectionStore,
     usage: &UsageStore,
 ) -> Result<MaintenanceState> {
     let autonomy = autonomy.snapshot().await;
@@ -127,6 +132,7 @@ async fn maintain_one(
             compute,
             continuity,
             context,
+            reflection,
             usage,
             &profile,
             &source_bundle,
@@ -154,6 +160,7 @@ async fn maintain_one(
         compute,
         continuity,
         context,
+        reflection,
         usage,
         &profile,
         &source_bundle,
@@ -166,6 +173,7 @@ async fn maintain_operational_context(
     compute: &ComputeStore,
     continuity: &ContinuityHost,
     context: &SymbiontContextStore,
+    reflection: &ReflectionStore,
     usage: &UsageStore,
     profile: &crate::profile::ProfileSnapshot,
     source_bundle: &str,
@@ -174,7 +182,7 @@ async fn maintain_operational_context(
         return Ok(MaintenanceState::Busy);
     };
     let compute = compute.snapshot().await;
-    let continuity_context = combined_context(continuity, context).await?;
+    let continuity_context = combined_context(continuity, context, reflection).await?;
     let (events_tx, mut events_rx) = mpsc::channel(64);
     let event_drain = tokio::spawn(async move { while events_rx.recv().await.is_some() {} });
     let outcome = client
@@ -205,6 +213,7 @@ async fn review_profile(
     compute: &ComputeStore,
     continuity: &ContinuityHost,
     context: &SymbiontContextStore,
+    reflection: &ReflectionStore,
     usage: &UsageStore,
     profile: &crate::profile::ProfileSnapshot,
     source_bundle: &str,
@@ -213,7 +222,7 @@ async fn review_profile(
         return Ok(MaintenanceState::Busy);
     };
     let compute = compute.snapshot().await;
-    let continuity_context = combined_context(continuity, context).await?;
+    let continuity_context = combined_context(continuity, context, reflection).await?;
     let (events_tx, mut events_rx) = mpsc::channel(64);
     let event_drain = tokio::spawn(async move { while events_rx.recv().await.is_some() {} });
     let outcome = client
@@ -263,11 +272,13 @@ async fn review_profile(
 async fn combined_context(
     continuity: &ContinuityHost,
     context: &SymbiontContextStore,
+    reflection: &ReflectionStore,
 ) -> Result<String> {
     Ok(format!(
-        "{}\n\n{}",
+        "{}\n\n{}\n\n{}",
         continuity.context_seed(None).await,
-        context.prompt().await?
+        context.prompt().await?,
+        reflection.prompt().await?
     ))
 }
 

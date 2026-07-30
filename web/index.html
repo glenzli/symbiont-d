@@ -139,6 +139,7 @@
       </header>
       <nav class="dialog-tabs" role="tablist" aria-label="设置分类">
         <button type="button" role="tab" data-settings-tab="autonomy" aria-selected="true">自主</button>
+        <button type="button" role="tab" data-settings-tab="reflection" aria-selected="false">思考</button>
         <button type="button" role="tab" data-settings-tab="models" aria-selected="false">模型</button>
         <button type="button" role="tab" data-settings-tab="stats" aria-selected="false">统计</button>
       </nav>
@@ -216,6 +217,79 @@
         </form>
       </section>
 
+      <section class="tab-panel" data-settings-panel="reflection" hidden>
+        <form id="reflection-form">
+          <div class="setting-section">
+            <label class="toggle-row">
+              <span>
+                <strong>后台理解</strong>
+                <small id="reflection-availability">正在读取</small>
+              </span>
+              <input id="reflection-enabled" type="checkbox">
+            </label>
+          </div>
+          <div class="autonomy-runtime">
+            <span>
+              <small>运行状态</small>
+              <strong id="reflection-runtime-state">正在读取</strong>
+            </span>
+            <button id="run-reflection" class="secondary-button" type="button">立即整理</button>
+          </div>
+          <div class="setting-grid">
+            <label class="field">
+              <span>对话沉降</span>
+              <select id="reflection-settle">
+                <option value="5">5 秒</option>
+                <option value="10">10 秒</option>
+                <option value="20">20 秒</option>
+                <option value="30">30 秒</option>
+                <option value="60">1 分钟</option>
+                <option value="180">3 分钟</option>
+                <option value="300">5 分钟</option>
+              </select>
+            </label>
+            <label class="field">
+              <span>行为事实保留</span>
+              <select id="reflection-retention">
+                <option value="7">7 天</option>
+                <option value="30">30 天</option>
+                <option value="90">90 天</option>
+                <option value="365">1 年</option>
+              </select>
+            </label>
+            <label class="field">
+              <span>每日分析上限</span>
+              <span class="number-unit">
+                <input
+                  id="reflection-token-limit"
+                  type="number"
+                  min="0"
+                  max="100"
+                  step="0.1"
+                  inputmode="decimal"
+                >
+                <span>M tokens</span>
+              </span>
+              <small>0 表示不限制</small>
+            </label>
+          </div>
+          <div class="setting-section reflection-toggles">
+            <label class="toggle-row">
+              <span><strong>记录已读时间</strong></span>
+              <input id="reflection-read-state" type="checkbox">
+            </label>
+            <label class="toggle-row">
+              <span><strong>允许延迟跟进</strong></span>
+              <input id="reflection-follow-ups" type="checkbox">
+            </label>
+          </div>
+          <footer class="dialog-actions">
+            <span id="reflection-save-state" role="status"></span>
+            <button class="primary-button" type="submit">保存</button>
+          </footer>
+        </form>
+      </section>
+
       <section class="tab-panel" data-settings-panel="models" hidden>
         <form id="compute-form">
           <label class="field routing-field">
@@ -275,6 +349,7 @@
       <nav class="dialog-tabs" role="tablist" aria-label="档案分类">
         <button type="button" role="tab" data-archive-tab="orientation" aria-selected="true">画像</button>
         <button type="button" role="tab" data-archive-tab="context" aria-selected="false">脉络</button>
+        <button type="button" role="tab" data-archive-tab="reflection" aria-selected="false">思考</button>
         <button type="button" role="tab" data-archive-tab="curiosity" aria-selected="false">好奇</button>
         <button type="button" role="tab" data-archive-tab="pages" aria-selected="false">Pages</button>
         <button type="button" role="tab" data-archive-tab="memory" aria-selected="false">记录</button>
@@ -332,6 +407,9 @@
           </header>
           <div id="profile-review-content" class="pcp-rich-content"></div>
         </section>
+      </section>
+      <section class="tab-panel archive-panel reflection-panel" data-archive-panel="reflection" hidden>
+        <div id="reflection-archive" class="reflection-archive" aria-live="polite"></div>
       </section>
       <section class="tab-panel archive-panel" data-archive-panel="curiosity" hidden>
         <div id="archive-curiosity" class="archive-curiosity"></div>
