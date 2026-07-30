@@ -17,7 +17,8 @@ user's attention into a feed.
 - Direct connection to `codex app-server`; no separate model API pipeline.
 - Live model catalog and configurable compute lanes.
 - Markdown, sanitized inline HTML, KaTeX, code blocks, tables, and images.
-- Local Paged Context Protocol store with immutable revisions and provenance.
+- Local [Paged Context Protocol](https://glenzli.com/projects/paged-context-protocol/)
+  store with immutable revisions and provenance.
 - Optional model-written Summary entries for routing to longer Detail.
 - Current Map, Open Loops, and a cautious long-term profile review.
 - Model-owned Hunches collected in a visible Curiosity Map.
