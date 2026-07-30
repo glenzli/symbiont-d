@@ -5,7 +5,21 @@ export function formatMemorySize(chars) {
 
 export function formatTokens(tokens) {
   if (tokens < 1000) return `${tokens} tok`;
-  return `${(tokens / 1000).toFixed(tokens < 10000 ? 1 : 0)}k tok`;
+  if (tokens < 1_000_000) {
+    return `${(tokens / 1000).toFixed(tokens < 10000 ? 1 : 0)}k tok`;
+  }
+  return `${(tokens / 1_000_000).toFixed(tokens < 10_000_000 ? 1 : 0)}M tok`;
+}
+
+export function tokensToMillions(tokens) {
+  const millions = Number(tokens || 0) / 1_000_000;
+  return String(Number(millions.toFixed(6)));
+}
+
+export function millionsToTokens(millions) {
+  const value = Number(millions);
+  if (!Number.isFinite(value) || value <= 0) return 0;
+  return Math.round(value * 1_000_000);
 }
 
 export function formatDuration(milliseconds) {

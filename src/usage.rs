@@ -6,6 +6,16 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use tokio::task;
 
+use crate::diagnostics::{ContextSnapshot, ExecutionTraceEvent, bounded_trace_value};
+
+#[path = "usage/exploration.rs"]
+mod exploration;
+#[path = "usage/trace.rs"]
+mod trace;
+
+pub use exploration::ExplorationRunSummary;
+pub use trace::TraceBundle;
+
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ToolTraceStep {
@@ -47,6 +57,10 @@ pub struct InvocationRecord {
     pub produced_message: bool,
     #[serde(skip)]
     pub trace_steps: Vec<ToolTraceStep>,
+    #[serde(skip)]
+    pub context_snapshot: Option<ContextSnapshot>,
+    #[serde(skip)]
+    pub trace_events: Vec<ExecutionTraceEvent>,
 }
 
 #[derive(Debug, Serialize)]
@@ -86,30 +100,6 @@ pub struct UsageHeadline {
     pub total_tokens: u64,
     pub autonomous_tokens_today: u64,
     pub autonomous_messages_today: u64,
-}
-
-#[derive(Debug, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct TraceBundle {
-    pub trace_id: String,
-    pub runs: Vec<TraceRun>,
-    pub pcp_tool_calls: u64,
-}
-
-#[derive(Debug, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct TraceRun {
-    pub invocation_id: String,
-    pub parent_id: Option<String>,
-    pub origin: String,
-    pub lane: String,
-    pub model: String,
-    pub display_name: String,
-    pub effort: String,
-    pub started_at: String,
-    pub duration_ms: u64,
-    pub total_tokens: u64,
-    pub steps: Vec<ToolTraceStep>,
 }
 
 pub struct UsageStore {
@@ -173,6 +163,18 @@ impl UsageStore {
                 );
                 CREATE INDEX IF NOT EXISTS invocation_tool_trace_invocation
                     ON invocation_tool_trace(invocation_id, sequence);
+                CREATE TABLE IF NOT EXISTS invocation_context (
+                    invocation_id TEXT PRIMARY KEY,
+                    snapshot_json TEXT NOT NULL
+                );
+                CREATE TABLE IF NOT EXISTS invocation_trace_event (
+                    invocation_id TEXT NOT NULL,
+                    sequence INTEGER NOT NULL,
+                    event_json TEXT NOT NULL,
+                    PRIMARY KEY (invocation_id, sequence)
+                );
+                CREATE INDEX IF NOT EXISTS invocation_trace_event_invocation
+                    ON invocation_trace_event(invocation_id, sequence);
                 ",
                 )
                 .context("initialize usage database")?;
@@ -264,15 +266,60 @@ impl UsageStore {
                                 &step.completed_at,
                                 step.duration_ms as i64,
                                 if step.succeeded { 1_i64 } else { 0_i64 },
-                                serde_json::to_string(&step.arguments)
+                                serde_json::to_string(&bounded_trace_value(step.arguments.clone()))
                                     .context("encode tool trace arguments")?,
-                                serde_json::to_string(&step.result)
+                                serde_json::to_string(&bounded_trace_value(step.result.clone()))
                                     .context("encode tool trace result")?,
                             ],
                         )
                         .context("record invocation tool trace")?;
                 }
+                transaction
+                    .execute(
+                        "DELETE FROM invocation_context WHERE invocation_id = ?1",
+                        params![&record.id],
+                    )
+                    .context("replace invocation context")?;
+                if let Some(snapshot) = &record.context_snapshot {
+                    transaction
+                        .execute(
+                            "
+                            INSERT INTO invocation_context (invocation_id, snapshot_json)
+                            VALUES (?1, ?2)
+                            ",
+                            params![
+                                &record.id,
+                                serde_json::to_string(snapshot)
+                                    .context("encode invocation context")?
+                            ],
+                        )
+                        .context("record invocation context")?;
+                }
+                transaction
+                    .execute(
+                        "DELETE FROM invocation_trace_event WHERE invocation_id = ?1",
+                        params![&record.id],
+                    )
+                    .context("replace invocation trace events")?;
+                for event in &record.trace_events {
+                    transaction
+                        .execute(
+                            "
+                            INSERT INTO invocation_trace_event (
+                                invocation_id, sequence, event_json
+                            ) VALUES (?1, ?2, ?3)
+                            ",
+                            params![
+                                &record.id,
+                                event.sequence as i64,
+                                serde_json::to_string(event)
+                                    .context("encode invocation trace event")?
+                            ],
+                        )
+                        .context("record invocation trace event")?;
+                }
             }
+            trace::prune(&transaction)?;
             transaction.commit().context("commit usage transaction")
         })
         .await
@@ -382,13 +429,14 @@ impl UsageStore {
                         COALESCE(SUM(total_tokens), 0),
                         COALESCE(SUM(
                             CASE
-                                WHEN origin = 'autonomous' AND completed_at >= ?1
+                                WHEN origin IN ('autonomous', 'maintenance')
+                                     AND completed_at >= ?1
                                 THEN total_tokens ELSE 0
                             END
                         ), 0),
                         COALESCE(SUM(
                             CASE
-                                WHEN origin = 'autonomous'
+                                WHEN origin IN ('autonomous', 'maintenance')
                                      AND completed_at >= ?1
                                      AND produced_message = 1
                                 THEN 1 ELSE 0
@@ -435,73 +483,21 @@ impl UsageStore {
         task::spawn_blocking(move || -> Result<Option<TraceBundle>> {
             let connection = Connection::open(&path)
                 .with_context(|| format!("open usage database {}", path.display()))?;
-            let mut statement = connection
-                .prepare(
-                    "
-                    SELECT id, parent_id, thread_id, turn_id, origin, lane,
-                           requested_model, effective_model, model_display_name,
-                           effort, service_tier, started_at, completed_at,
-                           duration_ms, status, input_tokens, cached_input_tokens,
-                           output_tokens, reasoning_output_tokens, total_tokens,
-                           tool_calls_json, produced_message
-                    FROM invocations
-                    WHERE id = ?1 OR parent_id = ?1
-                    ORDER BY started_at ASC
-                    ",
-                )
-                .context("prepare invocation trace query")?;
-            let invocations = statement
-                .query_map(params![&trace_id], invocation_from_row)
-                .context("query invocation trace")?
-                .collect::<rusqlite::Result<Vec<_>>>()
-                .context("collect invocation trace")?;
-            if invocations.is_empty() {
-                return Ok(None);
-            }
-
-            let mut runs = Vec::with_capacity(invocations.len());
-            let mut pcp_tool_calls = 0_u64;
-            for invocation in invocations {
-                let mut step_statement = connection
-                    .prepare(
-                        "
-                        SELECT sequence, namespace, tool, started_at, completed_at,
-                               duration_ms, succeeded, arguments_json, result_json
-                        FROM invocation_tool_trace
-                        WHERE invocation_id = ?1
-                        ORDER BY sequence ASC
-                        ",
-                    )
-                    .context("prepare tool trace query")?;
-                let steps = step_statement
-                    .query_map(params![&invocation.id], tool_trace_from_row)
-                    .context("query tool trace")?
-                    .collect::<rusqlite::Result<Vec<_>>>()
-                    .context("collect tool trace")?;
-                pcp_tool_calls +=
-                    steps.iter().filter(|step| step.namespace == "pcp").count() as u64;
-                runs.push(TraceRun {
-                    invocation_id: invocation.id,
-                    parent_id: invocation.parent_id,
-                    origin: invocation.origin,
-                    lane: invocation.lane,
-                    model: invocation.effective_model,
-                    display_name: invocation.model_display_name,
-                    effort: invocation.effort,
-                    started_at: invocation.started_at,
-                    duration_ms: invocation.duration_ms,
-                    total_tokens: invocation.total_tokens,
-                    steps,
-                });
-            }
-            Ok(Some(TraceBundle {
-                trace_id,
-                runs,
-                pcp_tool_calls,
-            }))
+            trace::read(&connection, &trace_id)
         })
         .await
         .context("join invocation trace read")?
+    }
+
+    pub async fn recent_explorations(&self, limit: usize) -> Result<Vec<ExplorationRunSummary>> {
+        let path = self.path.clone();
+        task::spawn_blocking(move || -> Result<Vec<ExplorationRunSummary>> {
+            let connection = Connection::open(&path)
+                .with_context(|| format!("open usage database {}", path.display()))?;
+            exploration::read_recent(&connection, limit.clamp(1, 20))
+        })
+        .await
+        .context("join recent exploration read")?
     }
 }
 
@@ -531,22 +527,8 @@ fn invocation_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<InvocationRe
         tool_calls: serde_json::from_str(&tool_calls_json).unwrap_or_default(),
         produced_message: row.get::<_, i64>(21)? != 0,
         trace_steps: Vec::new(),
-    })
-}
-
-fn tool_trace_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<ToolTraceStep> {
-    let arguments_json: String = row.get(7)?;
-    let result_json: String = row.get(8)?;
-    Ok(ToolTraceStep {
-        sequence: row.get::<_, i64>(0)? as u32,
-        namespace: row.get(1)?,
-        tool: row.get(2)?,
-        started_at: row.get(3)?,
-        completed_at: row.get(4)?,
-        duration_ms: row.get::<_, i64>(5)? as u64,
-        succeeded: row.get::<_, i64>(6)? != 0,
-        arguments: serde_json::from_str(&arguments_json).unwrap_or(Value::Null),
-        result: serde_json::from_str(&result_json).unwrap_or(Value::Null),
+        context_snapshot: None,
+        trace_events: Vec::new(),
     })
 }
 

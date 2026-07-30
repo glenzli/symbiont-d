@@ -1,7 +1,9 @@
 import {
   formatDuration,
   formatTokens,
+  millionsToTokens,
   responseJson,
+  tokensToMillions,
 } from "/presentation.js";
 
 export function initSettings(state) {
@@ -73,17 +75,22 @@ export function initSettings(state) {
     }
   }
 
-  function renderAutonomy() {
+  function renderAutonomyConfig() {
     if (!state.autonomy) return;
     autonomyEnabled.checked = state.autonomy.enabled;
     autonomyInterval.value = String(state.autonomy.intervalMinutes);
     dailyInterruptLimit.value = String(state.autonomy.dailyInterruptLimit);
-    dailyTokenLimit.value = String(state.autonomy.dailyTokenLimit || 0);
+    dailyTokenLimit.value = tokensToMillions(
+      state.autonomy.dailyTokenLimit || 0,
+    );
     quietHoursEnabled.checked = state.autonomy.quietHours.enabled;
     quietHoursStart.value = state.autonomy.quietHours.start;
     quietHoursEnd.value = state.autonomy.quietHours.end;
     toggleQuietInputs();
+  }
 
+  function renderAutonomyRuntime() {
+    if (!state.autonomy) return;
     if (state.profile.status !== "ready") {
       autonomyAvailability.textContent = "初始化完成后生效";
     } else if (state.autonomyPermitted) {
@@ -98,6 +105,11 @@ export function initSettings(state) {
     );
     runExploration.disabled =
       !state.autonomyPermitted || state.exploration?.phase === "exploring";
+  }
+
+  function renderAutonomy() {
+    renderAutonomyConfig();
+    renderAutonomyRuntime();
   }
 
   function toggleQuietInputs() {
@@ -145,7 +157,7 @@ export function initSettings(state) {
       enabled: autonomyEnabled.checked,
       intervalMinutes: Number(autonomyInterval.value),
       dailyInterruptLimit: Number(dailyInterruptLimit.value),
-      dailyTokenLimit: Number(dailyTokenLimit.value),
+      dailyTokenLimit: millionsToTokens(dailyTokenLimit.value),
       quietHours: {
         enabled: quietHoursEnabled.checked,
         start: quietHoursStart.value,
@@ -238,17 +250,12 @@ export function initSettings(state) {
     if (!usage.recent.length) recentList.textContent = "还没有调用记录";
     for (const invocation of usage.recent.slice(0, 12)) {
       const origin = invocation.origin === "autonomous" ? "主动" : "对话";
-      const traceId = invocation.toolCalls?.some((tool) =>
-        tool.startsWith("pcp."),
-      )
-        ? invocation.id
-        : null;
       recentList.append(
         usageRow(
           `${invocation.modelDisplayName} · ${invocation.effort}`,
           `${origin} · ${invocation.lane} · ${formatTokens(invocation.totalTokens)} · ${formatDuration(invocation.durationMs)}`,
           "recent-row",
-          traceId,
+          invocation.id,
         ),
       );
     }
@@ -280,7 +287,7 @@ export function initSettings(state) {
     } catch (error) {
       autonomyRuntimeState.textContent = error.message;
     } finally {
-      window.setTimeout(renderAutonomy, 1500);
+      window.setTimeout(renderAutonomyRuntime, 1500);
     }
   }
 
@@ -318,6 +325,7 @@ export function initSettings(state) {
       renderAutonomy();
     },
     renderAutonomy,
+    renderAutonomyRuntime,
     open: openSettings,
   };
 }
@@ -376,8 +384,8 @@ function usageRow(primaryText, secondaryText, className, traceId = null) {
     const trace = document.createElement("button");
     trace.type = "button";
     trace.className = "trace-button";
-    trace.title = "查看 PCP 调用链";
-    trace.setAttribute("aria-label", "查看 PCP 调用链");
+    trace.title = "查看执行轨迹";
+    trace.setAttribute("aria-label", "查看执行轨迹");
     trace.dataset.traceId = traceId;
     trace.textContent = "⎇";
     tail.append(trace);

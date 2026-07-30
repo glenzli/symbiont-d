@@ -46,12 +46,14 @@ impl SqlitePcpStore {
             search_modes: vec![
                 SearchMode::Auto,
                 SearchMode::Exact,
+                SearchMode::Summary,
                 SearchMode::Text,
                 SearchMode::Graph,
                 SearchMode::Temporal,
             ],
             projections: vec![
                 Projection::Manifest,
+                Projection::Summary,
                 Projection::Payload,
                 Projection::Sources,
                 Projection::Provenance,
@@ -69,6 +71,7 @@ impl SqlitePcpStore {
             relation_types: vec![
                 "contains",
                 "derived_from",
+                "summarizes",
                 "follows",
                 "responds_to",
                 "has_attachment",

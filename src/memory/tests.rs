@@ -3,7 +3,25 @@ use std::{
     time::{SystemTime, UNIX_EPOCH},
 };
 
-use super::{ENTRY_END, ENTRY_HEADER_END, ENTRY_PREFIX, EntryHeader, MemoryRole, MemoryStore};
+use super::{
+    ENTRY_END, ENTRY_HEADER_END, ENTRY_PREFIX, EntryHeader, MemoryEntry, MemoryRole, MemoryStore,
+};
+
+#[test]
+fn serializes_message_identity_for_the_browser_contract() {
+    let value = serde_json::to_value(MemoryEntry {
+        role: MemoryRole::Assistant,
+        at: "2026-07-29T10:00:01Z".to_owned(),
+        content: "A message".to_owned(),
+        revision_id: Some("rev_message".to_owned()),
+        parts: Vec::new(),
+        metadata: None,
+    })
+    .expect("serialize message");
+
+    assert_eq!(value["revisionId"], "rev_message");
+    assert!(value.get("revision_id").is_none());
+}
 
 #[tokio::test]
 async fn imports_legacy_human_readable_entries() {

@@ -4,12 +4,19 @@ use std::{
 };
 
 use super::{
-    client::{ChatInput, extract_final_agent_message, multimodal_input_items},
+    client::{
+        ChatInput, autonomous_response_is_silent, extract_completed_response_text,
+        extract_final_agent_message, multimodal_input_items,
+    },
+    prompts::{autonomous_exploration_prompt, developer_instructions, summary_maintenance_prompt},
     tools::SymbiontTools,
+    trace::observable_item_event,
 };
 use crate::{
     continuity::ContinuityHost,
+    curiosity::CuriosityStore,
     profile::{CalibrationMode, ProfileStore, SetupStatus},
+    symbiont_context::SymbiontContextStore,
 };
 use pcp_sqlite::SqlitePcpStore;
 use serde_json::json;
@@ -20,12 +27,53 @@ fn dynamic_tools_expose_host_and_pcp_namespaces() {
     assert_eq!(specs[0]["type"], "namespace");
     assert_eq!(specs[0]["name"], "symbiont");
     assert_eq!(specs[0]["tools"][0]["name"], "complete_orientation");
-    assert_eq!(specs[0]["tools"][1]["name"], "escalate");
+    assert!(
+        specs[0]["tools"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|tool| tool["name"] == "update_current_map")
+    );
+    assert!(
+        specs[0]["tools"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|tool| tool["name"] == "open_hunch")
+    );
+    assert!(
+        specs[0]["tools"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|tool| tool["name"] == "escalate")
+    );
     assert_eq!(specs[1]["name"], "pcp");
     assert_eq!(specs[1]["tools"][0]["name"], "describe");
     assert_eq!(specs[1]["tools"][2]["name"], "search_pages");
     assert_eq!(specs[1]["tools"][3]["name"], "read_pages");
-    assert_eq!(specs[1]["tools"][4]["name"], "write_page");
+    assert_eq!(specs[1]["tools"][4]["name"], "write_summary");
+    assert_eq!(specs[1]["tools"][5]["name"], "write_page");
+}
+
+#[test]
+fn summary_maintenance_keeps_the_model_on_one_exact_revision() {
+    let prompt = summary_maintenance_prompt("rev_target", "<done/>");
+    assert!(prompt.contains("exactly `rev_target`"));
+    assert!(prompt.contains("Read that Revision's payload"));
+    assert!(prompt.contains("do not write one"));
+    assert!(prompt.contains("return exactly `<done/>`"));
+}
+
+#[test]
+fn persistent_instructions_define_a_short_unambiguous_pcp_boundary() {
+    let instructions = developer_instructions();
+    assert!(instructions.contains("PCP is the user-owned long-term archive"));
+    assert!(instructions.contains("before asking the user to repeat known history"));
+    assert!(instructions.contains("Do not repeat an identical PCP search or read"));
+    assert!(instructions.contains("PCP memory operations remain available"));
+    assert!(!instructions.contains("do not modify files or attempt side effects"));
+    assert!(instructions.chars().count() < 3_500);
 }
 
 #[test]
@@ -43,6 +91,25 @@ fn extracts_the_last_agent_message_from_a_completed_turn() {
         extract_final_agent_message(&params).as_deref(),
         Some("finished")
     );
+    assert_eq!(
+        extract_completed_response_text(&params, "I am checking first. "),
+        "finished"
+    );
+}
+
+#[test]
+fn autonomous_exploration_is_silent_or_starts_one_conversation() {
+    assert!(autonomous_response_is_silent("  <symbiont-silent/>\n"));
+    assert!(!autonomous_response_is_silent(
+        "This is worth discussing: <symbiont-silent/>"
+    ));
+
+    let prompt = autonomous_exploration_prompt("<symbiont-silent/>");
+    assert!(prompt.contains("Search results are raw material"));
+    assert!(prompt.contains("one conversational move"));
+    assert!(prompt.contains("Never send a roundup"));
+    assert!(prompt.contains("begin directly with the thought"));
+    assert!(prompt.contains("No preamble or process narration"));
 }
 
 #[test]
@@ -50,6 +117,8 @@ fn codex_input_preserves_text_and_local_images() {
     let input = multimodal_input_items(&ChatInput {
         text: "What is shown here?".to_owned(),
         local_images: vec!["/tmp/example.png".into()],
+        current_revision_id: "rev_current".to_owned(),
+        reply_to_revision_id: None,
     });
     assert_eq!(
         input[0],
@@ -63,6 +132,22 @@ fn codex_input_preserves_text_and_local_images() {
             "detail": "auto"
         })
     );
+}
+
+#[test]
+fn trace_uses_reasoning_summaries_without_raw_reasoning_content() {
+    let (_, _, details) = observable_item_event(&json!({
+        "type": "reasoning",
+        "summary": ["Checked the current context before searching memory."],
+        "content": ["private raw reasoning"]
+    }))
+    .unwrap();
+
+    assert_eq!(
+        details["summary"][0],
+        "Checked the current context before searching memory."
+    );
+    assert!(details.get("content").is_none());
 }
 
 #[tokio::test]
@@ -87,7 +172,9 @@ async fn orientation_tool_requires_active_calibration() {
             .await
             .expect("open profile"),
     );
-    let tools = SymbiontTools::new(continuity, Arc::clone(&profile));
+    let context = Arc::new(SymbiontContextStore::new(Arc::clone(&continuity)));
+    let curiosity = Arc::new(CuriosityStore::new(Arc::clone(&continuity)));
+    let tools = SymbiontTools::new(continuity, Arc::clone(&profile), context, curiosity);
     let call = json!({
         "namespace": "symbiont",
         "tool": "complete_orientation",
@@ -132,7 +219,9 @@ async fn pcp_tools_write_search_and_read_through_the_dynamic_bridge() {
             .await
             .expect("open profile"),
     );
-    let tools = SymbiontTools::new(continuity, profile);
+    let context = Arc::new(SymbiontContextStore::new(Arc::clone(&continuity)));
+    let curiosity = Arc::new(CuriosityStore::new(Arc::clone(&continuity)));
+    let tools = SymbiontTools::new(continuity, profile, context, curiosity);
 
     let written = tools
         .execute(&json!({
@@ -170,6 +259,18 @@ async fn pcp_tools_write_search_and_read_through_the_dynamic_bridge() {
     let derived_revision_id = derived_json["revisionId"]
         .as_str()
         .expect("derived revision id");
+    let summarized = tools
+        .execute(&json!({
+            "namespace": "pcp",
+            "tool": "write_summary",
+            "arguments": {
+                "target_revision_id": revision_id,
+                "content": "A semantic observatory instrument used to test Summary routing.",
+                "idempotency_key": "bridge-summary-test"
+            }
+        }))
+        .await;
+    assert_eq!(summarized.response["success"], true);
 
     let searched = tools
         .execute(&json!({
@@ -185,13 +286,31 @@ async fn pcp_tools_write_search_and_read_through_the_dynamic_bridge() {
     let searched_json = tool_content_json(&searched.response);
     assert_eq!(searched_json["hits"][0]["revisionId"], revision_id);
 
+    let summary_search = tools
+        .execute(&json!({
+            "namespace": "pcp",
+            "tool": "search_pages",
+            "arguments": {
+                "query": "semantic observatory",
+                "mode": "summary"
+            }
+        }))
+        .await;
+    assert_eq!(summary_search.response["success"], true);
+    let summary_search_json = tool_content_json(&summary_search.response);
+    assert_eq!(summary_search_json["hits"][0]["revisionId"], revision_id);
+    assert_eq!(
+        summary_search_json["hits"][0]["matchedProjection"],
+        "summary"
+    );
+
     let read = tools
         .execute(&json!({
             "namespace": "pcp",
             "tool": "read_pages",
             "arguments": {
                 "revision_ids": [revision_id],
-                "projections": ["payload", "facets"]
+                "projections": ["summary", "payload", "facets"]
             }
         }))
         .await;
@@ -200,6 +319,12 @@ async fn pcp_tools_write_search_and_read_through_the_dynamic_bridge() {
     assert_eq!(
         read_json["pages"][0]["revision"]["payload"]["content"],
         "The PCP bridge remembers a brass telescope."
+    );
+    assert!(
+        read_json["pages"][0]["summary"]["content"]
+            .as_str()
+            .expect("summary content")
+            .contains("semantic observatory")
     );
     assert!(
         read_json["pages"][0]["revision"]
@@ -270,6 +395,84 @@ async fn pcp_tools_write_search_and_read_through_the_dynamic_bridge() {
     assert_eq!(graph.response["success"], true);
     let graph_json = tool_content_json(&graph.response);
     assert_eq!(graph_json["hits"][0]["revisionId"], derived_revision_id);
+
+    let _ = tokio::fs::remove_dir_all(root).await;
+}
+
+#[tokio::test]
+async fn hunch_tools_preserve_model_owned_state_and_record_autonomous_exploration() {
+    let nonce = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .expect("clock")
+        .as_nanos();
+    let root = std::env::temp_dir().join(format!("symbiont-hunch-tools-{nonce}"));
+    let store = Arc::new(
+        SqlitePcpStore::open(root.join("context.sqlite3"))
+            .await
+            .expect("open PCP store"),
+    );
+    let continuity = Arc::new(
+        ContinuityHost::open(store)
+            .await
+            .expect("open continuity host"),
+    );
+    let source = continuity
+        .ingest_message(
+            crate::memory::MemoryRole::User,
+            "Could this conversation become an exploration trigger?",
+            Vec::new(),
+            None,
+            crate::continuity::MessageLinks::default(),
+        )
+        .await
+        .expect("store source");
+    let profile = Arc::new(
+        ProfileStore::open(root.join("profile.toml"), root.join("orientation.md"))
+            .await
+            .expect("open profile"),
+    );
+    let context = Arc::new(SymbiontContextStore::new(Arc::clone(&continuity)));
+    let curiosity = Arc::new(CuriosityStore::new(Arc::clone(&continuity)));
+    let tools = SymbiontTools::new(continuity, profile, context, Arc::clone(&curiosity));
+
+    let opened = tools
+        .execute(&json!({
+            "namespace": "symbiont",
+            "tool": "open_hunch",
+            "arguments": {
+                "question": "Does conversation-triggered exploration diversify the search?",
+                "origin": "symbiont",
+                "why_alive": "Scheduled runs have repeated nearby themes.",
+                "what_would_change_it": "Several event-driven runs produce distinct evidence.",
+                "source_revision_ids": [source.page.revision_id]
+            }
+        }))
+        .await;
+    assert_eq!(opened.response["success"], true);
+    let opened_json = tool_content_json(&opened.response);
+    let page_id = opened_json["pageId"].as_str().expect("Hunch Page");
+    let revision_id = opened_json["revisionId"].as_str().expect("Hunch Revision");
+
+    let revised = tools
+        .execute_for_model(
+            &json!({
+                "namespace": "symbiont",
+                "tool": "revise_hunch",
+                "arguments": {
+                    "page_id": page_id,
+                    "expected_revision_id": revision_id,
+                    "state": "watching"
+                }
+            }),
+            Some("test-model"),
+            "autonomous",
+        )
+        .await;
+    assert_eq!(revised.response["success"], true);
+    let snapshot = curiosity.snapshot().await.expect("read curiosity");
+    assert_eq!(snapshot.active_count, 1);
+    assert_eq!(snapshot.hunches[0].origin.as_str(), "symbiont");
+    assert!(snapshot.hunches[0].last_explored_at.is_some());
 
     let _ = tokio::fs::remove_dir_all(root).await;
 }

@@ -1,6 +1,8 @@
 import { initProfileUi } from "/profile-ui.js";
 import { formatDuration, formatMemorySize, formatTokens } from "/presentation.js";
 import { renderMessageContent, renderRichText } from "/rich-text.js";
+import { initExplorationUi } from "/exploration-ui.js";
+import { initMessageSync } from "/message-sync.js";
 import { initSettings } from "/settings.js";
 import { initTraceUi } from "/trace-ui.js";
 
@@ -32,14 +34,20 @@ let busy = false;
 let activityStartedAt = 0;
 let activityTimer = null;
 let selectedImages = [];
-let runtimeTimer = null;
 
 const MAX_IMAGES = 4;
 const MAX_IMAGE_BYTES = 15 * 1024 * 1024;
 
 const settingsUi = initSettings(appState);
+const explorationUi = initExplorationUi(appState);
 const profileUi = initProfileUi(appState, sendMessage);
 initTraceUi();
+const messageSync = initMessageSync({
+  conversation,
+  appendMessage,
+  applyRuntime,
+  shouldDeferMessages: () => busy,
+});
 
 function metadataText(metadata) {
   if (!metadata?.runs?.length || appState.compute?.showModel === false) return "";
@@ -60,7 +68,7 @@ function renderMessageFoot(message, metadata) {
   const runtime = foot.querySelector(".message-runtime");
   const traceButton = foot.querySelector(".trace-button");
   runtime.textContent = metadataText(metadata);
-  traceButton.hidden = !metadata?.traceId || !metadata?.pcpToolCalls;
+  traceButton.hidden = !metadata?.traceId;
   traceButton.dataset.traceId = metadata?.traceId || "";
   foot.hidden = !runtime.textContent && traceButton.hidden;
 }
@@ -87,8 +95,12 @@ function appendMessage(entry, options = {}) {
   renderMessageContent(body, entry);
   renderMessageFoot(article, entry.metadata);
   conversation.append(fragment);
-  conversation.scrollTop = conversation.scrollHeight;
-  return conversation.lastElementChild;
+  const element = conversation.lastElementChild;
+  messageSync.track(element, entry, options);
+  if (options.scroll !== false) {
+    conversation.scrollTop = conversation.scrollHeight;
+  }
+  return element;
 }
 
 function resizeComposer() {
@@ -137,6 +149,7 @@ function applyComplete(message, entry) {
   if (entry.revisionId) message.dataset.revisionId = entry.revisionId;
   renderMessageContent(message.querySelector(".message-body"), entry);
   renderMessageFoot(message, entry.metadata);
+  messageSync.track(message, entry, { interactive: true });
 }
 
 function renderUsage() {
@@ -184,25 +197,8 @@ function applyRuntime(payload) {
   appState.exploration = payload.exploration || appState.exploration;
   renderUsage();
   renderRuntimeStatus();
-  settingsUi.renderAutonomy();
-
-  const message = appState.exploration?.latestMessage;
-  const alreadyShown =
-    !message?.revisionId ||
-    [...document.querySelectorAll(".message")].some(
-      (entry) => entry.dataset.revisionId === message.revisionId,
-    );
-  if (message && !alreadyShown) appendMessage(message);
-}
-
-async function refreshRuntime() {
-  try {
-    const response = await fetch("/api/runtime", { cache: "no-store" });
-    if (!response.ok) return;
-    applyRuntime(await response.json());
-  } catch {
-    // The next poll will recover after a daemon restart or brief disconnect.
-  }
+  settingsUi.renderAutonomyRuntime();
+  explorationUi.runtimeUpdated();
 }
 
 async function bootstrap() {
@@ -212,13 +208,13 @@ async function bootstrap() {
     const state = await response.json();
     Object.assign(appState, state);
     state.messages.forEach((message) => appendMessage(message));
+    messageSync.completeBootstrap(state.messages);
     memorySize.textContent = formatMemorySize(state.memoryChars);
     renderUsage();
     renderRuntimeStatus();
     settingsUi.render();
     profileUi.render();
-    clearInterval(runtimeTimer);
-    runtimeTimer = setInterval(refreshRuntime, 3000);
+    messageSync.start();
   } catch (error) {
     connectionStatus.textContent = "连接失败";
     appendMessage(

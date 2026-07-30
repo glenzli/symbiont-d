@@ -117,6 +117,22 @@ pub struct ReadPagesRequest {
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
+pub struct WriteSummaryRequest {
+    pub target_revision_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub expected_summary_revision_id: Option<String>,
+    pub content: String,
+    pub created_by: Actor,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tool_or_model: Option<String>,
+    #[serde(default)]
+    pub provenance: Vec<ProvenanceEvent>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub idempotency_key: Option<String>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct LinkPagesRequest {
     pub from_revision_id: String,
     pub relation_type: String,

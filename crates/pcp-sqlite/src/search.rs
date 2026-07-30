@@ -3,6 +3,7 @@ use pcp_core::{
     LifecycleStatus, Projection, SearchHit, SearchMode, SearchPagesRequest, SearchResult,
 };
 use rusqlite::{Connection, params_from_iter, types::Value as SqlValue};
+use serde_json::{Map, Value};
 
 use crate::{
     row::{REVISION_COLUMNS, revision_from_row},
@@ -60,10 +61,17 @@ fn search_once(
     if mode == SearchMode::Graph {
         return search_graph(connection, request, offset, limit);
     }
+    if mode == SearchMode::Summary {
+        return search_summaries(connection, request, offset, limit);
+    }
     let mut values = Vec::<SqlValue>::new();
     let mut sql = format!(
         "SELECT {REVISION_COLUMNS},
-                substr(COALESCE(r.payload_content, r.facets_json, ''), 1, 600)
+                substr(COALESCE(r.payload_content, r.facets_json, ''), 1, 600),
+                EXISTS (
+                    SELECT 1 FROM pcp_summary_heads summary_head
+                    WHERE summary_head.target_revision_id = r.revision_id
+                )
          FROM pcp_pages p
          JOIN pcp_revisions r ON r.revision_id = p.current_revision_id"
     );
@@ -110,15 +118,88 @@ fn search_once(
                 values.push(SqlValue::Text(request.query.trim().to_owned()));
             }
         }
-        SearchMode::Auto | SearchMode::Graph => unreachable!(),
+        SearchMode::Auto | SearchMode::Summary | SearchMode::Graph => unreachable!(),
     }
-    sql.push_str(
-        " ORDER BY COALESCE(r.observed_at, r.created_at) DESC, r.revision_id DESC
-          LIMIT ? OFFSET ?",
-    );
+    if mode == SearchMode::Text {
+        sql.push_str(
+            " ORDER BY bm25(pcp_revision_fts) ASC,
+                       COALESCE(r.observed_at, r.created_at) DESC,
+                       r.revision_id DESC
+              LIMIT ? OFFSET ?",
+        );
+    } else {
+        sql.push_str(
+            " ORDER BY COALESCE(r.observed_at, r.created_at) DESC, r.revision_id DESC
+              LIMIT ? OFFSET ?",
+        );
+    }
     values.push(SqlValue::Integer((limit + 1) as i64));
     values.push(SqlValue::Integer(offset as i64));
-    collect_hits(connection, &sql, values, mode.as_str(), offset, limit)
+    collect_hits(
+        connection,
+        &sql,
+        values,
+        mode.as_str(),
+        if mode == SearchMode::Text {
+            "payload"
+        } else {
+            "payload_or_facets"
+        },
+        offset,
+        limit,
+    )
+}
+
+fn search_summaries(
+    connection: &Connection,
+    request: &SearchPagesRequest,
+    offset: usize,
+    limit: usize,
+) -> Result<SearchResult> {
+    let fts = fts_query(&request.query);
+    let mut values = Vec::<SqlValue>::new();
+    let mut sql = format!(
+        "SELECT {REVISION_COLUMNS},
+                substr(summary.content, 1, 600),
+                1
+         FROM pcp_pages p
+         JOIN pcp_revisions r ON r.revision_id = p.current_revision_id
+         JOIN pcp_summary_heads summary_head
+           ON summary_head.target_revision_id = r.revision_id
+         JOIN pcp_summaries summary
+           ON summary.summary_revision_id = summary_head.current_summary_revision_id"
+    );
+    if fts.is_some() {
+        sql.push_str(
+            "
+            JOIN pcp_summary_fts
+              ON pcp_summary_fts.summary_revision_id = summary.summary_revision_id",
+        );
+    }
+    sql.push_str(" WHERE r.namespace IN (");
+    push_placeholders(&mut sql, request.scopes.len());
+    sql.push(')');
+    values.extend(request.scopes.iter().cloned().map(SqlValue::Text));
+    append_lifecycle_filter(&mut sql, &mut values, request);
+    append_time_filters(&mut sql, &mut values, request);
+    append_relation_filter(&mut sql, &mut values, request);
+    if let Some(fts) = fts {
+        sql.push_str(
+            " AND pcp_summary_fts MATCH ?
+              ORDER BY bm25(pcp_summary_fts) ASC,
+                       COALESCE(r.observed_at, r.created_at) DESC,
+                       r.revision_id DESC",
+        );
+        values.push(SqlValue::Text(fts));
+    } else {
+        sql.push_str(" ORDER BY COALESCE(r.observed_at, r.created_at) DESC, r.revision_id DESC");
+    }
+    sql.push_str(" LIMIT ? OFFSET ?");
+    values.push(SqlValue::Integer((limit + 1) as i64));
+    values.push(SqlValue::Integer(offset as i64));
+    collect_hits(
+        connection, &sql, values, "summary", "summary", offset, limit,
+    )
 }
 
 fn search_graph(
@@ -149,7 +230,7 @@ fn search_graph(
         SqlValue::Text(origin_revision.clone()),
         SqlValue::Text(origin_revision),
     ];
-    let mut sql = format!(
+    let mut sql = String::from(
         "WITH graph_edges (
             from_revision_id, to_revision_id, edge_type, created_at
          ) AS (
@@ -168,7 +249,7 @@ fn search_graph(
                 MAX(edge.created_at) AS edge_created_at
             FROM graph_edges edge
             WHERE (edge.from_revision_id = ? OR edge.to_revision_id = ?)
-              AND edge.from_revision_id <> edge.to_revision_id"
+              AND edge.from_revision_id <> edge.to_revision_id",
     );
     if !request.filters.relation_types.is_empty() {
         sql.push_str(" AND edge.edge_type IN (");
@@ -188,7 +269,11 @@ fn search_graph(
             GROUP BY revision_id
          )
          SELECT {REVISION_COLUMNS},
-                substr(COALESCE(r.payload_content, r.facets_json, ''), 1, 600)
+                substr(COALESCE(r.payload_content, r.facets_json, ''), 1, 600),
+                EXISTS (
+                    SELECT 1 FROM pcp_summary_heads summary_head
+                    WHERE summary_head.target_revision_id = r.revision_id
+                )
          FROM neighbors
          JOIN pcp_revisions r ON r.revision_id = neighbors.revision_id
          WHERE r.namespace IN ("
@@ -204,7 +289,15 @@ fn search_graph(
     );
     values.push(SqlValue::Integer((limit + 1) as i64));
     values.push(SqlValue::Integer(offset as i64));
-    collect_hits(connection, &sql, values, "graph", offset, limit)
+    collect_hits(
+        connection,
+        &sql,
+        values,
+        "graph",
+        "relations",
+        offset,
+        limit,
+    )
 }
 
 fn ensure_graph_origin_access(
@@ -230,6 +323,7 @@ fn collect_hits(
     sql: &str,
     values: Vec<SqlValue>,
     matched_by: &str,
+    matched_projection: &str,
     offset: usize,
     limit: usize,
 ) -> Result<SearchResult> {
@@ -241,6 +335,19 @@ fn collect_hits(
     while let Some(row) = rows.next().context("read PCP search row")? {
         let revision = revision_from_row(row, false, true, false, false)?;
         let snippet: String = row.get(17)?;
+        let has_summary: bool = row.get(18)?;
+        let mut available_projections = vec![
+            Projection::Manifest,
+            Projection::Payload,
+            Projection::Sources,
+            Projection::Provenance,
+            Projection::Relations,
+            Projection::Facets,
+            Projection::History,
+        ];
+        if has_summary {
+            available_projections.insert(1, Projection::Summary);
+        }
         hits.push(SearchHit {
             page_id: revision.page_id,
             revision_id: revision.revision_id,
@@ -250,16 +357,9 @@ fn collect_hits(
             observed_at: revision.observed_at,
             snippet,
             matched_by: matched_by.to_owned(),
-            facets: revision.facets,
-            available_projections: vec![
-                Projection::Manifest,
-                Projection::Payload,
-                Projection::Sources,
-                Projection::Provenance,
-                Projection::Relations,
-                Projection::Facets,
-                Projection::History,
-            ],
+            matched_projection: matched_projection.to_owned(),
+            facets: compact_search_facets(revision.facets),
+            available_projections,
         });
     }
     let has_more = hits.len() > limit;
@@ -268,6 +368,43 @@ fn collect_hits(
         hits,
         next_cursor: has_more.then(|| (offset + limit).to_string()),
     })
+}
+
+fn compact_search_facets(facets: Option<Value>) -> Option<Value> {
+    facets.map(compact_search_value)
+}
+
+fn compact_search_value(value: Value) -> Value {
+    match value {
+        Value::Object(entries) => Value::Object(
+            entries
+                .into_iter()
+                .filter(|(key, _)| !is_payload_bearing_facet(key))
+                .take(24)
+                .map(|(key, value)| (key, compact_search_value(value)))
+                .collect::<Map<_, _>>(),
+        ),
+        Value::Array(values) => Value::Array(
+            values
+                .into_iter()
+                .take(12)
+                .map(compact_search_value)
+                .collect(),
+        ),
+        Value::String(content) if content.chars().count() > 240 => {
+            let mut compact = content.chars().take(237).collect::<String>();
+            compact.push_str("...");
+            Value::String(compact)
+        }
+        other => other,
+    }
+}
+
+fn is_payload_bearing_facet(key: &str) -> bool {
+    matches!(
+        key,
+        "contentParts" | "messageMetadata" | "contextSnapshot" | "traceEvents"
+    )
 }
 
 fn append_lifecycle_filter(
@@ -357,4 +494,36 @@ fn parse_cursor(cursor: Option<&str>) -> Result<usize> {
         .unwrap_or("0")
         .parse::<usize>()
         .context("invalid PCP pagination cursor")
+}
+
+#[cfg(test)]
+mod tests {
+    use serde_json::json;
+
+    use super::compact_search_facets;
+
+    #[test]
+    fn search_facets_exclude_payload_and_bound_routing_metadata() {
+        let facets = compact_search_facets(Some(json!({
+            "kind": "conversation_event",
+            "role": "user",
+            "contentParts": [{"type": "markdown", "text": "full detail"}],
+            "messageMetadata": {"contextSnapshot": "large trace"},
+            "topic": "x".repeat(300)
+        })))
+        .expect("compacted facets");
+
+        assert_eq!(facets["kind"], "conversation_event");
+        assert_eq!(facets["role"], "user");
+        assert!(facets.get("contentParts").is_none());
+        assert!(facets.get("messageMetadata").is_none());
+        assert_eq!(
+            facets["topic"]
+                .as_str()
+                .expect("compacted topic")
+                .chars()
+                .count(),
+            240
+        );
+    }
 }

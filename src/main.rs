@@ -2,12 +2,19 @@ mod asset;
 mod autonomy;
 mod codex;
 mod compute;
+mod context_maintenance;
 mod continuity;
+mod curiosity;
+mod diagnostics;
 mod exploration;
+mod maintenance;
 mod memory;
 mod profile;
+mod rollover;
+mod symbiont_context;
 mod usage;
 mod web;
+mod working_context;
 
 use std::{
     env,
@@ -22,10 +29,12 @@ use autonomy::AutonomyStore;
 use codex::{CodexClient, CodexConfig};
 use compute::ComputeStore;
 use continuity::ContinuityHost;
+use curiosity::CuriosityStore;
 use exploration::ExplorationHandle;
 use memory::MemoryStore;
 use pcp_sqlite::SqlitePcpStore;
 use profile::ProfileStore;
+use symbiont_context::SymbiontContextStore;
 use tokio::{net::TcpListener, sync::Mutex};
 use tracing::info;
 use tracing_subscriber::EnvFilter;
@@ -79,6 +88,8 @@ async fn main() -> Result<()> {
         .await?,
     );
     let continuity = Arc::new(ContinuityHost::open(pcp).await?);
+    let context = Arc::new(SymbiontContextStore::new(Arc::clone(&continuity)));
+    let curiosity = Arc::new(CuriosityStore::new(Arc::clone(&continuity)));
     let migration = continuity
         .migrate_legacy(&memory, &profile.snapshot().await)
         .await
@@ -96,6 +107,8 @@ async fn main() -> Result<()> {
         },
         Arc::clone(&continuity),
         Arc::clone(&profile),
+        Arc::clone(&context),
+        Arc::clone(&curiosity),
     )
     .await
     .context("start the Codex app-server session")?;
@@ -123,12 +136,33 @@ async fn main() -> Result<()> {
         Arc::clone(&codex),
         Arc::clone(&compute),
         Arc::clone(&continuity),
+        Arc::clone(&context),
+        Arc::clone(&curiosity),
+        Arc::clone(&usage),
+    );
+    maintenance::start(
+        Arc::clone(&autonomy),
+        Arc::clone(&profile),
+        Arc::clone(&codex),
+        Arc::clone(&compute),
+        Arc::clone(&continuity),
+        Arc::clone(&usage),
+    );
+    context_maintenance::start(
+        Arc::clone(&autonomy),
+        Arc::clone(&profile),
+        Arc::clone(&codex),
+        Arc::clone(&compute),
+        Arc::clone(&continuity),
+        Arc::clone(&context),
         Arc::clone(&usage),
     );
     let state = AppState::new(
         continuity,
         assets,
         profile,
+        context,
+        curiosity,
         autonomy,
         codex,
         compute,

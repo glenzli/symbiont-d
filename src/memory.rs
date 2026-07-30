@@ -26,6 +26,7 @@ pub enum MemoryRole {
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct MemoryEntry {
     pub role: MemoryRole,
     pub at: String,

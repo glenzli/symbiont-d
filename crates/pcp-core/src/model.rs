@@ -73,6 +73,7 @@ impl LifecycleStatus {
 pub enum SearchMode {
     Auto,
     Exact,
+    Summary,
     Text,
     Graph,
     Temporal,
@@ -83,6 +84,7 @@ impl SearchMode {
         match self {
             Self::Auto => "auto",
             Self::Exact => "exact",
+            Self::Summary => "summary",
             Self::Text => "text",
             Self::Graph => "graph",
             Self::Temporal => "temporal",
@@ -94,6 +96,7 @@ impl SearchMode {
 #[serde(rename_all = "snake_case")]
 pub enum Projection {
     Manifest,
+    Summary,
     Payload,
     Sources,
     Provenance,
@@ -106,6 +109,7 @@ impl Projection {
     pub fn as_str(&self) -> &'static str {
         match self {
             Self::Manifest => "manifest",
+            Self::Summary => "summary",
             Self::Payload => "payload",
             Self::Sources => "sources",
             Self::Provenance => "provenance",
@@ -204,8 +208,24 @@ pub struct Relation {
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
+pub struct PageSummary {
+    pub summary_revision_id: String,
+    pub target_revision_id: String,
+    pub content: String,
+    pub created_by: Actor,
+    pub created_at: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tool_or_model: Option<String>,
+    #[serde(default)]
+    pub provenance: Vec<ProvenanceEvent>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct ReadPage {
     pub revision: PageRevision,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub summary: Option<PageSummary>,
     #[serde(default)]
     pub relations: Vec<Relation>,
     #[serde(default)]
@@ -240,6 +260,7 @@ pub struct SearchHit {
     pub observed_at: Option<String>,
     pub snippet: String,
     pub matched_by: String,
+    pub matched_projection: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub facets: Option<Value>,
     pub available_projections: Vec<Projection>,
@@ -258,5 +279,13 @@ pub struct SearchResult {
 pub struct WriteResult {
     pub page_id: String,
     pub revision_id: String,
+    pub created: bool,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct WriteSummaryResult {
+    pub target_revision_id: String,
+    pub summary_revision_id: String,
     pub created: bool,
 }

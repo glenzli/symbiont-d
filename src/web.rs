@@ -3,7 +3,7 @@ use std::{convert::Infallible, sync::Arc};
 use axum::{
     Json, Router,
     body::{Body, Bytes},
-    extract::{DefaultBodyLimit, Multipart, Path as AxumPath, State},
+    extract::{DefaultBodyLimit, Multipart, Path as AxumPath, Query, State},
     http::{StatusCode, header},
     response::{IntoResponse, Response},
     routing::{get, post},
@@ -24,10 +24,14 @@ use crate::{
     codex::{ChatInput, CodexClient, RateLimitInfo, RuntimeEvent},
     compute::{ComputeConfig, ComputeStore, ModelInfo},
     continuity::{ContinuityHost, MessageLinks},
+    curiosity::{CuriositySnapshot, CuriosityStore},
     exploration::{ExplorationHandle, ExplorationSnapshot, today_started_at},
     memory::{MemoryEntry, MemoryRole},
     profile::{CalibrationMode, ProfileSnapshot, ProfileStore, SetupStatus},
-    usage::{TraceBundle, UsageHeadline, UsageStore, UsageSummary},
+    symbiont_context::{
+        ContextAuthor, ContextDocumentKind, SymbiontContextSnapshot, SymbiontContextStore,
+    },
+    usage::{ExplorationRunSummary, TraceBundle, UsageHeadline, UsageStore, UsageSummary},
 };
 
 const INDEX_HTML: &str = include_str!("../web/index.html");
@@ -36,7 +40,10 @@ const RICH_TEXT_JS: &str = include_str!("../web/rich-text.js");
 const RICH_TEXT_CSS: &str = include_str!("../web/rich-text.css");
 const PRESENTATION_JS: &str = include_str!("../web/presentation.js");
 const PROFILE_UI_JS: &str = include_str!("../web/profile-ui.js");
+const CURIOSITY_UI_JS: &str = include_str!("../web/curiosity-ui.js");
 const SETTINGS_JS: &str = include_str!("../web/settings.js");
+const EXPLORATION_UI_JS: &str = include_str!("../web/exploration-ui.js");
+const MESSAGE_SYNC_JS: &str = include_str!("../web/message-sync.js");
 const TRACE_UI_JS: &str = include_str!("../web/trace-ui.js");
 const STYLES_CSS: &str = include_str!("../web/styles.css");
 const MAX_USER_MESSAGE_CHARS: usize = 12_000;
@@ -48,6 +55,8 @@ pub struct AppState {
     continuity: Arc<ContinuityHost>,
     assets: Arc<AssetStore>,
     profile: Arc<ProfileStore>,
+    context: Arc<SymbiontContextStore>,
+    curiosity: Arc<CuriosityStore>,
     autonomy: Arc<AutonomyStore>,
     codex: Arc<Mutex<CodexClient>>,
     compute: Arc<ComputeStore>,
@@ -61,6 +70,8 @@ impl AppState {
         continuity: Arc<ContinuityHost>,
         assets: Arc<AssetStore>,
         profile: Arc<ProfileStore>,
+        context: Arc<SymbiontContextStore>,
+        curiosity: Arc<CuriosityStore>,
         autonomy: Arc<AutonomyStore>,
         codex: Arc<Mutex<CodexClient>>,
         compute: Arc<ComputeStore>,
@@ -72,6 +83,8 @@ impl AppState {
             continuity,
             assets,
             profile,
+            context,
+            curiosity,
             autonomy,
             codex,
             compute,
@@ -121,6 +134,20 @@ struct StatsResponse {
 struct RuntimeResponse {
     usage: UsageHeadline,
     exploration: ExplorationSnapshot,
+    messages: Vec<MemoryEntry>,
+}
+
+#[derive(Default, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct RuntimeQuery {
+    after_revision_id: Option<String>,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ExplorationHistoryResponse {
+    exploration: ExplorationSnapshot,
+    runs: Vec<ExplorationRunSummary>,
 }
 
 #[derive(Serialize)]
@@ -138,6 +165,11 @@ struct OrientationRequest {
     orientation: String,
 }
 
+#[derive(Deserialize)]
+struct ContextDocumentRequest {
+    content: String,
+}
+
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 struct ArchiveResponse {
@@ -145,6 +177,8 @@ struct ArchiveResponse {
     memory: Vec<MemoryEntry>,
     memory_chars: usize,
     autonomy_permitted: bool,
+    context: SymbiontContextSnapshot,
+    curiosity: CuriositySnapshot,
     pcp: PcpArchiveResponse,
 }
 
@@ -205,7 +239,10 @@ pub fn router(state: AppState) -> Router {
         .route("/rich-text.css", get(rich_text_css))
         .route("/presentation.js", get(presentation_js))
         .route("/profile-ui.js", get(profile_ui_js))
+        .route("/curiosity-ui.js", get(curiosity_ui_js))
         .route("/settings.js", get(settings_js))
+        .route("/exploration-ui.js", get(exploration_ui_js))
+        .route("/message-sync.js", get(message_sync_js))
         .route("/trace-ui.js", get(trace_ui_js))
         .route("/styles.css", get(styles_css))
         .route("/api/bootstrap", get(bootstrap))
@@ -214,8 +251,10 @@ pub fn router(state: AppState) -> Router {
         .route("/api/onboarding/start", post(start_onboarding))
         .route("/api/archive", get(archive))
         .route("/api/profile/orientation", post(update_orientation))
+        .route("/api/context/{kind}", post(update_context_document))
         .route("/api/autonomy", post(update_autonomy))
         .route("/api/exploration/run", post(trigger_exploration))
+        .route("/api/exploration/recent", get(recent_explorations))
         .route("/api/compute", post(update_compute))
         .route("/api/stats", get(stats))
         .route("/api/runtime", get(runtime))
@@ -266,10 +305,31 @@ async fn profile_ui_js() -> impl IntoResponse {
     )
 }
 
+async fn curiosity_ui_js() -> impl IntoResponse {
+    (
+        [(header::CONTENT_TYPE, "text/javascript; charset=utf-8")],
+        CURIOSITY_UI_JS,
+    )
+}
+
 async fn settings_js() -> impl IntoResponse {
     (
         [(header::CONTENT_TYPE, "text/javascript; charset=utf-8")],
         SETTINGS_JS,
+    )
+}
+
+async fn exploration_ui_js() -> impl IntoResponse {
+    (
+        [(header::CONTENT_TYPE, "text/javascript; charset=utf-8")],
+        EXPLORATION_UI_JS,
+    )
+}
+
+async fn message_sync_js() -> impl IntoResponse {
+    (
+        [(header::CONTENT_TYPE, "text/javascript; charset=utf-8")],
+        MESSAGE_SYNC_JS,
     )
 }
 
@@ -357,6 +417,12 @@ async fn archive(State(state): State<AppState>) -> Result<Json<ArchiveResponse>,
         .autonomy
         .permitted(profile.status == SetupStatus::Ready)
         .await;
+    let context = state.context.snapshot().await.map_err(ApiError::internal)?;
+    let curiosity = state
+        .curiosity
+        .snapshot()
+        .await
+        .map_err(ApiError::internal)?;
     let (scopes, _) = state
         .continuity
         .list_scopes(None, 100, None)
@@ -390,6 +456,7 @@ async fn archive(State(state): State<AppState>) -> Result<Json<ArchiveResponse>,
                 .collect(),
             projections: vec![
                 Projection::Manifest,
+                Projection::Summary,
                 Projection::Payload,
                 Projection::Sources,
                 Projection::Provenance,
@@ -406,12 +473,39 @@ async fn archive(State(state): State<AppState>) -> Result<Json<ArchiveResponse>,
         memory,
         memory_chars,
         autonomy_permitted,
+        context,
+        curiosity,
         pcp: PcpArchiveResponse {
             scopes,
             pages,
             page_count,
         },
     }))
+}
+
+async fn update_context_document(
+    State(state): State<AppState>,
+    AxumPath(kind): AxumPath<String>,
+    Json(request): Json<ContextDocumentRequest>,
+) -> Result<Json<SymbiontContextSnapshot>, ApiError> {
+    let kind = ContextDocumentKind::from_route(&kind)
+        .ok_or_else(|| ApiError::not_found("Unknown Symbiont Context document."))?;
+    let sources = state
+        .continuity
+        .recent_source_revisions(20)
+        .await
+        .map_err(ApiError::internal)?;
+    state
+        .context
+        .upsert(kind, &request.content, sources, None, ContextAuthor::User)
+        .await
+        .map_err(ApiError::bad_request)?;
+    state
+        .context
+        .snapshot()
+        .await
+        .map(Json)
+        .map_err(ApiError::internal)
 }
 
 async fn update_orientation(
@@ -474,15 +568,24 @@ async fn stats(State(state): State<AppState>) -> Result<Json<StatsResponse>, Api
     }))
 }
 
-async fn runtime(State(state): State<AppState>) -> Result<Json<RuntimeResponse>, ApiError> {
+async fn runtime(
+    State(state): State<AppState>,
+    Query(query): Query<RuntimeQuery>,
+) -> Result<Json<RuntimeResponse>, ApiError> {
     let usage = state
         .usage
         .headline(&today_started_at())
         .await
         .map_err(ApiError::internal)?;
+    let messages = state
+        .continuity
+        .recent_messages_after(query.after_revision_id.as_deref(), 20)
+        .await
+        .map_err(ApiError::internal)?;
     Ok(Json(RuntimeResponse {
         usage,
         exploration: state.exploration.snapshot().await,
+        messages,
     }))
 }
 
@@ -506,6 +609,20 @@ async fn trigger_exploration(
         ));
     }
     Ok(Json(TriggerResponse { accepted }))
+}
+
+async fn recent_explorations(
+    State(state): State<AppState>,
+) -> Result<Json<ExplorationHistoryResponse>, ApiError> {
+    let runs = state
+        .usage
+        .recent_explorations(12)
+        .await
+        .map_err(ApiError::internal)?;
+    Ok(Json(ExplorationHistoryResponse {
+        exploration: state.exploration.snapshot().await,
+        runs,
+    }))
 }
 
 async fn trace_detail(
@@ -662,6 +779,7 @@ async fn run_chat(
         .iter()
         .map(|image| image.path.clone())
         .collect();
+    let reply_to_revision_id = state.continuity.latest_assistant_revision().await?;
     let user_message = state
         .continuity
         .ingest_message(
@@ -669,12 +787,20 @@ async fn run_chat(
             &request.message,
             request.images,
             None,
-            MessageLinks::default(),
+            MessageLinks {
+                responds_to: reply_to_revision_id.clone(),
+                input_revision_ids: Vec::new(),
+            },
         )
         .await?;
     let compute = state.compute.snapshot().await;
     let profile = state.profile.snapshot().await;
-    let continuity_context = state.continuity.context_seed(Some(&user_message)).await;
+    let continuity_context = format!(
+        "{}\n\n{}\n\n{}",
+        state.continuity.context_seed(Some(&user_message)).await,
+        state.context.prompt().await?,
+        state.curiosity.prompt().await?
+    );
     let outcome = state
         .codex
         .lock()
@@ -683,6 +809,8 @@ async fn run_chat(
             ChatInput {
                 text: request.message,
                 local_images: image_paths,
+                current_revision_id: user_message.page.revision_id.clone(),
+                reply_to_revision_id,
             },
             &compute,
             &profile,
@@ -692,12 +820,13 @@ async fn run_chat(
         .await;
     runtime_forwarder.await?;
     let outcome = outcome?;
+    let hunch_touched = outcome.hunch_touched;
     state.usage.record_all(&outcome.invocations).await?;
     let mut input_revision_ids = user_message.attachment_revision_ids;
     input_revision_ids.extend(outcome.context_revision_ids);
     input_revision_ids.sort();
     input_revision_ids.dedup();
-    let message = state
+    let stored_message = state
         .continuity
         .ingest_message(
             MemoryRole::Assistant,
@@ -709,14 +838,22 @@ async fn run_chat(
                 input_revision_ids,
             },
         )
-        .await?
-        .entry;
+        .await?;
+    state
+        .codex
+        .lock()
+        .await
+        .mark_interactive_revision(stored_message.page.revision_id.clone());
+    let message = stored_message.entry;
     let memory_chars = state.continuity.memory_chars().await?;
     let profile = state.profile.snapshot().await;
     let autonomy_permitted = state
         .autonomy
         .permitted(profile.status == SetupStatus::Ready)
         .await;
+    if hunch_touched && autonomy_permitted {
+        state.exploration.trigger_conversation_hunch();
+    }
     let usage = state.usage.headline(&today_started_at()).await?;
     let exploration = state.exploration.snapshot().await;
     let _ = wire_tx

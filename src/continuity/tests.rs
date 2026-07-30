@@ -5,6 +5,7 @@ use std::{
 
 use pcp_core::{Projection, ReadPagesRequest};
 use pcp_sqlite::SqlitePcpStore;
+use serde_json::json;
 
 use super::{ContinuityHost, MessageLinks};
 use crate::{
@@ -17,6 +18,52 @@ const ONE_PIXEL_PNG: &[u8] = &[
     0, 0, 31, 21, 196, 137, 0, 0, 0, 13, 73, 68, 65, 84, 8, 215, 99, 248, 207, 192, 240, 31, 0, 5,
     0, 1, 255, 137, 153, 61, 29, 0, 0, 0, 0, 73, 69, 78, 68, 174, 66, 96, 130,
 ];
+
+#[tokio::test]
+async fn context_seed_exposes_the_complete_archive_boundary_and_latest_checkpoint() {
+    let nonce = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .expect("clock")
+        .as_nanos();
+    let root = std::env::temp_dir().join(format!("symbiont-context-seed-{nonce}"));
+    let store = Arc::new(
+        SqlitePcpStore::open(root.join("context.sqlite3"))
+            .await
+            .expect("open PCP store"),
+    );
+    let continuity = ContinuityHost::open(store).await.expect("open host");
+    let user = continuity
+        .ingest_message(
+            MemoryRole::User,
+            "Keep this thread connected.",
+            Vec::new(),
+            None,
+            MessageLinks::default(),
+        )
+        .await
+        .expect("ingest user event");
+    let conversation_scope = continuity.conversation_scope().to_owned();
+    let checkpoint = continuity
+        .write_model_page(
+            Some(&conversation_scope),
+            "Active thread: context rollover.",
+            Some(json!({"kind": "conversation_checkpoint"})),
+            Vec::new(),
+            vec![user.page.revision_id.clone()],
+            Vec::new(),
+            Some("checkpoint-test".to_owned()),
+        )
+        .await
+        .expect("write checkpoint");
+
+    let seed = continuity.context_seed(Some(&user)).await;
+    assert!(seed.contains("complete symbiont-d transcript"));
+    assert!(seed.contains(&user.page.revision_id));
+    assert!(seed.contains(&checkpoint.revision_id));
+    assert!(seed.contains("native context is recent only"));
+
+    let _ = tokio::fs::remove_dir_all(root).await;
+}
 
 #[tokio::test]
 async fn links_images_user_events_and_assistant_responses() {
@@ -62,6 +109,36 @@ async fn links_images_user_events_and_assistant_responses() {
         )
         .await
         .expect("ingest assistant event");
+    assert_eq!(
+        continuity
+            .latest_assistant_revision()
+            .await
+            .expect("read reply anchor")
+            .as_deref(),
+        Some(assistant.page.revision_id.as_str())
+    );
+    let messages_after_user = continuity
+        .recent_messages_after(Some(&user.page.revision_id), 20)
+        .await
+        .expect("read messages after user");
+    assert_eq!(messages_after_user.len(), 1);
+    assert_eq!(
+        messages_after_user[0].revision_id,
+        Some(assistant.page.revision_id.clone())
+    );
+    let recent_messages = continuity
+        .recent_messages(20)
+        .await
+        .expect("read ordered messages");
+    assert_eq!(recent_messages.len(), 2);
+    assert_eq!(
+        recent_messages[0].revision_id,
+        Some(user.page.revision_id.clone())
+    );
+    assert_eq!(
+        recent_messages[1].revision_id,
+        Some(assistant.page.revision_id.clone())
+    );
     let pages = continuity
         .read(ReadPagesRequest {
             revision_ids: vec![

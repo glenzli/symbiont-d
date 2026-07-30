@@ -512,6 +512,12 @@ fn insert_relation(
     if relation_type.trim().is_empty() || relation_type.len() > 80 {
         anyhow::bail!("relation type must contain 1-80 characters");
     }
+    ensure_acyclic_derivation_relation(
+        transaction,
+        from_revision_id,
+        relation_type.trim(),
+        to_revision_id,
+    )?;
     let relation_id = random_id(transaction, "rel_")?;
     transaction
         .execute(
@@ -540,6 +546,51 @@ fn insert_relation(
         created_by: actor.clone(),
         created_at: created_at.to_owned(),
     })
+}
+
+fn ensure_acyclic_derivation_relation(
+    transaction: &Transaction<'_>,
+    from_revision_id: &str,
+    relation_type: &str,
+    to_revision_id: &str,
+) -> Result<()> {
+    if !matches!(relation_type, "contains" | "derived_from" | "summarizes") {
+        return Ok(());
+    }
+    if from_revision_id == to_revision_id {
+        anyhow::bail!("derivation relations cannot point to the same Revision");
+    }
+    let creates_cycle: bool = transaction
+        .query_row(
+            "
+            WITH RECURSIVE derivation_edges (from_revision_id, to_revision_id) AS (
+                SELECT from_revision_id, to_revision_id
+                FROM pcp_relations
+                WHERE relation_type IN ('contains', 'derived_from', 'summarizes')
+                UNION
+                SELECT derived_revision_id, input_revision_id
+                FROM pcp_provenance_inputs
+            ),
+            reachable (revision_id) AS (
+                SELECT ?2
+                UNION
+                SELECT edge.to_revision_id
+                FROM reachable
+                JOIN derivation_edges edge
+                  ON edge.from_revision_id = reachable.revision_id
+            )
+            SELECT EXISTS (
+                SELECT 1 FROM reachable WHERE revision_id = ?1
+            )
+            ",
+            params![from_revision_id, to_revision_id],
+            |row| row.get(0),
+        )
+        .context("validate PCP derivation DAG")?;
+    if creates_cycle {
+        anyhow::bail!("relation would introduce a cycle in the PCP derivation DAG");
+    }
+    Ok(())
 }
 
 fn read_relation(transaction: &Transaction<'_>, relation_id: &str) -> Result<Relation> {

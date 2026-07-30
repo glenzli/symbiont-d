@@ -1,5 +1,6 @@
 import { formatDate, formatMemorySize, responseJson } from "/presentation.js";
 import { renderMessageContent, renderRichText } from "/rich-text.js";
+import { initCuriosityUi } from "/curiosity-ui.js";
 
 export function initProfileUi(state, sendMessage) {
   const onboarding = document.querySelector("#onboarding");
@@ -19,6 +20,16 @@ export function initProfileUi(state, sendMessage) {
   const saveOrientation = document.querySelector("#save-orientation");
   const orientationSaveState = document.querySelector(
     "#orientation-save-state",
+  );
+  const contextForms = [
+    ...archiveDialog.querySelectorAll("[data-context-kind]"),
+  ];
+  const curiosityUi = initCuriosityUi();
+  const profileReviewStatus = document.querySelector(
+    "#profile-review-status",
+  );
+  const profileReviewContent = document.querySelector(
+    "#profile-review-content",
   );
   const tabButtons = [...archiveDialog.querySelectorAll("[data-archive-tab]")];
   const tabPanels = [
@@ -98,8 +109,44 @@ export function initProfileUi(state, sendMessage) {
         ? "完成初始化对话后，画像会显示在这里。"
         : "尚未开始初始化。";
     renderMemory(archivePayload.memory);
+    renderContext(archivePayload.context);
+    curiosityUi.render(archivePayload.curiosity);
     renderPages(archivePayload.pcp);
     renderInfo(archivePayload);
+  }
+
+  function renderContext(context) {
+    const documents = {
+      "current-map": context?.currentMap,
+      "open-loops": context?.openLoops,
+    };
+    for (const [kind, document] of Object.entries(documents)) {
+      const textarea = archiveDialog.querySelector(
+        `[data-context-text="${kind}"]`,
+      );
+      const updated = archiveDialog.querySelector(
+        `[data-context-updated="${kind}"]`,
+      );
+      textarea.value = document?.content || "";
+      updated.textContent = document?.updatedAt
+        ? formatDate(document.updatedAt)
+        : "尚未整理";
+    }
+
+    const review = context?.profileReview;
+    const status = review?.facets?.reviewStatus;
+    profileReviewStatus.textContent = review
+      ? `${profileReviewStatusText(status)} · ${formatDate(review.updatedAt)}`
+      : "尚未审查";
+    profileReviewContent.replaceChildren();
+    if (review?.content) {
+      renderRichText(profileReviewContent, review.content);
+    } else {
+      const empty = document.createElement("p");
+      empty.className = "archive-empty";
+      empty.textContent = "长期画像还没有进入后台审查周期。";
+      profileReviewContent.append(empty);
+    }
   }
 
   function renderPages(pcp) {
@@ -319,8 +366,43 @@ export function initProfileUi(state, sendMessage) {
       orientationSaveState.textContent = error.message;
     }
   });
+  for (const form of contextForms) {
+    form.addEventListener("submit", async (event) => {
+      event.preventDefault();
+      const kind = form.dataset.contextKind;
+      const textarea = form.querySelector(`[data-context-text="${kind}"]`);
+      const saveState = form.querySelector(
+        `[data-context-save-state="${kind}"]`,
+      );
+      saveState.textContent = "保存中";
+      try {
+        archivePayload.context = await responseJson(
+          await fetch(`/api/context/${kind}`, {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ content: textarea.value }),
+          }),
+          "保存失败",
+        );
+        saveState.textContent = "已保存";
+        renderContext(archivePayload.context);
+      } catch (error) {
+        saveState.textContent = error.message;
+      }
+    });
+  }
 
   return { render };
+}
+
+function profileReviewStatusText(status) {
+  return (
+    {
+      no_change: "暂不调整",
+      clarification: "等待确认",
+      proposal: "有修订建议",
+    }[status] || "已审查"
+  );
 }
 
 function appendDefinition(parent, term, detail) {

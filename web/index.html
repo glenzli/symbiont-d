@@ -20,6 +20,17 @@
         </div>
         <div class="top-actions">
           <button
+            class="unread-indicator"
+            id="unread-indicator"
+            type="button"
+            title="跳到第一条未读消息"
+            aria-label="没有未读消息"
+            hidden
+          >
+            <span class="unread-dot" aria-hidden="true"></span>
+            <strong id="unread-count">0</strong>
+          </button>
+          <button
             class="usage-state"
             id="open-usage"
             type="button"
@@ -32,6 +43,7 @@
             <span>context</span>
             <strong id="memory-size">0</strong>
           </div>
+          <button class="quiet-button" id="open-explorations" type="button">探索</button>
           <button class="quiet-button" id="open-archive" type="button">档案</button>
           <button class="quiet-button" id="open-settings" type="button">设置</button>
         </div>
@@ -168,15 +180,18 @@
               <input id="daily-interrupt-limit" type="number" min="0" max="20" step="1">
             </label>
             <label class="field">
-              <span>每日自主 token 上限</span>
-              <input
-                id="daily-token-limit"
-                type="number"
-                min="0"
-                max="100000000"
-                step="10000"
-                inputmode="numeric"
-              >
+              <span>每日自主消耗上限</span>
+              <span class="number-unit">
+                <input
+                  id="daily-token-limit"
+                  type="number"
+                  min="0"
+                  max="100"
+                  step="0.1"
+                  inputmode="decimal"
+                >
+                <span>M tokens</span>
+              </span>
               <small>0 表示不限制</small>
             </label>
           </div>
@@ -259,6 +274,8 @@
       </header>
       <nav class="dialog-tabs" role="tablist" aria-label="档案分类">
         <button type="button" role="tab" data-archive-tab="orientation" aria-selected="true">画像</button>
+        <button type="button" role="tab" data-archive-tab="context" aria-selected="false">脉络</button>
+        <button type="button" role="tab" data-archive-tab="curiosity" aria-selected="false">好奇</button>
         <button type="button" role="tab" data-archive-tab="pages" aria-selected="false">Pages</button>
         <button type="button" role="tab" data-archive-tab="memory" aria-selected="false">记录</button>
         <button type="button" role="tab" data-archive-tab="info" aria-selected="false">信息</button>
@@ -276,6 +293,49 @@
           </footer>
         </form>
       </section>
+      <section class="tab-panel archive-panel context-panel" data-archive-panel="context" hidden>
+        <form class="context-document-form" data-context-kind="current-map">
+          <header>
+            <div>
+              <h3>Current Map</h3>
+              <p>近期主题、项目状态与注意力变化</p>
+            </div>
+            <time data-context-updated="current-map"></time>
+          </header>
+          <textarea data-context-text="current-map" rows="10" maxlength="32000" placeholder="后台整理后会显示在这里。"></textarea>
+          <footer>
+            <span data-context-save-state="current-map" role="status"></span>
+            <button class="secondary-button" type="submit">保存</button>
+          </footer>
+        </form>
+        <form class="context-document-form" data-context-kind="open-loops">
+          <header>
+            <div>
+              <h3>Open Loops</h3>
+              <p>尚未解决的问题、判断与后续线索</p>
+            </div>
+            <time data-context-updated="open-loops"></time>
+          </header>
+          <textarea data-context-text="open-loops" rows="10" maxlength="32000" placeholder="后台整理后会显示在这里。"></textarea>
+          <footer>
+            <span data-context-save-state="open-loops" role="status"></span>
+            <button class="secondary-button" type="submit">保存</button>
+          </footer>
+        </form>
+        <section class="profile-review-document">
+          <header>
+            <div>
+              <h3>Profile Review</h3>
+              <p>谨慎检查长期画像是否仍然合适</p>
+            </div>
+            <span id="profile-review-status">尚未审查</span>
+          </header>
+          <div id="profile-review-content" class="pcp-rich-content"></div>
+        </section>
+      </section>
+      <section class="tab-panel archive-panel" data-archive-panel="curiosity" hidden>
+        <div id="archive-curiosity" class="archive-curiosity"></div>
+      </section>
       <section class="tab-panel archive-panel" data-archive-panel="pages" hidden>
         <div id="archive-pages" class="archive-pages"></div>
       </section>
@@ -290,12 +350,23 @@
     <dialog id="trace-dialog" class="panel-dialog trace-dialog">
       <header class="dialog-header">
         <div>
-          <h2>PCP 调用链</h2>
+          <h2>执行轨迹</h2>
           <p id="trace-summary">正在读取</p>
         </div>
         <button class="icon-button" data-close="trace-dialog" type="button" aria-label="关闭">×</button>
       </header>
       <div id="trace-content" class="trace-content" aria-live="polite"></div>
+    </dialog>
+
+    <dialog id="exploration-dialog" class="panel-dialog exploration-dialog">
+      <header class="dialog-header">
+        <div>
+          <h2>最近探索</h2>
+          <p id="exploration-dialog-status">正在读取</p>
+        </div>
+        <button class="icon-button" data-close="exploration-dialog" type="button" aria-label="关闭">×</button>
+      </header>
+      <div id="exploration-history" class="exploration-history" aria-live="polite"></div>
     </dialog>
 
     <template id="message-template">
@@ -310,8 +381,8 @@
           <button
             class="trace-button"
             type="button"
-            title="查看 PCP 调用链"
-            aria-label="查看 PCP 调用链"
+            title="查看执行轨迹"
+            aria-label="查看执行轨迹"
             hidden
           >⎇</button>
         </div>

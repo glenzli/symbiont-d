@@ -3,6 +3,7 @@ mod row;
 mod schema;
 mod search;
 mod store;
+mod summary;
 mod write;
 
 pub use store::SqlitePcpStore;

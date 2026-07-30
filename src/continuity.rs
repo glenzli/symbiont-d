@@ -12,7 +12,7 @@ use pcp_core::{
     Actor, ActorType, CreateScopeRequest, InitialRelation, LifecycleStatus, LinkPagesRequest,
     PagePayload, Projection, ProvenanceEvent, ReadPage, ReadPagesRequest, Relation,
     RevisePageRequest, Scope, SearchFilters, SearchMode, SearchPagesRequest, SearchResult,
-    SourceRef, WritePageRequest, WriteResult,
+    SourceRef, WritePageRequest, WriteResult, WriteSummaryRequest, WriteSummaryResult,
 };
 use pcp_sqlite::SqlitePcpStore;
 use serde_json::{Value, json};
@@ -22,6 +22,7 @@ use crate::{
     asset::SavedImage,
     memory::{MemoryEntry, MemoryRole, MemoryStore, MessageMetadata, MessagePart},
     profile::{ProfileSnapshot, SetupStatus},
+    working_context::{WORKING_CONTEXT_SCAN_MESSAGES, WorkingContext},
 };
 
 const USER_SCOPE_LABEL: &str = "User context";
@@ -127,6 +128,18 @@ impl ContinuityHost {
         self.scopes.all()
     }
 
+    pub fn conversation_scope(&self) -> &str {
+        &self.scopes.conversation
+    }
+
+    pub fn user_scope(&self) -> &str {
+        &self.scopes.user
+    }
+
+    pub fn project_scope(&self) -> &str {
+        &self.scopes.project
+    }
+
     pub fn resolve_scopes(&self, requested: &[String]) -> Result<Vec<String>> {
         let allowed = self.scopes.all();
         if requested.is_empty() {
@@ -146,33 +159,50 @@ impl ContinuityHost {
             .read()
             .await
             .as_ref()
-            .map(|page| {
-                format!(
-                    "Current orientation Page: {} at Revision {}.",
-                    page.page_id, page.revision_id
-                )
-            })
-            .unwrap_or_else(|| "No orientation Page is active yet.".to_owned());
-        let current = current
-            .map(|message| {
-                let attachments = if message.attachment_revision_ids.is_empty() {
-                    "No image asset Revisions are attached.".to_owned()
-                } else {
-                    format!(
-                        "Attached image asset Revisions: {}.",
-                        message.attachment_revision_ids.join(", ")
-                    )
-                };
-                format!(
-                    "Current user event Revision: {}. {attachments}",
-                    message.page.revision_id
-                )
-            })
-            .unwrap_or_else(|| "No current conversation event is pinned.".to_owned());
-        format!(
-            "PCP long-term context is available through model tools. Authorized namespaces: {}, {}, {}. {} {} Raw history is not globally injected; search and read it when prior context could materially affect the answer.",
-            self.scopes.user, self.scopes.project, self.scopes.conversation, orientation, current
-        )
+            .map(|page| page.revision_id.clone())
+            .unwrap_or_else(|| "none".to_owned());
+        let checkpoint = self
+            .latest_checkpoint_revision()
+            .await
+            .unwrap_or_else(|| "none".to_owned());
+        let current_revision = current
+            .map(|message| message.page.revision_id.as_str())
+            .unwrap_or("none");
+        let mut seed = format!(
+            "PCP boundary: `{}` is the complete symbiont-d transcript across native-thread \
+             resets and compactions; native context is recent only. Current event: \
+             `{current_revision}`; orientation: `{orientation}`; latest checkpoint: \
+             `{checkpoint}`. Search then selectively read older context before relying on it or \
+             asking the user to repeat it. Derived Pages may use `{}` or `{}`.",
+            self.scopes.conversation, self.scopes.user, self.scopes.project
+        );
+        if let Some(attachments) = current
+            .map(|message| &message.attachment_revision_ids)
+            .filter(|attachments| !attachments.is_empty())
+        {
+            seed.push_str(&format!(
+                " Current image Revisions: {}.",
+                attachments.join(", ")
+            ));
+        }
+        seed
+    }
+
+    async fn latest_checkpoint_revision(&self) -> Option<String> {
+        self.search(SearchPagesRequest {
+            query: "conversation_checkpoint".to_owned(),
+            scopes: vec![self.scopes.conversation.clone()],
+            mode: SearchMode::Exact,
+            filters: SearchFilters::default(),
+            limit: 1,
+            cursor: None,
+        })
+        .await
+        .ok()?
+        .hits
+        .into_iter()
+        .next()
+        .map(|hit| hit.revision_id)
     }
 
     pub async fn migrate_legacy(
@@ -237,7 +267,13 @@ impl ContinuityHost {
             .sync_orientation(profile, source_revisions)
             .await
             .context("migrate visible orientation into PCP")?;
-        *self.last_event_revision.lock().await = previous_revision;
+        let latest_revision = self
+            .recent_source_revisions(1)
+            .await?
+            .into_iter()
+            .next()
+            .or(previous_revision);
+        *self.last_event_revision.lock().await = latest_revision;
         Ok(MigrationSummary {
             migrated_messages,
             orientation,
@@ -588,8 +624,55 @@ impl ContinuityHost {
                 }
             }
         }
-        entries.reverse();
+        entries.sort_by(|left, right| {
+            left.at
+                .cmp(&right.at)
+                .then_with(|| left.revision_id.cmp(&right.revision_id))
+        });
         Ok(entries)
+    }
+
+    pub async fn recent_messages_after(
+        &self,
+        after_revision_id: Option<&str>,
+        limit: usize,
+    ) -> Result<Vec<MemoryEntry>> {
+        let limit = limit.clamp(1, 50);
+        let messages = self.recent_messages(200).await?;
+        let start = after_revision_id
+            .and_then(|revision_id| {
+                messages
+                    .iter()
+                    .position(|entry| entry.revision_id.as_deref() == Some(revision_id))
+            })
+            .map(|index| index + 1)
+            .unwrap_or_else(|| messages.len().saturating_sub(limit));
+        Ok(messages.into_iter().skip(start).take(limit).collect())
+    }
+
+    pub async fn latest_assistant_revision(&self) -> Result<Option<String>> {
+        Ok(self
+            .recent_messages(1)
+            .await?
+            .into_iter()
+            .next()
+            .filter(|entry| entry.role == MemoryRole::Assistant)
+            .and_then(|entry| entry.revision_id))
+    }
+
+    pub async fn working_context(
+        &self,
+        cursor_before: Option<&str>,
+        current_revision_id: Option<&str>,
+        reply_to_revision_id: Option<&str>,
+    ) -> Result<WorkingContext> {
+        let entries = self.recent_messages(WORKING_CONTEXT_SCAN_MESSAGES).await?;
+        Ok(WorkingContext::build(
+            &entries,
+            cursor_before,
+            current_revision_id,
+            reply_to_revision_id,
+        ))
     }
 
     pub async fn memory_chars(&self) -> Result<usize> {
@@ -616,6 +699,28 @@ impl ContinuityHost {
 
     pub async fn read(&self, request: ReadPagesRequest) -> Result<Vec<ReadPage>> {
         self.store.read_pages(request, self.allowed_scopes()).await
+    }
+
+    pub async fn next_summary_candidate(&self, minimum_chars: usize) -> Result<Option<String>> {
+        self.store
+            .next_summary_candidate(self.allowed_scopes(), minimum_chars)
+            .await
+    }
+
+    pub async fn mark_summary_assessed(
+        &self,
+        target_revision_id: String,
+        outcome: &str,
+        tool_or_model: Option<String>,
+    ) -> Result<()> {
+        self.store
+            .mark_summary_assessed(
+                target_revision_id,
+                outcome.to_owned(),
+                tool_or_model,
+                self.allowed_scopes(),
+            )
+            .await
     }
 
     pub async fn write_model_page(
@@ -659,6 +764,46 @@ impl ContinuityHost {
                         tool_or_model: Some("Codex".to_owned()),
                     }],
                     initial_relations: relations,
+                    idempotency_key,
+                },
+                self.allowed_scopes(),
+            )
+            .await
+    }
+
+    pub async fn write_model_summary(
+        &self,
+        target_revision_id: String,
+        expected_summary_revision_id: Option<String>,
+        content: String,
+        source_revision_ids: Vec<String>,
+        idempotency_key: Option<String>,
+        tool_or_model: Option<String>,
+    ) -> Result<WriteSummaryResult> {
+        let actor = model_actor();
+        let tool_or_model = tool_or_model.unwrap_or_else(|| "Codex".to_owned());
+        let mut inputs = Vec::with_capacity(source_revision_ids.len() + 1);
+        inputs.push(target_revision_id.clone());
+        for revision_id in source_revision_ids {
+            if !inputs.contains(&revision_id) {
+                inputs.push(revision_id);
+            }
+        }
+        self.store
+            .write_summary(
+                WriteSummaryRequest {
+                    target_revision_id,
+                    expected_summary_revision_id,
+                    content,
+                    created_by: actor.clone(),
+                    tool_or_model: Some(tool_or_model.clone()),
+                    provenance: vec![ProvenanceEvent {
+                        operation: "summarize".to_owned(),
+                        actor,
+                        timestamp: now(),
+                        input_revision_ids: inputs,
+                        tool_or_model: Some(tool_or_model),
+                    }],
                     idempotency_key,
                 },
                 self.allowed_scopes(),

@@ -7,6 +7,7 @@ use rusqlite::params;
 use crate::{
     row::{REVISION_COLUMNS, relation_from_row, revision_from_row},
     store::{MAX_READ_CHARS, MAX_READ_PAGES, SqlitePcpStore},
+    summary::current_summary,
 };
 
 impl SqlitePcpStore {
@@ -122,6 +123,10 @@ impl SqlitePcpStore {
             anyhow::bail!("read request exceeds the PCP page limit");
         }
         let allowed_scopes: HashSet<String> = allowed_scopes.into_iter().collect();
+        let include_summary = request
+            .projections
+            .iter()
+            .any(|projection| projection == &Projection::Summary);
         let include_payload = request
             .projections
             .iter()
@@ -175,6 +180,24 @@ impl SqlitePcpStore {
                 if !allowed_scopes.contains(&revision.namespace) {
                     anyhow::bail!("PCP revision is not available");
                 }
+                let mut summary = if include_summary {
+                    current_summary(&connection, &revision_id)?
+                } else {
+                    None
+                };
+                if let Some(summary) = summary.as_mut() {
+                    let content_chars = summary.content.chars().count();
+                    if content_chars > remaining_chars {
+                        let retained = remaining_chars.saturating_sub(40);
+                        summary.content = summary.content.chars().take(retained).collect();
+                        summary
+                            .content
+                            .push_str("\n[projection truncated by host budget]");
+                        remaining_chars = 0;
+                    } else {
+                        remaining_chars -= content_chars;
+                    }
+                }
                 if let Some(payload) = revision.payload.as_mut() {
                     let content_chars = payload.content.chars().count();
                     if content_chars > remaining_chars {
@@ -215,6 +238,7 @@ impl SqlitePcpStore {
                 };
                 output.push(ReadPage {
                     revision,
+                    summary,
                     relations,
                     history,
                 });

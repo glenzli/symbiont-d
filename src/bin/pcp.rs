@@ -59,6 +59,7 @@ async fn main() -> Result<()> {
                         revision_ids: vec![revision_id],
                         projections: vec![
                             Projection::Manifest,
+                            Projection::Summary,
                             Projection::Payload,
                             Projection::Sources,
                             Projection::Provenance,
@@ -128,6 +129,7 @@ async fn export_pages(store: &SqlitePcpStore, scopes: Vec<String>) -> Result<Vec
                         revision_ids: chunk.to_vec(),
                         projections: vec![
                             Projection::Manifest,
+                            Projection::Summary,
                             Projection::Payload,
                             Projection::Sources,
                             Projection::Provenance,
@@ -149,6 +151,7 @@ fn parse_mode(value: &str) -> Result<SearchMode> {
     match value {
         "auto" => Ok(SearchMode::Auto),
         "exact" => Ok(SearchMode::Exact),
+        "summary" => Ok(SearchMode::Summary),
         "text" => Ok(SearchMode::Text),
         "graph" => Ok(SearchMode::Graph),
         "temporal" => Ok(SearchMode::Temporal),
@@ -163,6 +166,6 @@ fn print_json(value: &impl serde::Serialize) -> Result<()> {
 
 fn print_help() {
     println!(
-        "pcp commands:\n  describe\n  scopes [query]\n  search <query> [auto|exact|text|graph|temporal]\n  read <revision-id>\n  export\n  doctor"
+        "pcp commands:\n  describe\n  scopes [query]\n  search <query> [auto|exact|text|summary|graph|temporal]\n  read <revision-id>\n  export\n  doctor"
     );
 }

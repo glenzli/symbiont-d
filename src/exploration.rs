@@ -13,12 +13,17 @@ use crate::{
     codex::{CodexClient, RuntimeEvent},
     compute::ComputeStore,
     continuity::{ContinuityHost, MessageLinks},
+    curiosity::CuriosityStore,
     memory::{MemoryEntry, MemoryRole},
     profile::{ProfileStore, SetupStatus},
+    symbiont_context::SymbiontContextStore,
     usage::{UsageHeadline, UsageStore},
 };
 
 const POLICY_REFRESH: Duration = Duration::from_secs(30);
+const EXPLORATION_CHAT_TAIL: usize = 14;
+const EXPLORATION_JOURNAL_RUNS: usize = 8;
+const EXPLORATION_CONTEXT_CHARS: usize = 16_000;
 
 #[derive(Clone, Copy, Debug, Serialize)]
 #[serde(rename_all = "snake_case")]
@@ -53,6 +58,8 @@ pub struct ExplorationSnapshot {
     pub last_error: Option<String>,
     pub current_activity: Option<ExplorationActivity>,
     pub latest_message: Option<MemoryEntry>,
+    pub current_trigger: Option<String>,
+    pub last_trigger: Option<String>,
 }
 
 impl Default for ExplorationSnapshot {
@@ -65,6 +72,30 @@ impl Default for ExplorationSnapshot {
             last_error: None,
             current_activity: None,
             latest_message: None,
+            current_trigger: None,
+            last_trigger: None,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug)]
+enum ExplorationTrigger {
+    Manual,
+    ConversationHunch,
+}
+
+impl ExplorationTrigger {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Manual => "manual",
+            Self::ConversationHunch => "conversation_hunch",
+        }
+    }
+
+    fn preparation_label(self) -> &'static str {
+        match self {
+            Self::Manual => "准备自主探索",
+            Self::ConversationHunch => "准备跟进刚才留下的问题",
         }
     }
 }
@@ -72,7 +103,7 @@ impl Default for ExplorationSnapshot {
 #[derive(Clone)]
 pub struct ExplorationHandle {
     state: Arc<RwLock<ExplorationSnapshot>>,
-    trigger: mpsc::Sender<()>,
+    trigger: mpsc::Sender<ExplorationTrigger>,
 }
 
 impl ExplorationHandle {
@@ -82,10 +113,12 @@ impl ExplorationHandle {
         codex: Arc<Mutex<CodexClient>>,
         compute: Arc<ComputeStore>,
         continuity: Arc<ContinuityHost>,
+        context: Arc<SymbiontContextStore>,
+        curiosity: Arc<CuriosityStore>,
         usage: Arc<UsageStore>,
     ) -> Self {
         let state = Arc::new(RwLock::new(ExplorationSnapshot::default()));
-        let (trigger, trigger_rx) = mpsc::channel(1);
+        let (trigger, trigger_rx) = mpsc::channel(4);
         tokio::spawn(run_scheduler(
             Arc::clone(&state),
             autonomy,
@@ -93,6 +126,8 @@ impl ExplorationHandle {
             codex,
             compute,
             continuity,
+            context,
+            curiosity,
             usage,
             trigger_rx,
         ));
@@ -104,7 +139,13 @@ impl ExplorationHandle {
     }
 
     pub fn trigger(&self) -> bool {
-        self.trigger.try_send(()).is_ok()
+        self.trigger.try_send(ExplorationTrigger::Manual).is_ok()
+    }
+
+    pub fn trigger_conversation_hunch(&self) -> bool {
+        self.trigger
+            .try_send(ExplorationTrigger::ConversationHunch)
+            .is_ok()
     }
 }
 
@@ -116,8 +157,10 @@ async fn run_scheduler(
     codex: Arc<Mutex<CodexClient>>,
     compute: Arc<ComputeStore>,
     continuity: Arc<ContinuityHost>,
+    context: Arc<SymbiontContextStore>,
+    curiosity: Arc<CuriosityStore>,
     usage: Arc<UsageStore>,
-    mut trigger_rx: mpsc::Receiver<()>,
+    mut trigger_rx: mpsc::Receiver<ExplorationTrigger>,
 ) {
     let mut config_updates = autonomy.subscribe();
     let started_at = Utc::now();
@@ -128,7 +171,7 @@ async fn run_scheduler(
         .flatten()
         .and_then(|value| DateTime::parse_from_rfc3339(&value).ok())
         .map(|value| value.with_timezone(&Utc));
-    let mut force_due = false;
+    let mut pending_trigger = None;
 
     loop {
         let config = autonomy.snapshot().await;
@@ -153,19 +196,22 @@ async fn run_scheduler(
             &headline,
             now,
             scheduled_at,
-            force_due,
+            pending_trigger.is_some(),
         );
 
         match gate {
             Gate::Run => {
-                force_due = false;
+                let trigger = pending_trigger.take();
                 if let Err(error) = run_once(
                     Arc::clone(&state),
                     Arc::clone(&codex),
                     Arc::clone(&compute),
                     Arc::clone(&profile),
                     Arc::clone(&continuity),
+                    Arc::clone(&context),
+                    Arc::clone(&curiosity),
                     Arc::clone(&usage),
+                    trigger,
                 )
                 .await
                 {
@@ -192,10 +238,10 @@ async fn run_scheduler(
                         }
                     }
                     trigger = trigger_rx.recv() => {
-                        if trigger.is_none() {
+                        let Some(trigger) = trigger else {
                             break;
-                        }
-                        force_due = true;
+                        };
+                        pending_trigger = Some(trigger);
                     }
                 }
             }
@@ -272,6 +318,7 @@ async fn update_waiting_state(
     snapshot.next_run_at = until.map(timestamp);
     snapshot.last_run_at = last_run_at.map(timestamp);
     snapshot.current_activity = None;
+    snapshot.current_trigger = None;
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -281,7 +328,10 @@ async fn run_once(
     compute: Arc<ComputeStore>,
     profile: Arc<ProfileStore>,
     continuity: Arc<ContinuityHost>,
+    context: Arc<SymbiontContextStore>,
+    curiosity: Arc<CuriosityStore>,
     usage: Arc<UsageStore>,
+    trigger: Option<ExplorationTrigger>,
 ) -> Result<()> {
     {
         let mut snapshot = state.write().await;
@@ -289,17 +339,34 @@ async fn run_once(
         snapshot.next_run_at = None;
         snapshot.last_error = None;
         snapshot.current_activity = Some(ExplorationActivity {
-            label: "准备自主探索".to_owned(),
+            label: trigger
+                .map(ExplorationTrigger::preparation_label)
+                .unwrap_or("准备定时探索")
+                .to_owned(),
             model: String::new(),
             display_name: String::new(),
             effort: String::new(),
             lane: "observe".to_owned(),
         });
+        snapshot.current_trigger = Some(
+            trigger
+                .map(ExplorationTrigger::as_str)
+                .unwrap_or("scheduled")
+                .to_owned(),
+        );
     }
 
     let compute = compute.snapshot().await;
     let profile = profile.snapshot().await;
-    let continuity_context = continuity.context_seed(None).await;
+    let recent_messages = continuity.recent_messages(EXPLORATION_CHAT_TAIL).await?;
+    let recent_explorations = usage.recent_explorations(EXPLORATION_JOURNAL_RUNS).await?;
+    let continuity_context = format!(
+        "{}\n\n{}\n\n{}\n\n{}",
+        continuity.context_seed(None).await,
+        context.prompt().await?,
+        curiosity.prompt().await?,
+        exploration_working_context(&recent_messages, &recent_explorations, trigger)
+    );
     let (runtime_tx, mut runtime_rx) = mpsc::channel(64);
     let activity_state = Arc::clone(&state);
     let activity_task = tokio::spawn(async move {
@@ -343,6 +410,14 @@ async fn run_once(
     usage.record_all(&outcome.invocations).await?;
 
     let published = if let Some(text) = outcome.message {
+        let mut input_revision_ids = outcome.context_revision_ids;
+        input_revision_ids.extend(
+            recent_messages
+                .iter()
+                .filter_map(|entry| entry.revision_id.clone()),
+        );
+        input_revision_ids.sort();
+        input_revision_ids.dedup();
         let stored = continuity
             .ingest_message(
                 MemoryRole::Assistant,
@@ -351,7 +426,7 @@ async fn run_once(
                 Some(outcome.metadata),
                 MessageLinks {
                     responds_to: None,
-                    input_revision_ids: outcome.context_revision_ids,
+                    input_revision_ids,
                 },
             )
             .await?;
@@ -369,16 +444,98 @@ async fn run_once(
     });
     snapshot.last_error = None;
     snapshot.current_activity = None;
+    snapshot.current_trigger = None;
+    snapshot.last_trigger = Some(
+        trigger
+            .map(ExplorationTrigger::as_str)
+            .unwrap_or("scheduled")
+            .to_owned(),
+    );
     if let Some(message) = published {
         snapshot.latest_message = Some(message);
     }
     Ok(())
 }
 
+fn exploration_working_context(
+    messages: &[MemoryEntry],
+    runs: &[crate::usage::ExplorationRunSummary],
+    trigger: Option<ExplorationTrigger>,
+) -> String {
+    let mut lines = vec![
+        "Autonomous working context. Use this to continue the relationship and avoid thematic repetition; it is bounded operational memory, not a relevance score."
+            .to_owned(),
+        match trigger {
+            Some(ExplorationTrigger::ConversationHunch) => {
+                "Wake reason: the preceding conversation created or revised a Hunch. Inspect the freshest active Hunch and decide whether following it now can produce new evidence or a better question. This is an opportunity, not a requirement to search or message."
+                    .to_owned()
+            }
+            Some(ExplorationTrigger::Manual) => {
+                "Wake reason: the user explicitly requested an exploration cycle.".to_owned()
+            }
+            None => "Wake reason: scheduled exploration cycle.".to_owned(),
+        },
+        "<recent-conversation>".to_owned(),
+    ];
+    for entry in messages {
+        let role = match entry.role {
+            MemoryRole::User => "user",
+            MemoryRole::Assistant => "assistant",
+            MemoryRole::Memory => "memory",
+        };
+        let origin = entry
+            .metadata
+            .as_ref()
+            .and_then(|metadata| metadata.origin.as_deref())
+            .unwrap_or("conversation");
+        let content = entry.content.chars().take(900).collect::<String>();
+        lines.push(format!(
+            "<message role=\"{role}\" origin=\"{origin}\">{content}</message>"
+        ));
+    }
+    lines.push("</recent-conversation>".to_owned());
+    lines.push("<recent-exploration-journal>".to_owned());
+    for run in runs {
+        let message = run.message.as_deref().unwrap_or("[silent]");
+        let queries = if run.search_queries.is_empty() {
+            "none".to_owned()
+        } else {
+            run.search_queries.join(" | ")
+        };
+        let reasoning = run
+            .reasoning_summaries
+            .iter()
+            .take(3)
+            .cloned()
+            .collect::<Vec<_>>()
+            .join(" ");
+        lines.push(format!(
+            "<exploration at=\"{}\" surfaced=\"{}\">\nqueries: {}\ninternal-summary: {}\nmessage: {}\n</exploration>",
+            run.completed_at,
+            run.surfaced,
+            queries,
+            reasoning.chars().take(1_200).collect::<String>(),
+            message.chars().take(1_200).collect::<String>()
+        ));
+    }
+    lines.push("</recent-exploration-journal>".to_owned());
+    let joined = lines.join("\n");
+    if joined.chars().count() <= EXPLORATION_CONTEXT_CHARS {
+        return joined;
+    }
+    let mut truncated = joined
+        .chars()
+        .take(EXPLORATION_CONTEXT_CHARS)
+        .collect::<String>();
+    truncated.push_str("\n[older working context truncated]");
+    truncated
+}
+
 async fn set_error(state: &RwLock<ExplorationSnapshot>, error: String) {
     let mut snapshot = state.write().await;
     snapshot.phase = ExplorationPhase::Error;
     snapshot.current_activity = None;
+    snapshot.current_trigger = None;
     snapshot.last_outcome = Some("error".to_owned());
     snapshot.last_error = Some(error);
 }

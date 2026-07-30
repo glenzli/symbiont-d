@@ -1,0 +1,676 @@
+use std::{collections::BTreeSet, sync::Arc};
+
+use anyhow::{Context, Result};
+use chrono::{SecondsFormat, Utc};
+use pcp_core::{
+    LifecycleStatus, Projection, ReadPage, ReadPagesRequest, SearchFilters, SearchMode,
+    SearchPagesRequest, SourceRef, WriteResult,
+};
+use serde::Serialize;
+use serde_json::{Map, Value, json};
+
+use crate::continuity::ContinuityHost;
+
+const HUNCH_KIND: &str = "symbiont_hunch";
+const MAX_HUNCH_FIELD_CHARS: usize = 4_000;
+const MAX_HUNCHES: u32 = 100;
+const MAX_ACTIVE_PROMPT_HUNCHES: usize = 12;
+const MAX_CLOSED_PROMPT_HUNCHES: usize = 4;
+const MAX_PROMPT_FIELD_CHARS: usize = 800;
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum HunchOrigin {
+    User,
+    Symbiont,
+    External,
+}
+
+impl HunchOrigin {
+    pub fn parse(value: &str) -> Option<Self> {
+        match value {
+            "user" => Some(Self::User),
+            "symbiont" => Some(Self::Symbiont),
+            "external" => Some(Self::External),
+            _ => None,
+        }
+    }
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::User => "user",
+            Self::Symbiont => "symbiont",
+            Self::External => "external",
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum HunchState {
+    Germinating,
+    Watching,
+    Dormant,
+    Resolved,
+}
+
+impl HunchState {
+    pub fn parse(value: &str) -> Option<Self> {
+        match value {
+            "germinating" => Some(Self::Germinating),
+            "watching" => Some(Self::Watching),
+            "dormant" => Some(Self::Dormant),
+            "resolved" => Some(Self::Resolved),
+            _ => None,
+        }
+    }
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Germinating => "germinating",
+            Self::Watching => "watching",
+            Self::Dormant => "dormant",
+            Self::Resolved => "resolved",
+        }
+    }
+
+    fn lifecycle(self) -> LifecycleStatus {
+        match self {
+            Self::Germinating | Self::Watching => LifecycleStatus::Active,
+            Self::Dormant | Self::Resolved => LifecycleStatus::Archived,
+        }
+    }
+
+    fn is_active(self) -> bool {
+        matches!(self, Self::Germinating | Self::Watching)
+    }
+}
+
+#[derive(Clone, Debug)]
+pub struct NewHunch {
+    pub question: String,
+    pub origin: HunchOrigin,
+    pub why_alive: String,
+    pub what_would_change_it: String,
+    pub source_revision_ids: Vec<String>,
+}
+
+#[derive(Clone, Debug, Default)]
+pub struct HunchPatch {
+    pub question: Option<String>,
+    pub why_alive: Option<String>,
+    pub what_would_change_it: Option<String>,
+    pub state: Option<HunchState>,
+    pub resolution: Option<String>,
+    pub source_revision_ids: Vec<String>,
+}
+
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Hunch {
+    pub page_id: String,
+    pub revision_id: String,
+    pub question: String,
+    pub origin: HunchOrigin,
+    pub why_alive: String,
+    pub what_would_change_it: String,
+    pub state: HunchState,
+    pub resolution: Option<String>,
+    pub source_revision_ids: Vec<String>,
+    pub last_explored_at: Option<String>,
+    pub updated_at: String,
+}
+
+#[derive(Clone, Debug, Default, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CuriositySnapshot {
+    pub hunches: Vec<Hunch>,
+    pub active_count: usize,
+}
+
+#[derive(Clone)]
+pub struct CuriosityStore {
+    continuity: Arc<ContinuityHost>,
+}
+
+impl CuriosityStore {
+    pub fn new(continuity: Arc<ContinuityHost>) -> Self {
+        Self { continuity }
+    }
+
+    pub async fn snapshot(&self) -> Result<CuriositySnapshot> {
+        let hits = self
+            .continuity
+            .search(SearchPagesRequest {
+                query: HUNCH_KIND.to_owned(),
+                scopes: vec![self.continuity.project_scope().to_owned()],
+                mode: SearchMode::Exact,
+                filters: SearchFilters {
+                    lifecycle_status: vec![LifecycleStatus::Active, LifecycleStatus::Archived],
+                    ..SearchFilters::default()
+                },
+                limit: MAX_HUNCHES,
+                cursor: None,
+            })
+            .await?;
+        if hits.hits.is_empty() {
+            return Ok(CuriositySnapshot::default());
+        }
+        let pages = self
+            .continuity
+            .read(ReadPagesRequest {
+                revision_ids: hits
+                    .hits
+                    .iter()
+                    .map(|hit| hit.revision_id.clone())
+                    .collect(),
+                projections: vec![
+                    Projection::Manifest,
+                    Projection::Facets,
+                    Projection::Provenance,
+                    Projection::History,
+                ],
+                max_chars: 64_000,
+            })
+            .await?;
+        let mut by_revision = pages
+            .into_iter()
+            .filter_map(|page| Hunch::from_page(&page))
+            .map(|hunch| hunch.map(|hunch| (hunch.revision_id.clone(), hunch)))
+            .collect::<Result<std::collections::HashMap<_, _>>>()?;
+        let hunches = hits
+            .hits
+            .into_iter()
+            .filter_map(|hit| by_revision.remove(&hit.revision_id))
+            .collect::<Vec<_>>();
+        let active_count = hunches
+            .iter()
+            .filter(|hunch| hunch.state.is_active())
+            .count();
+        Ok(CuriositySnapshot {
+            hunches,
+            active_count,
+        })
+    }
+
+    pub async fn open(&self, draft: NewHunch) -> Result<WriteResult> {
+        validate_field("question", &draft.question)?;
+        validate_field("why_alive", &draft.why_alive)?;
+        validate_field("what_would_change_it", &draft.what_would_change_it)?;
+        let sources = normalize_sources(draft.source_revision_ids);
+        let state = HunchState::Germinating;
+        let facets = hunch_facets(
+            &draft.question,
+            draft.origin,
+            &draft.why_alive,
+            &draft.what_would_change_it,
+            state,
+            None,
+            None,
+        );
+        self.continuity
+            .write_model_page(
+                Some(self.continuity.project_scope()),
+                &hunch_markdown(
+                    &draft.question,
+                    &draft.why_alive,
+                    &draft.what_would_change_it,
+                    state,
+                    None,
+                ),
+                Some(facets),
+                vec![SourceRef {
+                    source_type: "symbiont_curiosity".to_owned(),
+                    uri: "symbiont://curiosity/hunch".to_owned(),
+                    locator: None,
+                    metadata: None,
+                }],
+                sources.clone(),
+                Vec::new(),
+                None,
+            )
+            .await
+            .context("write Hunch Page")
+    }
+
+    pub async fn revise(
+        &self,
+        page_id: &str,
+        expected_revision_id: &str,
+        patch: HunchPatch,
+        explored: bool,
+    ) -> Result<WriteResult> {
+        let current = self
+            .read_revision(expected_revision_id)
+            .await?
+            .context("Hunch Revision was not found")?;
+        if current.page_id != page_id {
+            anyhow::bail!("Hunch Page and expected Revision do not match");
+        }
+
+        let question = patch.question.unwrap_or(current.question);
+        let why_alive = patch.why_alive.unwrap_or(current.why_alive);
+        let what_would_change_it = patch
+            .what_would_change_it
+            .unwrap_or(current.what_would_change_it);
+        let state = patch.state.unwrap_or(current.state);
+        let resolution = patch.resolution.or(current.resolution);
+        validate_field("question", &question)?;
+        validate_field("why_alive", &why_alive)?;
+        validate_field("what_would_change_it", &what_would_change_it)?;
+        if let Some(value) = resolution.as_deref() {
+            validate_field("resolution", value)?;
+        }
+        let last_explored_at = if explored {
+            Some(now())
+        } else {
+            current.last_explored_at
+        };
+        let sources = normalize_sources(patch.source_revision_ids);
+        self.continuity
+            .revise_model_page(
+                page_id.to_owned(),
+                expected_revision_id.to_owned(),
+                hunch_markdown(
+                    &question,
+                    &why_alive,
+                    &what_would_change_it,
+                    state,
+                    resolution.as_deref(),
+                ),
+                Some(hunch_facets(
+                    &question,
+                    current.origin,
+                    &why_alive,
+                    &what_would_change_it,
+                    state,
+                    resolution.as_deref(),
+                    last_explored_at.as_deref(),
+                )),
+                vec![SourceRef {
+                    source_type: "symbiont_curiosity".to_owned(),
+                    uri: "symbiont://curiosity/hunch".to_owned(),
+                    locator: Some(page_id.to_owned()),
+                    metadata: None,
+                }],
+                state.lifecycle(),
+                sources,
+                None,
+            )
+            .await
+            .context("revise Hunch Page")
+    }
+
+    pub async fn retire(
+        &self,
+        page_id: &str,
+        expected_revision_id: &str,
+        state: HunchState,
+        resolution: Option<String>,
+        source_revision_ids: Vec<String>,
+        explored: bool,
+    ) -> Result<WriteResult> {
+        if !matches!(state, HunchState::Dormant | HunchState::Resolved) {
+            anyhow::bail!("retired Hunch state must be dormant or resolved");
+        }
+        self.revise(
+            page_id,
+            expected_revision_id,
+            HunchPatch {
+                state: Some(state),
+                resolution,
+                source_revision_ids,
+                ..HunchPatch::default()
+            },
+            explored,
+        )
+        .await
+    }
+
+    pub async fn prompt(&self) -> Result<String> {
+        let snapshot = self.snapshot().await?;
+        let mut active = snapshot
+            .hunches
+            .iter()
+            .filter(|hunch| hunch.state.is_active())
+            .take(MAX_ACTIVE_PROMPT_HUNCHES)
+            .map(prompt_hunch)
+            .collect::<Vec<_>>();
+        let closed = snapshot
+            .hunches
+            .iter()
+            .filter(|hunch| !hunch.state.is_active())
+            .take(MAX_CLOSED_PROMPT_HUNCHES)
+            .map(|hunch| {
+                format!(
+                    "- `{}` [{}]: {}",
+                    hunch.page_id,
+                    hunch.state.as_str(),
+                    truncate(&hunch.question, MAX_PROMPT_FIELD_CHARS)
+                )
+            })
+            .collect::<Vec<_>>();
+
+        if active.is_empty() {
+            active.push("- No active Hunches yet.".to_owned());
+        }
+        let mut prompt = format!(
+            "Curiosity Map is symbiont-d's own revisable set of questions, not the user's profile, \
+             preferences, or instructions. Use it to continue investigations across model and \
+             thread changes. Do not create a Hunch for every topic; revise an existing one when \
+             the underlying question is the same.\n\n{}",
+            active.join("\n\n")
+        );
+        if !closed.is_empty() {
+            prompt.push_str(
+                "\n\nRecently dormant or resolved; do not reopen without new evidence:\n",
+            );
+            prompt.push_str(&closed.join("\n"));
+        }
+        Ok(prompt)
+    }
+
+    async fn read_revision(&self, revision_id: &str) -> Result<Option<Hunch>> {
+        let mut pages = self
+            .continuity
+            .read(ReadPagesRequest {
+                revision_ids: vec![revision_id.to_owned()],
+                projections: vec![
+                    Projection::Manifest,
+                    Projection::Facets,
+                    Projection::Provenance,
+                    Projection::History,
+                ],
+                max_chars: 16_000,
+            })
+            .await?;
+        let Some(page) = pages.pop() else {
+            return Ok(None);
+        };
+        Hunch::from_page(&page).transpose()
+    }
+}
+
+impl Hunch {
+    fn from_page(page: &ReadPage) -> Option<Result<Self>> {
+        let revision = &page.revision;
+        let facets = revision.facets.as_ref()?.as_object()?;
+        if facet_text(facets, "kind") != Some(HUNCH_KIND) {
+            return None;
+        }
+        Some((|| {
+            let question = required_facet(facets, "question")?;
+            let why_alive = required_facet(facets, "whyAlive")?;
+            let what_would_change_it = required_facet(facets, "whatWouldChangeIt")?;
+            let origin = HunchOrigin::parse(required_facet(facets, "origin")?.as_str())
+                .context("unknown Hunch origin")?;
+            let state = HunchState::parse(required_facet(facets, "hunchState")?.as_str())
+                .context("unknown Hunch state")?;
+            let history = page.history.iter().collect::<BTreeSet<_>>();
+            let source_revision_ids = revision
+                .provenance
+                .iter()
+                .flat_map(|event| event.input_revision_ids.iter().cloned())
+                .filter(|input| input != &revision.revision_id && !history.contains(input))
+                .collect::<BTreeSet<_>>()
+                .into_iter()
+                .collect();
+            Ok(Self {
+                page_id: revision.page_id.clone(),
+                revision_id: revision.revision_id.clone(),
+                question,
+                origin,
+                why_alive,
+                what_would_change_it,
+                state,
+                resolution: facet_text(facets, "resolution").map(str::to_owned),
+                source_revision_ids,
+                last_explored_at: facet_text(facets, "lastExploredAt").map(str::to_owned),
+                updated_at: revision
+                    .observed_at
+                    .clone()
+                    .unwrap_or_else(|| revision.created_at.clone()),
+            })
+        })())
+    }
+}
+
+fn hunch_facets(
+    question: &str,
+    origin: HunchOrigin,
+    why_alive: &str,
+    what_would_change_it: &str,
+    state: HunchState,
+    resolution: Option<&str>,
+    last_explored_at: Option<&str>,
+) -> Value {
+    let mut facets = Map::new();
+    facets.insert("kind".to_owned(), json!(HUNCH_KIND));
+    facets.insert("origin".to_owned(), json!(origin.as_str()));
+    facets.insert("hunchState".to_owned(), json!(state.as_str()));
+    facets.insert("question".to_owned(), json!(question.trim()));
+    facets.insert("whyAlive".to_owned(), json!(why_alive.trim()));
+    facets.insert(
+        "whatWouldChangeIt".to_owned(),
+        json!(what_would_change_it.trim()),
+    );
+    if let Some(value) = resolution {
+        facets.insert("resolution".to_owned(), json!(value.trim()));
+    }
+    if let Some(value) = last_explored_at {
+        facets.insert("lastExploredAt".to_owned(), json!(value));
+    }
+    Value::Object(facets)
+}
+
+fn hunch_markdown(
+    question: &str,
+    why_alive: &str,
+    what_would_change_it: &str,
+    state: HunchState,
+    resolution: Option<&str>,
+) -> String {
+    let mut content = format!(
+        "# Hunch\n\n{}\n\n## Why it remains open\n\n{}\n\n## What would change it\n\n{}\n\nState: `{}`",
+        question.trim(),
+        why_alive.trim(),
+        what_would_change_it.trim(),
+        state.as_str()
+    );
+    if let Some(resolution) = resolution {
+        content.push_str("\n\n## Resolution\n\n");
+        content.push_str(resolution.trim());
+    }
+    content
+}
+
+fn prompt_hunch(hunch: &Hunch) -> String {
+    format!(
+        "Hunch `{}` revision `{}` [{}; origin={}]\n\
+         Question: {}\n\
+         Why alive: {}\n\
+         What would change it: {}\n\
+         Last explored: {}",
+        hunch.page_id,
+        hunch.revision_id,
+        hunch.state.as_str(),
+        hunch.origin.as_str(),
+        truncate(&hunch.question, MAX_PROMPT_FIELD_CHARS),
+        truncate(&hunch.why_alive, MAX_PROMPT_FIELD_CHARS),
+        truncate(&hunch.what_would_change_it, MAX_PROMPT_FIELD_CHARS),
+        hunch.last_explored_at.as_deref().unwrap_or("never")
+    )
+}
+
+fn required_facet(facets: &Map<String, Value>, key: &str) -> Result<String> {
+    facet_text(facets, key)
+        .map(str::to_owned)
+        .with_context(|| format!("Hunch facet {key} is missing"))
+}
+
+fn facet_text<'a>(facets: &'a Map<String, Value>, key: &str) -> Option<&'a str> {
+    facets
+        .get(key)
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+}
+
+fn validate_field(label: &str, value: &str) -> Result<()> {
+    let count = value.trim().chars().count();
+    if count == 0 || count > MAX_HUNCH_FIELD_CHARS {
+        anyhow::bail!("{label} must contain 1-{MAX_HUNCH_FIELD_CHARS} characters");
+    }
+    Ok(())
+}
+
+fn normalize_sources(source_revision_ids: Vec<String>) -> Vec<String> {
+    source_revision_ids
+        .into_iter()
+        .map(|value| value.trim().to_owned())
+        .filter(|value| !value.is_empty())
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        .collect()
+}
+
+fn truncate(value: &str, max_chars: usize) -> String {
+    let mut output = value.chars().take(max_chars).collect::<String>();
+    if value.chars().count() > max_chars {
+        output.push_str("...");
+    }
+    output
+}
+
+fn now() -> String {
+    Utc::now().to_rfc3339_opts(SecondsFormat::Millis, true)
+}
+
+#[cfg(test)]
+mod tests {
+    use std::{
+        sync::Arc,
+        time::{SystemTime, UNIX_EPOCH},
+    };
+
+    use pcp_sqlite::SqlitePcpStore;
+
+    use super::{CuriosityStore, HunchOrigin, HunchPatch, HunchState, NewHunch};
+    use crate::{
+        continuity::{ContinuityHost, MessageLinks},
+        memory::MemoryRole,
+    };
+
+    #[tokio::test]
+    async fn hunches_revise_in_place_and_remain_separate_from_user_profile() {
+        let nonce = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("clock")
+            .as_nanos();
+        let root = std::env::temp_dir().join(format!("symbiont-curiosity-{nonce}"));
+        let pcp = Arc::new(
+            SqlitePcpStore::open(root.join("context.sqlite3"))
+                .await
+                .expect("open PCP"),
+        );
+        let continuity = Arc::new(ContinuityHost::open(pcp).await.expect("open continuity"));
+        let curiosity = CuriosityStore::new(Arc::clone(&continuity));
+        let source = continuity
+            .ingest_message(
+                MemoryRole::User,
+                "Could conversation itself wake a stronger exploration?",
+                Vec::new(),
+                None,
+                MessageLinks::default(),
+            )
+            .await
+            .expect("store source");
+        let created = curiosity
+            .open(NewHunch {
+                question: "Can conversation-created questions improve exploration diversity?"
+                    .to_owned(),
+                origin: HunchOrigin::Symbiont,
+                why_alive: "The timer repeatedly follows the same nearby topic.".to_owned(),
+                what_would_change_it: "Several event-driven runs either diversify or repeat."
+                    .to_owned(),
+                source_revision_ids: vec![source.page.revision_id.clone()],
+            })
+            .await
+            .expect("open Hunch");
+        let revised = curiosity
+            .revise(
+                &created.page_id,
+                &created.revision_id,
+                HunchPatch {
+                    state: Some(HunchState::Watching),
+                    why_alive: Some(
+                        "A conversation event is now available as a separate wake source."
+                            .to_owned(),
+                    ),
+                    source_revision_ids: vec![source.page.revision_id],
+                    ..HunchPatch::default()
+                },
+                true,
+            )
+            .await
+            .expect("revise Hunch");
+
+        assert_eq!(created.page_id, revised.page_id);
+        assert_ne!(created.revision_id, revised.revision_id);
+        let snapshot = curiosity.snapshot().await.expect("read curiosity");
+        assert_eq!(snapshot.active_count, 1);
+        assert_eq!(snapshot.hunches[0].state, HunchState::Watching);
+        assert!(snapshot.hunches[0].last_explored_at.is_some());
+        let prompt = curiosity.prompt().await.expect("render prompt");
+        assert!(prompt.contains("not the user's profile"));
+        assert!(prompt.contains(&created.page_id));
+
+        drop(curiosity);
+        drop(continuity);
+        let _ = tokio::fs::remove_dir_all(root).await;
+    }
+
+    #[tokio::test]
+    async fn resolved_hunches_leave_the_active_map_without_being_deleted() {
+        let nonce = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("clock")
+            .as_nanos();
+        let root = std::env::temp_dir().join(format!("symbiont-curiosity-retire-{nonce}"));
+        let pcp = Arc::new(
+            SqlitePcpStore::open(root.join("context.sqlite3"))
+                .await
+                .expect("open PCP"),
+        );
+        let continuity = Arc::new(ContinuityHost::open(pcp).await.expect("open continuity"));
+        let curiosity = CuriosityStore::new(continuity);
+        let created = curiosity
+            .open(NewHunch {
+                question: "Will this remain open?".to_owned(),
+                origin: HunchOrigin::External,
+                why_alive: "There is one unresolved claim.".to_owned(),
+                what_would_change_it: "A primary source settles the claim.".to_owned(),
+                source_revision_ids: Vec::new(),
+            })
+            .await
+            .expect("open Hunch");
+        curiosity
+            .retire(
+                &created.page_id,
+                &created.revision_id,
+                HunchState::Resolved,
+                Some("The primary source settled it.".to_owned()),
+                Vec::new(),
+                true,
+            )
+            .await
+            .expect("resolve Hunch");
+
+        let snapshot = curiosity.snapshot().await.expect("read curiosity");
+        assert_eq!(snapshot.active_count, 0);
+        assert_eq!(snapshot.hunches.len(), 1);
+        assert_eq!(snapshot.hunches[0].state, HunchState::Resolved);
+
+        let _ = tokio::fs::remove_dir_all(root).await;
+    }
+}

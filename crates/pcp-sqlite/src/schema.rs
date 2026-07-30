@@ -68,6 +68,42 @@ pub(crate) fn initialize(connection: &Connection) -> Result<()> {
                 PRIMARY KEY (derived_revision_id, input_revision_id)
             );
 
+            CREATE TABLE IF NOT EXISTS pcp_summaries (
+                summary_revision_id TEXT PRIMARY KEY,
+                target_revision_id TEXT NOT NULL REFERENCES pcp_revisions(revision_id),
+                previous_summary_revision_id TEXT REFERENCES pcp_summaries(summary_revision_id),
+                content TEXT NOT NULL,
+                actor_type TEXT NOT NULL,
+                actor_id TEXT NOT NULL,
+                created_at TEXT NOT NULL,
+                tool_or_model TEXT,
+                provenance_json TEXT NOT NULL
+            );
+
+            CREATE TABLE IF NOT EXISTS pcp_summary_heads (
+                target_revision_id TEXT PRIMARY KEY REFERENCES pcp_revisions(revision_id),
+                current_summary_revision_id TEXT NOT NULL
+                    REFERENCES pcp_summaries(summary_revision_id)
+            );
+
+            CREATE TABLE IF NOT EXISTS pcp_summary_idempotency (
+                actor_id TEXT NOT NULL,
+                idempotency_key TEXT NOT NULL,
+                target_revision_id TEXT NOT NULL REFERENCES pcp_revisions(revision_id),
+                result_summary_revision_id TEXT NOT NULL
+                    REFERENCES pcp_summaries(summary_revision_id),
+                created_at TEXT NOT NULL,
+                PRIMARY KEY (actor_id, idempotency_key)
+            );
+
+            CREATE TABLE IF NOT EXISTS pcp_summary_assessments (
+                target_revision_id TEXT PRIMARY KEY REFERENCES pcp_revisions(revision_id),
+                policy_version TEXT NOT NULL,
+                outcome TEXT NOT NULL,
+                assessed_at TEXT NOT NULL,
+                tool_or_model TEXT
+            );
+
             CREATE TABLE IF NOT EXISTS pcp_idempotency (
                 actor_id TEXT NOT NULL,
                 operation TEXT NOT NULL,
@@ -88,6 +124,13 @@ pub(crate) fn initialize(connection: &Connection) -> Result<()> {
                 tokenize = 'unicode61'
             );
 
+            CREATE VIRTUAL TABLE IF NOT EXISTS pcp_summary_fts USING fts5(
+                summary_revision_id UNINDEXED,
+                target_revision_id UNINDEXED,
+                content,
+                tokenize = 'unicode61'
+            );
+
             CREATE INDEX IF NOT EXISTS pcp_revisions_page
                 ON pcp_revisions(page_id, created_at DESC);
             CREATE INDEX IF NOT EXISTS pcp_revisions_namespace
@@ -98,6 +141,10 @@ pub(crate) fn initialize(connection: &Connection) -> Result<()> {
                 ON pcp_relations(to_revision_id, relation_type);
             CREATE INDEX IF NOT EXISTS pcp_provenance_inputs_input
                 ON pcp_provenance_inputs(input_revision_id, derived_revision_id);
+            CREATE INDEX IF NOT EXISTS pcp_summaries_target
+                ON pcp_summaries(target_revision_id, created_at DESC);
+            CREATE INDEX IF NOT EXISTS pcp_summary_assessments_policy
+                ON pcp_summary_assessments(policy_version, assessed_at DESC);
 
             INSERT OR IGNORE INTO pcp_metadata (key, value)
             VALUES ('provenance_input_index_version', '0');
