@@ -6,7 +6,7 @@ use axum::{
     extract::{DefaultBodyLimit, Multipart, Path as AxumPath, Query, State},
     http::{StatusCode, header},
     response::{IntoResponse, Response},
-    routing::{get, post},
+    routing::{delete, get, post},
 };
 use pcp_core::{
     Projection, ReadPage, ReadPagesRequest, Scope, SearchFilters, SearchMode, SearchPagesRequest,
@@ -26,7 +26,7 @@ use crate::{
     continuity::{ContinuityHost, MessageLinks},
     curiosity::{CuriositySnapshot, CuriosityStore},
     exploration::{ExplorationHandle, ExplorationSnapshot, today_started_at},
-    memory::{MemoryEntry, MemoryRole},
+    memory::{MemoryEntry, MemoryRole, MessageDeliveryState},
     profile::{CalibrationMode, ProfileSnapshot, ProfileStore, SetupStatus},
     symbiont_context::{
         ContextAuthor, ContextDocumentKind, SymbiontContextSnapshot, SymbiontContextStore,
@@ -44,6 +44,7 @@ const CURIOSITY_UI_JS: &str = include_str!("../web/curiosity-ui.js");
 const SETTINGS_JS: &str = include_str!("../web/settings.js");
 const EXPLORATION_UI_JS: &str = include_str!("../web/exploration-ui.js");
 const MESSAGE_SYNC_JS: &str = include_str!("../web/message-sync.js");
+const MESSAGE_ACTIONS_JS: &str = include_str!("../web/message-actions.js");
 const TRACE_UI_JS: &str = include_str!("../web/trace-ui.js");
 const STYLES_CSS: &str = include_str!("../web/styles.css");
 const MAX_USER_MESSAGE_CHARS: usize = 12_000;
@@ -155,6 +156,15 @@ struct TriggerResponse {
     accepted: bool,
 }
 
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct MessageRetractionResponse {
+    removed_revision_ids: Vec<String>,
+    affected_page_count: usize,
+    restored_page_count: usize,
+    memory_chars: usize,
+}
+
 #[derive(Deserialize)]
 struct OnboardingRequest {
     mode: CalibrationMode,
@@ -197,6 +207,9 @@ struct PcpArchiveResponse {
     rename_all_fields = "camelCase"
 )]
 enum WireEvent {
+    Accepted {
+        message: MemoryEntry,
+    },
     Activity {
         label: String,
         model: String,
@@ -243,10 +256,13 @@ pub fn router(state: AppState) -> Router {
         .route("/settings.js", get(settings_js))
         .route("/exploration-ui.js", get(exploration_ui_js))
         .route("/message-sync.js", get(message_sync_js))
+        .route("/message-actions.js", get(message_actions_js))
         .route("/trace-ui.js", get(trace_ui_js))
         .route("/styles.css", get(styles_css))
+        .route("/api/health", get(health))
         .route("/api/bootstrap", get(bootstrap))
         .route("/api/chat", post(chat))
+        .route("/api/messages/{revision_id}", delete(retract_message))
         .route("/api/assets/{asset_id}", get(asset))
         .route("/api/onboarding/start", post(start_onboarding))
         .route("/api/archive", get(archive))
@@ -261,6 +277,10 @@ pub fn router(state: AppState) -> Router {
         .route("/api/traces/{trace_id}", get(trace_detail))
         .layer(DefaultBodyLimit::max(MAX_CHAT_BODY_BYTES))
         .with_state(state)
+}
+
+async fn health() -> StatusCode {
+    StatusCode::NO_CONTENT
 }
 
 async fn index() -> impl IntoResponse {
@@ -330,6 +350,13 @@ async fn message_sync_js() -> impl IntoResponse {
     (
         [(header::CONTENT_TYPE, "text/javascript; charset=utf-8")],
         MESSAGE_SYNC_JS,
+    )
+}
+
+async fn message_actions_js() -> impl IntoResponse {
+    (
+        [(header::CONTENT_TYPE, "text/javascript; charset=utf-8")],
+        MESSAGE_ACTIONS_JS,
     )
 }
 
@@ -658,6 +685,35 @@ async fn asset(
         .expect("valid image asset response"))
 }
 
+async fn retract_message(
+    State(state): State<AppState>,
+    AxumPath(revision_id): AxumPath<String>,
+) -> Result<Json<MessageRetractionResponse>, ApiError> {
+    let result = state
+        .continuity
+        .retract_latest_user_message(&revision_id)
+        .await
+        .map_err(ApiError::conflict)?;
+    state
+        .codex
+        .lock()
+        .await
+        .reset_interactive_thread()
+        .await
+        .map_err(ApiError::internal)?;
+    let memory_chars = state
+        .continuity
+        .memory_chars()
+        .await
+        .map_err(ApiError::internal)?;
+    Ok(Json(MessageRetractionResponse {
+        removed_revision_ids: result.message_revision_ids,
+        affected_page_count: result.retracted_revision_ids.len(),
+        restored_page_count: result.restored_page_ids.len(),
+        memory_chars,
+    }))
+}
+
 async fn chat(State(state): State<AppState>, multipart: Multipart) -> Result<Response, ApiError> {
     let profile = state.profile.snapshot().await;
     if profile.status == SetupStatus::Unconfigured {
@@ -793,6 +849,13 @@ async fn run_chat(
             },
         )
         .await?;
+    let mut accepted_message = user_message.entry.clone();
+    accepted_message.delivery_state = Some(MessageDeliveryState::Pending);
+    let _ = wire_tx
+        .send(WireEvent::Accepted {
+            message: accepted_message,
+        })
+        .await;
     let compute = state.compute.snapshot().await;
     let profile = state.profile.snapshot().await;
     let continuity_context = format!(

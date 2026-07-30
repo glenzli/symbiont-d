@@ -319,6 +319,43 @@ input:focus-visible {
   min-width: 0;
 }
 
+.message[data-role="user"] .message-foot {
+  justify-content: flex-end;
+}
+
+.message-state {
+  color: var(--text-faint);
+}
+
+.message.message-failed .message-state {
+  color: var(--danger-text);
+  font-weight: 650;
+}
+
+.message-actions {
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+}
+
+.message-action {
+  min-width: 0;
+  padding: 1px 4px;
+  border: 1px solid transparent;
+  border-radius: 3px;
+  color: var(--text-faint);
+  background: transparent;
+  cursor: pointer;
+  font-size: 9px;
+  line-height: 1.4;
+}
+
+.message-action:hover {
+  border-color: var(--border);
+  color: var(--text);
+  background: var(--surface-subtle);
+}
+
 .trace-button {
   width: 19px;
   height: 17px;
@@ -355,6 +392,10 @@ input:focus-visible {
   border-color: var(--danger-border);
   background: var(--danger-bg);
   color: var(--danger-text);
+}
+
+.message.message-failed .message-body {
+  border-color: var(--danger-border);
 }
 
 .rich-text {

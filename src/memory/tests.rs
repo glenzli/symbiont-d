@@ -16,6 +16,7 @@ fn serializes_message_identity_for_the_browser_contract() {
         revision_id: Some("rev_message".to_owned()),
         parts: Vec::new(),
         metadata: None,
+        delivery_state: None,
     })
     .expect("serialize message");
 

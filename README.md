@@ -14,6 +14,7 @@ user's attention into a feed.
 ## Current Prototype
 
 - Local chat interface with streaming responses.
+- Latest-message recall, edit-as-resend, and recovery for interrupted sends.
 - Direct connection to `codex app-server`; no separate model API pipeline.
 - Live model catalog and configurable compute lanes.
 - Markdown, sanitized inline HTML, KaTeX, code blocks, tables, and images.
@@ -61,6 +62,8 @@ codex login status
 
 ## Run
 
+For foreground development:
+
 ```bash
 cargo run
 ```
@@ -69,6 +72,27 @@ Open [http://127.0.0.1:4317](http://127.0.0.1:4317).
 
 Initialization is explicit. Autonomous exploration does not run until the
 initial orientation is complete and autonomy is enabled in Settings.
+
+### Run as a macOS service
+
+Install `symbiont-d` as a user LaunchAgent when it should remain available
+outside the terminal that started it:
+
+```bash
+./scripts/service-install.sh
+```
+
+The installer builds the release binary, starts it at login, and configures
+`launchd` to restart it after an unexpected exit. Re-run the installer after
+changing the source.
+
+```bash
+./scripts/service-status.sh
+./scripts/service-uninstall.sh
+```
+
+Service logs are written to `data/logs/`. Uninstalling the service preserves
+all local data.
 
 ## Local Data
 
@@ -131,4 +155,5 @@ web/                embedded browser interface
   channels; there is no embedding index.
 - Autonomous behavior and background memory maintenance still need long-running
   real-world evaluation.
-- The current interface is a local web app, not yet a packaged desktop daemon.
+- The current interface is a local web app. Service packaging currently covers
+  macOS `launchd`; there is no native desktop shell yet.

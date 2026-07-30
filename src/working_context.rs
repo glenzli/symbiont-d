@@ -183,6 +183,7 @@ mod tests {
             revision_id: Some(revision.to_owned()),
             parts: Vec::new(),
             metadata: None,
+            delivery_state: None,
         }
     }
 

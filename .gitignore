@@ -12,4 +12,5 @@
 /data/context.sqlite3-shm
 /data/context.sqlite3-wal
 /data/assets
+/data/logs
 .DS_Store

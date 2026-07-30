@@ -2,6 +2,7 @@ import { initProfileUi } from "/profile-ui.js";
 import { formatDuration, formatMemorySize, formatTokens } from "/presentation.js";
 import { renderMessageContent, renderRichText } from "/rich-text.js";
 import { initExplorationUi } from "/exploration-ui.js";
+import { initMessageActions } from "/message-actions.js";
 import { initMessageSync } from "/message-sync.js";
 import { initSettings } from "/settings.js";
 import { initTraceUi } from "/trace-ui.js";
@@ -48,6 +49,11 @@ const messageSync = initMessageSync({
   applyRuntime,
   shouldDeferMessages: () => busy,
 });
+const messageActions = initMessageActions({
+  conversation,
+  isBusy: () => busy,
+  perform: performMessageAction,
+});
 
 function metadataText(metadata) {
   if (!metadata?.runs?.length || appState.compute?.showModel === false) return "";
@@ -70,7 +76,11 @@ function renderMessageFoot(message, metadata) {
   runtime.textContent = metadataText(metadata);
   traceButton.hidden = !metadata?.traceId;
   traceButton.dataset.traceId = metadata?.traceId || "";
-  foot.hidden = !runtime.textContent && traceButton.hidden;
+  foot.hidden =
+    !runtime.textContent &&
+    traceButton.hidden &&
+    !foot.querySelector(".message-state")?.textContent &&
+    !foot.querySelector(".message-actions")?.childElementCount;
 }
 
 function appendMessage(entry, options = {}) {
@@ -97,6 +107,10 @@ function appendMessage(entry, options = {}) {
   conversation.append(fragment);
   const element = conversation.lastElementChild;
   messageSync.track(element, entry, options);
+  messageActions.track(element, entry, {
+    deliveryState: options.deliveryState,
+    failureReason: options.failureReason,
+  });
   if (options.scroll !== false) {
     conversation.scrollTop = conversation.scrollHeight;
   }
@@ -113,6 +127,7 @@ function setBusy(nextBusy) {
   input.disabled = nextBusy;
   sendButton.disabled = nextBusy;
   addImageButton.disabled = nextBusy;
+  messageActions.refresh();
   if (!nextBusy) {
     renderRuntimeStatus();
     clearInterval(activityTimer);
@@ -140,6 +155,13 @@ function setActivity(message, event) {
   refresh();
   clearInterval(activityTimer);
   activityTimer = setInterval(refresh, 1000);
+}
+
+function applyAccepted(message, entry) {
+  if (entry.revisionId) message.dataset.revisionId = entry.revisionId;
+  renderMessageContent(message.querySelector(".message-body"), entry);
+  messageSync.track(message, entry, { interactive: true });
+  messageActions.update(message, entry, { deliveryState: "pending" });
 }
 
 function applyComplete(message, entry) {
@@ -228,7 +250,7 @@ async function bootstrap() {
   }
 }
 
-async function consumeStream(response, pending) {
+async function consumeStream(response, pending, outgoing) {
   if (!response.ok) {
     const payload = await response.json();
     throw new Error(payload.error || "请求失败。");
@@ -250,7 +272,9 @@ async function consumeStream(response, pending) {
     for (const line of lines) {
       if (!line.trim()) continue;
       const event = JSON.parse(line);
-      if (event.type === "activity") {
+      if (event.type === "accepted") {
+        applyAccepted(outgoing, event.message);
+      } else if (event.type === "activity") {
         setActivity(pending, event);
       } else if (event.type === "delta") {
         receivedText += event.text;
@@ -269,6 +293,7 @@ async function consumeStream(response, pending) {
         pending.querySelector(".message-body").textContent = "正在深入处理";
       } else if (event.type === "complete") {
         completed = true;
+        messageActions.update(outgoing, null, { deliveryState: "delivered" });
         applyComplete(pending, event.message);
         memorySize.textContent = formatMemorySize(event.memoryChars);
         appState.profile = event.profile;
@@ -289,7 +314,7 @@ async function consumeStream(response, pending) {
 
 async function sendMessage(text, images = []) {
   if ((!text.trim() && !images.length) || busy) return;
-  appendMessage({
+  const localEntry = {
     role: "user",
     at: new Date().toISOString(),
     content: text,
@@ -303,10 +328,13 @@ async function sendMessage(text, images = []) {
           filename: image.file.name,
           mimeType: image.file.type,
           byteSize: image.file.size,
+          file: image.file,
         },
       })),
     ],
-  });
+    deliveryState: "pending",
+  };
+  const outgoing = appendMessage(localEntry, { deliveryState: "pending" });
   const pending = appendMessage(
     {
       role: "assistant",
@@ -326,16 +354,87 @@ async function sendMessage(text, images = []) {
       method: "POST",
       body,
     });
-    await consumeStream(response, pending);
+    await consumeStream(response, pending, outgoing);
   } catch (error) {
-    pending.classList.remove("pending", "streaming");
-    pending.classList.add("error");
-    pending.querySelector(".message-body").textContent = error.message;
-    pending.querySelector(".message-foot").hidden = true;
+    pending.remove();
+    messageActions.update(outgoing, null, {
+      deliveryState: "failed",
+      failureReason: error.message,
+    });
   } finally {
     setBusy(false);
     if (!composer.hidden) input.focus();
   }
+}
+
+async function performMessageAction(action, message, entry) {
+  if (action === "recall" || action === "delete") {
+    await retractMessage(message, entry);
+    return;
+  }
+  const images = await recoverImages(entry);
+  if (action === "edit") {
+    await retractMessage(message, entry);
+    input.value = entry.content || "";
+    selectedImages = images;
+    renderAttachmentTray();
+    resizeComposer();
+    input.focus();
+    return;
+  }
+  if (action === "retry") {
+    await retractMessage(message, entry);
+    await sendMessage(entry.content || "", images);
+  }
+}
+
+async function retractMessage(message, entry) {
+  if (!entry.revisionId) {
+    removeMessages([], message);
+    return;
+  }
+  const response = await fetch(
+    `/api/messages/${encodeURIComponent(entry.revisionId)}`,
+    { method: "DELETE" },
+  );
+  const payload = await response.json();
+  if (!response.ok) throw new Error(payload.error || "无法撤回消息");
+  removeMessages(payload.removedRevisionIds || [], message);
+  memorySize.textContent = formatMemorySize(payload.memoryChars || 0);
+}
+
+function removeMessages(revisionIds, fallback) {
+  messageSync.remove(revisionIds);
+  for (const revisionId of revisionIds) {
+    conversation
+      .querySelector(
+        `.message[data-revision-id="${CSS.escape(revisionId)}"]`,
+      )
+      ?.remove();
+  }
+  if (fallback?.isConnected) fallback.remove();
+  emptyState.hidden = Boolean(conversation.querySelector(".message"));
+  messageActions.refresh();
+}
+
+async function recoverImages(entry) {
+  const images = [];
+  for (const part of entry.parts || []) {
+    if (part.type !== "image" || !part.asset) continue;
+    const asset = part.asset;
+    if (asset.file instanceof File) {
+      images.push({ file: asset.file, url: asset.url });
+      continue;
+    }
+    const response = await fetch(asset.url);
+    if (!response.ok) throw new Error(`无法重新读取图片 ${asset.filename}`);
+    const blob = await response.blob();
+    const file = new File([blob], asset.filename || "image", {
+      type: asset.mimeType || blob.type,
+    });
+    images.push({ file, url: URL.createObjectURL(file) });
+  }
+  return images;
 }
 
 composer.addEventListener("submit", (event) => {

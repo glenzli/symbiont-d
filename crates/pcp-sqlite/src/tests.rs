@@ -622,6 +622,187 @@ async fn rejects_cycles_in_the_derivation_subgraph() {
     let _ = std::fs::remove_dir_all(root);
 }
 
+#[tokio::test]
+async fn retracts_derived_pages_and_restores_preexisting_pages() {
+    let root = std::env::temp_dir().join(format!(
+        "pcp-retract-{}",
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("clock")
+            .as_nanos()
+    ));
+    let store = SqlitePcpStore::open(root.join("pcp.sqlite3"))
+        .await
+        .expect("open store");
+    let owner_id = store.owner_id().to_owned();
+    let namespace = "conversation:retract".to_owned();
+    store
+        .create_scope(CreateScopeRequest {
+            owner_id: owner_id.clone(),
+            namespace: namespace.clone(),
+            scope_type: "conversation".to_owned(),
+            display_name: "Retraction test".to_owned(),
+            description: None,
+            parent_namespace: None,
+            visibility: "private".to_owned(),
+        })
+        .await
+        .expect("create scope");
+    let actor = Actor {
+        actor_type: ActorType::User,
+        actor_id: "user:retract".to_owned(),
+    };
+    let source = store
+        .write_page(
+            write_request(
+                &owner_id,
+                &namespace,
+                actor.clone(),
+                "Withdraw this message.",
+                "retract:source",
+            ),
+            vec![namespace.clone()],
+        )
+        .await
+        .expect("write source");
+    let durable = store
+        .write_page(
+            write_request(
+                &owner_id,
+                &namespace,
+                actor.clone(),
+                "Stable state.",
+                "retract:durable",
+            ),
+            vec![namespace.clone()],
+        )
+        .await
+        .expect("write durable page");
+    let revised = store
+        .revise_page(
+            RevisePageRequest {
+                page_id: durable.page_id.clone(),
+                expected_revision_id: durable.revision_id.clone(),
+                created_by: actor.clone(),
+                lifecycle_status: LifecycleStatus::Active,
+                observed_at: None,
+                valid_from: None,
+                valid_to: None,
+                payload: Some(PagePayload {
+                    media_type: "text/markdown".to_owned(),
+                    content: "State derived from the withdrawn message.".to_owned(),
+                }),
+                source_refs: Vec::new(),
+                facets: None,
+                provenance: vec![ProvenanceEvent {
+                    operation: "derive".to_owned(),
+                    actor: actor.clone(),
+                    timestamp: "2026-07-30T00:00:00Z".to_owned(),
+                    input_revision_ids: vec![source.revision_id.clone()],
+                    tool_or_model: None,
+                }],
+                idempotency_key: Some("retract:durable-revision".to_owned()),
+            },
+            vec![namespace.clone()],
+        )
+        .await
+        .expect("revise durable page");
+    let mut derived_request = write_request(
+        &owner_id,
+        &namespace,
+        actor.clone(),
+        "A newly derived Page.",
+        "retract:derived",
+    );
+    derived_request.provenance = vec![ProvenanceEvent {
+        operation: "derive".to_owned(),
+        actor: actor.clone(),
+        timestamp: "2026-07-30T00:00:00Z".to_owned(),
+        input_revision_ids: vec![source.revision_id.clone()],
+        tool_or_model: None,
+    }];
+    let derived = store
+        .write_page(derived_request, vec![namespace.clone()])
+        .await
+        .expect("write derived page");
+    let unrelated = store
+        .write_page(
+            write_request(
+                &owner_id,
+                &namespace,
+                actor.clone(),
+                "Independent state.",
+                "retract:unrelated",
+            ),
+            vec![namespace.clone()],
+        )
+        .await
+        .expect("write unrelated page");
+
+    let result = store
+        .tombstone_derivation_cascade(
+            source.revision_id.clone(),
+            Actor {
+                actor_type: ActorType::System,
+                actor_id: "system:retract".to_owned(),
+            },
+            vec![namespace.clone()],
+        )
+        .await
+        .expect("retract source");
+    assert!(result.retracted_revision_ids.contains(&source.revision_id));
+    assert!(result.retracted_revision_ids.contains(&revised.revision_id));
+    assert!(result.retracted_revision_ids.contains(&derived.revision_id));
+    assert_eq!(result.restored_page_ids, vec![durable.page_id.clone()]);
+    assert_eq!(result.tombstone_revision_ids.len(), 2);
+
+    let restored_revision = store
+        .current_revision_id(durable.page_id, vec![namespace.clone()])
+        .await
+        .expect("read restored head");
+    let restored = store
+        .read_pages(
+            ReadPagesRequest {
+                revision_ids: vec![restored_revision],
+                projections: vec![Projection::Payload],
+                max_chars: 1_000,
+            },
+            vec![namespace.clone()],
+        )
+        .await
+        .expect("read restored state");
+    assert_eq!(
+        restored[0].revision.payload.as_ref().unwrap().content,
+        "Stable state."
+    );
+    let active = store
+        .search_pages(SearchPagesRequest {
+            query: String::new(),
+            scopes: vec![namespace.clone()],
+            mode: SearchMode::Temporal,
+            filters: SearchFilters::default(),
+            limit: 20,
+            cursor: None,
+        })
+        .await
+        .expect("list active pages");
+    assert!(
+        active
+            .hits
+            .iter()
+            .any(|hit| hit.revision_id == unrelated.revision_id)
+    );
+    assert!(
+        active
+            .hits
+            .iter()
+            .all(|hit| hit.revision_id != source.revision_id
+                && hit.revision_id != derived.revision_id)
+    );
+
+    let _ = std::fs::remove_dir_all(root);
+}
+
 fn write_request(
     owner_id: &str,
     namespace: &str,

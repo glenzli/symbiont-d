@@ -409,7 +409,7 @@ fn ensure_provenance_access(
 }
 
 #[allow(clippy::too_many_arguments)]
-fn insert_revision(
+pub(crate) fn insert_revision(
     transaction: &Transaction<'_>,
     page_id: &str,
     revision_id: &str,
@@ -728,13 +728,13 @@ fn complete_provenance(
     Ok(provenance)
 }
 
-fn random_id(transaction: &Transaction<'_>, prefix: &str) -> Result<String> {
+pub(crate) fn random_id(transaction: &Transaction<'_>, prefix: &str) -> Result<String> {
     let random: String = transaction
         .query_row("SELECT lower(hex(randomblob(16)))", [], |row| row.get(0))
         .context("generate PCP identifier")?;
     Ok(format!("{prefix}{random}"))
 }
 
-fn now() -> String {
+pub(crate) fn now() -> String {
     Utc::now().to_rfc3339_opts(SecondsFormat::Millis, true)
 }

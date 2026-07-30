@@ -10,7 +10,7 @@ use serde_json::json;
 use super::{ContinuityHost, MessageLinks};
 use crate::{
     asset::AssetStore,
-    memory::{MemoryRole, MessagePart},
+    memory::{MemoryRole, MessageDeliveryState, MessagePart},
 };
 
 const ONE_PIXEL_PNG: &[u8] = &[
@@ -139,6 +139,10 @@ async fn links_images_user_events_and_assistant_responses() {
         recent_messages[1].revision_id,
         Some(assistant.page.revision_id.clone())
     );
+    assert_eq!(
+        recent_messages[0].delivery_state,
+        Some(MessageDeliveryState::Delivered)
+    );
     let pages = continuity
         .read(ReadPagesRequest {
             revision_ids: vec![
@@ -205,6 +209,84 @@ async fn links_images_user_events_and_assistant_responses() {
         serde_json::from_str(&asset_revision.payload.as_ref().unwrap().content)
             .expect("parse canonical image descriptor");
     assert_eq!(descriptor["filename"], "pixel.png");
+
+    let _ = tokio::fs::remove_dir_all(root).await;
+}
+
+#[tokio::test]
+async fn marks_unanswered_messages_failed_and_retracts_the_latest_turn() {
+    let nonce = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .expect("clock")
+        .as_nanos();
+    let root = std::env::temp_dir().join(format!("symbiont-retract-{nonce}"));
+    let store = Arc::new(
+        SqlitePcpStore::open(root.join("context.sqlite3"))
+            .await
+            .expect("open PCP store"),
+    );
+    let continuity = ContinuityHost::open(store).await.expect("open host");
+    let earlier = continuity
+        .ingest_message(
+            MemoryRole::User,
+            "An older event without explicit response metadata.",
+            Vec::new(),
+            None,
+            MessageLinks::default(),
+        )
+        .await
+        .expect("ingest earlier event");
+    let user = continuity
+        .ingest_message(
+            MemoryRole::User,
+            "This request did not finish.",
+            Vec::new(),
+            None,
+            MessageLinks::default(),
+        )
+        .await
+        .expect("ingest user event");
+    let derived = continuity
+        .write_model_page(
+            None,
+            "A provisional note from the failed turn.",
+            Some(json!({"kind": "provisional_note"})),
+            Vec::new(),
+            vec![user.page.revision_id.clone()],
+            Vec::new(),
+            None,
+        )
+        .await
+        .expect("write derived Page");
+
+    let messages = continuity
+        .recent_messages(20)
+        .await
+        .expect("read failed message");
+    assert_eq!(
+        messages[0].delivery_state,
+        Some(MessageDeliveryState::Delivered)
+    );
+    assert_eq!(
+        messages[1].delivery_state,
+        Some(MessageDeliveryState::Failed)
+    );
+
+    let result = continuity
+        .retract_latest_user_message(&user.page.revision_id)
+        .await
+        .expect("retract latest user message");
+    assert!(result.message_revision_ids.contains(&user.page.revision_id));
+    assert!(result.retracted_revision_ids.contains(&derived.revision_id));
+    let remaining = continuity
+        .recent_messages(20)
+        .await
+        .expect("read active messages");
+    assert_eq!(remaining.len(), 1);
+    assert_eq!(
+        remaining[0].revision_id.as_deref(),
+        Some(earlier.page.revision_id.as_str())
+    );
 
     let _ = tokio::fs::remove_dir_all(root).await;
 }

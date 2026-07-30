@@ -115,6 +115,27 @@ export function initMessageSync({
     pollTimer = setInterval(refresh, 2500);
   }
 
+  function remove(revisionIds) {
+    for (const revisionId of revisionIds) {
+      knownRevisionIds.delete(revisionId);
+      unreadRevisionIds.delete(revisionId);
+      const element = unreadElements.get(revisionId);
+      if (element) {
+        observer.unobserve(element);
+        clearUnreadElement(element);
+      }
+      unreadElements.delete(revisionId);
+    }
+    const remaining = [
+      ...conversation.querySelectorAll(".message[data-revision-id]"),
+    ].filter(
+      (element) => !revisionIds.includes(element.dataset.revisionId),
+    );
+    cursor = remaining.at(-1)?.dataset.revisionId || null;
+    persist();
+    renderUnread();
+  }
+
   function markUnread(element, revisionId) {
     unreadRevisionIds.add(revisionId);
     unreadElements.set(revisionId, element);
@@ -213,7 +234,7 @@ export function initMessageSync({
   document.addEventListener("visibilitychange", scheduleReadCheck);
 
   renderUnread();
-  return { completeBootstrap, start, track, refresh };
+  return { completeBootstrap, remove, start, track, refresh };
 }
 
 function isIncomingAssistant(message) {

@@ -348,6 +348,19 @@ impl CodexClient {
         self.interactive_cursor.mark(revision_id);
     }
 
+    pub async fn reset_interactive_thread(&mut self) -> Result<()> {
+        let previous = self.interactive_thread_id.clone();
+        let workspace = self.workspace.clone();
+        let next = self
+            .start_thread(&workspace)
+            .await
+            .context("start a fresh interactive Codex thread after message retraction")?;
+        self.interactive_thread_id = next;
+        self.interactive_cursor.rotate();
+        self.clear_thread_state(&previous);
+        Ok(())
+    }
+
     pub async fn explore(
         &mut self,
         compute: &ComputeConfig,

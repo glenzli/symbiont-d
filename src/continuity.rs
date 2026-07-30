@@ -14,13 +14,15 @@ use pcp_core::{
     RevisePageRequest, Scope, SearchFilters, SearchMode, SearchPagesRequest, SearchResult,
     SourceRef, WritePageRequest, WriteResult, WriteSummaryRequest, WriteSummaryResult,
 };
-use pcp_sqlite::SqlitePcpStore;
+use pcp_sqlite::{SqlitePcpStore, TombstoneCascadeResult};
 use serde_json::{Value, json};
 use tokio::sync::{Mutex, RwLock};
 
 use crate::{
     asset::SavedImage,
-    memory::{MemoryEntry, MemoryRole, MemoryStore, MessageMetadata, MessagePart},
+    memory::{
+        MemoryEntry, MemoryRole, MemoryStore, MessageDeliveryState, MessageMetadata, MessagePart,
+    },
     profile::{ProfileSnapshot, SetupStatus},
     working_context::{WORKING_CONTEXT_SCAN_MESSAGES, WorkingContext},
 };
@@ -446,6 +448,7 @@ impl ContinuityHost {
             revision_id: None,
             parts,
             metadata,
+            delivery_state: None,
         };
         let actor = actor_for_role(&role);
         let event_key = self.next_event_key();
@@ -609,19 +612,42 @@ impl ContinuityHost {
             }
         }
         revision_ids.truncate(limit);
-        let mut entries = Vec::with_capacity(revision_ids.len());
+        let mut pages = Vec::with_capacity(revision_ids.len());
         for chunk in revision_ids.chunks(20) {
-            let pages = self
-                .read(ReadPagesRequest {
+            pages.extend(
+                self.read(ReadPagesRequest {
                     revision_ids: chunk.to_vec(),
-                    projections: vec![Projection::Payload, Projection::Facets],
+                    projections: vec![
+                        Projection::Payload,
+                        Projection::Facets,
+                        Projection::Relations,
+                    ],
                     max_chars: 64_000,
                 })
-                .await?;
-            for page in pages {
-                if let Some(entry) = memory_entry_from_page(page) {
-                    entries.push(entry);
+                .await?,
+            );
+        }
+        let active_assistant_revisions = pages
+            .iter()
+            .filter(|page| page_message_role(page) == Some(MemoryRole::Assistant))
+            .map(|page| page.revision.revision_id.clone())
+            .collect::<std::collections::HashSet<_>>();
+        let replied_to_revisions = pages
+            .iter()
+            .flat_map(|page| page.relations.iter())
+            .filter(|relation| {
+                relation.relation_type == "responds_to"
+                    && active_assistant_revisions.contains(&relation.from_revision_id)
+            })
+            .map(|relation| relation.to_revision_id.clone())
+            .collect::<std::collections::HashSet<_>>();
+        let mut entries = Vec::with_capacity(pages.len());
+        for page in pages {
+            if let Some(mut entry) = memory_entry_from_page(page) {
+                if entry.role == MemoryRole::User {
+                    entry.delivery_state = Some(MessageDeliveryState::Delivered);
                 }
+                entries.push(entry);
             }
         }
         entries.sort_by(|left, right| {
@@ -629,7 +655,52 @@ impl ContinuityHost {
                 .cmp(&right.at)
                 .then_with(|| left.revision_id.cmp(&right.revision_id))
         });
+        if let Some(latest_user) = entries
+            .iter_mut()
+            .rev()
+            .find(|entry| entry.role == MemoryRole::User)
+            && latest_user
+                .revision_id
+                .as_ref()
+                .is_some_and(|revision| !replied_to_revisions.contains(revision))
+        {
+            latest_user.delivery_state = Some(MessageDeliveryState::Failed);
+        }
         Ok(entries)
+    }
+
+    pub async fn retract_latest_user_message(
+        &self,
+        revision_id: &str,
+    ) -> Result<TombstoneCascadeResult> {
+        let messages = self.recent_messages(500).await?;
+        let target = messages
+            .iter()
+            .find(|entry| entry.revision_id.as_deref() == Some(revision_id))
+            .context("message is not an active conversation event")?;
+        if target.role != MemoryRole::User {
+            anyhow::bail!("only user messages can be retracted");
+        }
+        let latest_user_revision = messages
+            .iter()
+            .rev()
+            .find(|entry| entry.role == MemoryRole::User)
+            .and_then(|entry| entry.revision_id.as_deref());
+        if latest_user_revision != Some(revision_id) {
+            anyhow::bail!("only the latest user message can be retracted");
+        }
+
+        let result = self
+            .store
+            .tombstone_derivation_cascade(
+                revision_id.to_owned(),
+                system_actor(),
+                self.allowed_scopes(),
+            )
+            .await?;
+        *self.last_event_revision.lock().await =
+            self.recent_source_revisions(1).await?.into_iter().next();
+        Ok(result)
     }
 
     pub async fn recent_messages_after(
@@ -973,7 +1044,21 @@ fn memory_entry_from_page(page: ReadPage) -> Option<MemoryEntry> {
         revision_id: Some(page.revision.revision_id),
         parts,
         metadata,
+        delivery_state: None,
     })
+}
+
+fn page_message_role(page: &ReadPage) -> Option<MemoryRole> {
+    let facets = page.revision.facets.as_ref()?;
+    if facets.get("kind").and_then(Value::as_str) != Some("conversation_event") {
+        return None;
+    }
+    match facets.get("role").and_then(Value::as_str)? {
+        "user" => Some(MemoryRole::User),
+        "assistant" => Some(MemoryRole::Assistant),
+        "memory" => Some(MemoryRole::Memory),
+        _ => None,
+    }
 }
 
 fn now() -> String {

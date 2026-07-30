@@ -25,6 +25,14 @@ pub enum MemoryRole {
     Memory,
 }
 
+#[derive(Clone, Debug, Deserialize, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum MessageDeliveryState {
+    Pending,
+    Delivered,
+    Failed,
+}
+
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct MemoryEntry {
@@ -37,6 +45,8 @@ pub struct MemoryEntry {
     pub parts: Vec<MessagePart>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub metadata: Option<MessageMetadata>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub delivery_state: Option<MessageDeliveryState>,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -152,6 +162,7 @@ fn parse_entries(content: &str) -> Vec<MemoryEntry> {
                     text: body.replace(ESCAPED_ENTRY_END, ENTRY_END),
                 }],
                 metadata: header.metadata,
+                delivery_state: None,
             });
         }
     }
