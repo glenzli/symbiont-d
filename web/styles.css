@@ -222,6 +222,21 @@ input:focus-visible {
   height: 16px;
 }
 
+#run-exploration-quick[data-state="exploring"] svg {
+  animation: exploration-compass-spin 1.4s linear infinite;
+}
+
+#run-exploration-quick[data-state="pending"] {
+  color: var(--text);
+  opacity: 0.68;
+}
+
+@keyframes exploration-compass-spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
 .top-overflow {
   position: relative;
 }

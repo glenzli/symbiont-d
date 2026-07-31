@@ -114,15 +114,22 @@ export function initExplorationUi(state) {
 
   function renderQuickRun() {
     const exploring = state.exploration?.phase === "exploring";
-    quickRun.disabled =
-      !state.autonomyPermitted || triggering || queued || exploring;
-    quickRun.textContent = exploring
+    const stateLabel = exploring
       ? "探索中"
       : queued
-        ? "已加入"
+        ? "探索已加入队列"
         : triggering
-          ? "检查中"
-          : "探索";
+          ? "正在检查探索条件"
+          : "立即进行一次探索";
+    quickRun.disabled =
+      !state.autonomyPermitted || triggering || queued || exploring;
+    quickRun.dataset.state = exploring
+      ? "exploring"
+      : queued || triggering
+        ? "pending"
+        : "ready";
+    quickRun.title = stateLabel;
+    quickRun.setAttribute("aria-label", stateLabel);
   }
 
   document
