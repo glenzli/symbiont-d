@@ -50,6 +50,7 @@ use crate::{
 
 const INDEX_HTML: &str = include_str!("../web/index.html");
 const APP_JS: &str = include_str!("../web/app.js");
+const COMPUTE_MODE_UI_JS: &str = include_str!("../web/compute-mode-ui.js");
 const ICONS_JS: &str = include_str!("../web/icons.js");
 const RICH_TEXT_JS: &str = include_str!("../web/rich-text.js");
 const RICH_TEXT_CSS: &str = include_str!("../web/rich-text.css");
@@ -360,6 +361,7 @@ pub fn router(state: AppState) -> Router {
     Router::new()
         .route("/", get(index))
         .route("/app.js", get(app_js))
+        .route("/compute-mode-ui.js", get(compute_mode_ui_js))
         .route("/icons.js", get(icons_js))
         .route("/rich-text.js", get(rich_text_js))
         .route("/rich-text.css", get(rich_text_css))
@@ -434,6 +436,13 @@ async fn app_js() -> impl IntoResponse {
     (
         [(header::CONTENT_TYPE, "text/javascript; charset=utf-8")],
         APP_JS,
+    )
+}
+
+async fn compute_mode_ui_js() -> impl IntoResponse {
+    (
+        [(header::CONTENT_TYPE, "text/javascript; charset=utf-8")],
+        COMPUTE_MODE_UI_JS,
     )
 }
 

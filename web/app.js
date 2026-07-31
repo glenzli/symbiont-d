@@ -3,6 +3,7 @@ import { initReflectionUi } from "/reflection-ui.js";
 import { formatDuration, formatMemorySize, formatTokens } from "/presentation.js";
 import { renderMessageContent, renderRichText } from "/rich-text.js";
 import { initExplorationUi } from "/exploration-ui.js";
+import { initComputeModeUi } from "/compute-mode-ui.js";
 import { initMessageActions } from "/message-actions.js";
 import { initMessageSync } from "/message-sync.js";
 import { initPermissionUi } from "/permission-ui.js";
@@ -109,6 +110,7 @@ const topicUi = initTopicUi({
     resizeComposer();
   },
 });
+const computeModeUi = initComputeModeUi();
 initTopbarUi();
 renderIcons();
 
@@ -696,7 +698,7 @@ composer.addEventListener("submit", (event) => {
   input.value = "";
   selectedImages = [];
   quoteUi.clear();
-  computeMode.value = "auto";
+  computeModeUi.reset();
   composerState.textContent = "";
   renderAttachmentTray();
   resizeComposer();

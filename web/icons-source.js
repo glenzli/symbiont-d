@@ -1,5 +1,6 @@
 import {
   Archive,
+  Check,
   ChevronDown,
   Compass,
   Ellipsis,
@@ -14,6 +15,7 @@ import {
 
 const icons = {
   Archive,
+  Check,
   ChevronDown,
   Compass,
   Ellipsis,

@@ -198,20 +198,37 @@
             autocomplete="off"
           ></textarea>
           <div class="composer-controls">
-            <label class="sr-only" for="compute-mode">本轮计算级别</label>
-            <span class="compute-mode-control">
+            <div class="compute-mode-picker">
+              <label class="sr-only" for="compute-mode">本轮计算级别</label>
               <select
                 id="compute-mode"
                 class="compute-mode-select"
-                aria-label="本轮计算级别"
-                title="本轮计算级别"
+                tabindex="-1"
               >
                 <option value="auto">自动</option>
                 <option value="investigate">深入</option>
                 <option value="critical">关键</option>
               </select>
-              <i data-lucide="chevron-down" aria-hidden="true"></i>
-            </span>
+              <button
+                id="compute-mode-trigger"
+                class="compute-mode-trigger"
+                type="button"
+                aria-expanded="false"
+                aria-controls="compute-mode-menu"
+                title="本轮计算级别"
+              ><span id="compute-mode-label">自动</span><i data-lucide="chevron-down" aria-hidden="true"></i></button>
+              <div id="compute-mode-menu" class="compute-mode-menu" hidden>
+                <button type="button" data-compute-mode-option="auto">
+                  <span>自动</span><i data-lucide="check" aria-hidden="true"></i>
+                </button>
+                <button type="button" data-compute-mode-option="investigate">
+                  <span>深入</span><i data-lucide="check" aria-hidden="true"></i>
+                </button>
+                <button type="button" data-compute-mode-option="critical">
+                  <span>关键</span><i data-lucide="check" aria-hidden="true"></i>
+                </button>
+              </div>
+            </div>
             <button
               id="send"
               class="composer-send-button"
