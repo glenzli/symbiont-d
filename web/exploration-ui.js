@@ -129,6 +129,7 @@ export function initExplorationUi(state) {
         ? "pending"
         : "ready";
     quickRun.title = stateLabel;
+    quickRun.dataset.tooltip = stateLabel;
     quickRun.setAttribute("aria-label", stateLabel);
   }
 

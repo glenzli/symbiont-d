@@ -1,3 +1,14 @@
+import { renderIcons } from "/icons.js";
+
+const ACTIONS = {
+  copy: { icon: "copy", label: "复制文本" },
+  delete: { icon: "trash-2", label: "删除失败消息", destructive: true },
+  edit: { icon: "pencil", label: "撤回后编辑" },
+  quote: { icon: "quote", label: "引用此消息" },
+  recall: { icon: "undo-2", label: "撤回本条消息及后续回应", destructive: true },
+  retry: { icon: "rotate-cw", label: "重新发送" },
+};
+
 export function initMessageActions({ conversation, isBusy, perform }) {
   const entries = new WeakMap();
   const states = new WeakMap();
@@ -5,7 +16,8 @@ export function initMessageActions({ conversation, isBusy, perform }) {
 
   conversation.addEventListener("click", async (event) => {
     const button = event.target.closest("[data-message-action]");
-    if (!button || (button.dataset.messageAction !== "quote" && isBusy())) return;
+    const action = button?.dataset.messageAction;
+    if (!button || (!["quote", "copy"].includes(action) && isBusy())) return;
     const message = button.closest(".message");
     const entry = entries.get(message);
     if (!message || !entry || message.dataset.actionBusy === "true") return;
@@ -13,7 +25,7 @@ export function initMessageActions({ conversation, isBusy, perform }) {
     message.dataset.actionBusy = "true";
     refresh();
     try {
-      await perform(button.dataset.messageAction, message, entry);
+      await perform(action, message, entry);
     } catch (error) {
       setState(message, "failed", error.message);
     } finally {
@@ -78,8 +90,11 @@ export function initMessageActions({ conversation, isBusy, perform }) {
     message.classList.toggle("message-failed", state === "failed");
     actions.replaceChildren();
 
-    if (entry?.revisionId && state === "delivered" && !actionBusy) {
-      actions.append(actionButton("quote", "引用"));
+    if (!actionBusy && entry?.revisionId && state === "delivered") {
+      actions.append(actionButton("quote"));
+    }
+    if (!actionBusy && String(entry?.content || "").trim()) {
+      actions.append(actionButton("copy"));
     }
     if (
       message.dataset.role === "user" &&
@@ -88,11 +103,12 @@ export function initMessageActions({ conversation, isBusy, perform }) {
       !actionBusy
     ) {
       if (state === "failed") {
-        actions.append(actionButton("retry", "重试"), actionButton("delete", "删除"));
+        actions.append(actionButton("retry"), actionButton("delete"));
       } else if (state === "delivered") {
-        actions.append(actionButton("edit", "编辑"), actionButton("recall", "撤回"));
+        actions.append(actionButton("edit"), actionButton("recall"));
       }
     }
+    renderIcons(actions);
     foot.hidden = ![
       foot.querySelector(".message-runtime")?.textContent,
       !foot.querySelector(".trace-button")?.hidden,
@@ -111,11 +127,20 @@ export function initMessageActions({ conversation, isBusy, perform }) {
   };
 }
 
-function actionButton(action, label) {
+function actionButton(action) {
+  const definition = ACTIONS[action];
   const button = document.createElement("button");
   button.type = "button";
-  button.className = "message-action";
+  button.className = definition.destructive
+    ? "message-action message-action-danger"
+    : "message-action";
   button.dataset.messageAction = action;
-  button.textContent = label;
+  button.dataset.tooltip = definition.label;
+  button.title = definition.label;
+  button.setAttribute("aria-label", definition.label);
+  const icon = document.createElement("i");
+  icon.dataset.lucide = definition.icon;
+  icon.setAttribute("aria-hidden", "true");
+  button.append(icon);
   return button;
 }

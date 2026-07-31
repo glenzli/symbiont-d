@@ -593,6 +593,17 @@ async function performMessageAction(action, message, entry) {
     quoteUi.addWhole(entry);
     return;
   }
+  if (action === "copy") {
+    const text = String(entry.content || "").trim();
+    if (!text) return;
+    try {
+      await copyMessageText(text);
+      notifyComposer("已复制");
+    } catch (error) {
+      notifyComposer(error.message);
+    }
+    return;
+  }
   if (action === "recall" || action === "delete") {
     await retractMessage(message, entry);
     return;
@@ -620,6 +631,24 @@ async function performMessageAction(action, message, entry) {
       extractQuotes(entry),
       extractTopic(entry),
     );
+  }
+}
+
+async function copyMessageText(text) {
+  try {
+    await navigator.clipboard.writeText(text);
+    return;
+  } catch {
+    const fallback = document.createElement("textarea");
+    fallback.value = text;
+    fallback.setAttribute("readonly", "");
+    fallback.style.position = "fixed";
+    fallback.style.opacity = "0";
+    document.body.append(fallback);
+    fallback.select();
+    const copied = document.execCommand("copy");
+    fallback.remove();
+    if (!copied) throw new Error("无法复制消息文本");
   }
 }
 
