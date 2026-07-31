@@ -2285,12 +2285,12 @@ fn successful_symbiont_tool(invocations: &[InvocationRecord], tool: &str) -> boo
     })
 }
 
-fn context_revision_ids(invocations: &[InvocationRecord]) -> Vec<String> {
+pub(super) fn context_revision_ids(invocations: &[InvocationRecord]) -> Vec<String> {
     let mut revisions = HashSet::new();
     for step in invocations
         .iter()
         .flat_map(|invocation| &invocation.trace_steps)
-        .filter(|step| step.namespace == "pcp")
+        .filter(|step| step.namespace == "pcp" && step.succeeded)
     {
         collect_revision_ids(&step.arguments, &mut revisions);
         if let Some(text) = step
@@ -2309,7 +2309,7 @@ fn context_revision_ids(invocations: &[InvocationRecord]) -> Vec<String> {
 
 fn collect_revision_ids(value: &Value, revisions: &mut HashSet<String>) {
     match value {
-        Value::String(value) if value.starts_with("rev_") => {
+        Value::String(value) if is_canonical_revision_id(value) => {
             revisions.insert(value.clone());
         }
         Value::Array(values) => {
@@ -2324,6 +2324,12 @@ fn collect_revision_ids(value: &Value, revisions: &mut HashSet<String>) {
         }
         _ => {}
     }
+}
+
+fn is_canonical_revision_id(value: &str) -> bool {
+    value.strip_prefix("rev_").is_some_and(|suffix| {
+        suffix.len() == 32 && suffix.bytes().all(|byte| byte.is_ascii_hexdigit())
+    })
 }
 
 fn normalize_trace_arguments(arguments: Option<&Value>) -> Value {

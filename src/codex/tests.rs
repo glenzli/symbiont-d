@@ -5,7 +5,7 @@ use std::{
 
 use super::{
     client::{
-        autonomous_response_is_silent, extract_completed_response_text,
+        autonomous_response_is_silent, context_revision_ids, extract_completed_response_text,
         extract_final_agent_message, generated_image_output, remember_generated_image,
         text_and_image_input_items,
     },
@@ -25,6 +25,7 @@ use crate::{
     reflection::ReflectionStore,
     symbiont_context::SymbiontContextStore,
     task_execution::TaskExecutionQueue,
+    usage::{InvocationRecord, ToolTraceStep},
 };
 use pcp_sqlite::SqlitePcpStore;
 use serde_json::json;
@@ -107,6 +108,63 @@ fn persistent_instructions_define_a_short_unambiguous_pcp_boundary() {
     assert!(instructions.contains("PCP memory operations remain available"));
     assert!(!instructions.contains("do not modify files or attempt side effects"));
     assert!(instructions.chars().count() < 3_500);
+}
+
+#[test]
+fn context_revisions_ignore_failed_or_malformed_pcp_reads() {
+    let valid = "rev_0123456789abcdef0123456789abcdef";
+    let invocation = InvocationRecord {
+        id: "turn_test".to_owned(),
+        parent_id: None,
+        thread_id: "thread_test".to_owned(),
+        turn_id: "turn_test".to_owned(),
+        origin: "autonomous".to_owned(),
+        lane: "observe".to_owned(),
+        requested_model: "test-model".to_owned(),
+        effective_model: "test-model".to_owned(),
+        model_display_name: "Test".to_owned(),
+        effort: "medium".to_owned(),
+        service_tier: None,
+        started_at: "2026-07-31T00:00:00Z".to_owned(),
+        completed_at: "2026-07-31T00:00:01Z".to_owned(),
+        duration_ms: 1,
+        status: "completed".to_owned(),
+        input_tokens: 0,
+        cached_input_tokens: 0,
+        output_tokens: 0,
+        reasoning_output_tokens: 0,
+        total_tokens: 0,
+        tool_calls: Vec::new(),
+        produced_message: false,
+        trace_steps: vec![
+            ToolTraceStep {
+                sequence: 0,
+                namespace: "pcp".to_owned(),
+                tool: "read_pages".to_owned(),
+                started_at: "2026-07-31T00:00:00Z".to_owned(),
+                completed_at: "2026-07-31T00:00:00Z".to_owned(),
+                duration_ms: 0,
+                succeeded: false,
+                arguments: json!({"revision_ids": [valid, "rev_89???"]}),
+                result: json!({"success": false}),
+            },
+            ToolTraceStep {
+                sequence: 1,
+                namespace: "pcp".to_owned(),
+                tool: "read_pages".to_owned(),
+                started_at: "2026-07-31T00:00:01Z".to_owned(),
+                completed_at: "2026-07-31T00:00:01Z".to_owned(),
+                duration_ms: 0,
+                succeeded: true,
+                arguments: json!({"revision_ids": [valid, "rev_89???"]}),
+                result: json!({"success": true}),
+            },
+        ],
+        context_snapshot: None,
+        trace_events: Vec::new(),
+    };
+
+    assert_eq!(context_revision_ids(&[invocation]), vec![valid.to_owned()]);
 }
 
 #[test]
