@@ -39,28 +39,56 @@
             <span>tokens</span>
             <strong id="token-total">0</strong>
           </button>
-          <div class="memory-state" title="当前本地记忆长度">
-            <span>context</span>
-            <strong id="memory-size">0</strong>
-          </div>
-          <button class="quiet-button" id="open-topics" type="button">主题</button>
           <button
-            class="quiet-button"
+            class="top-icon-button"
+            id="open-topics"
+            type="button"
+            title="主题"
+            aria-label="主题"
+          ><i data-lucide="list-tree" aria-hidden="true"></i></button>
+          <button
+            class="top-icon-button"
             id="run-exploration-quick"
             type="button"
             title="立即进行一次探索"
+            aria-label="立即进行一次探索"
             disabled
-          >探索</button>
+          ><i data-lucide="compass" aria-hidden="true"></i></button>
           <button
-            class="quiet-button exploration-history-button"
-            id="open-explorations"
+            class="top-icon-button"
+            id="open-tasks"
             type="button"
-            title="查看探索记录"
-            aria-label="查看探索记录"
-          ><span aria-hidden="true">↺</span></button>
-          <button class="quiet-button" id="open-tasks" type="button">任务</button>
-          <button class="quiet-button" id="open-archive" type="button">档案</button>
-          <button class="quiet-button" id="open-settings" type="button">设置</button>
+            title="Codex 任务"
+            aria-label="Codex 任务"
+          ><i data-lucide="workflow" aria-hidden="true"></i></button>
+          <details id="top-overflow" class="top-overflow">
+            <summary
+              class="top-icon-button"
+              title="更多"
+              aria-label="更多"
+            ><i data-lucide="ellipsis" aria-hidden="true"></i></summary>
+            <div class="top-overflow-menu">
+              <button
+                id="open-explorations"
+                type="button"
+                data-top-menu-action
+              ><i data-lucide="history" aria-hidden="true"></i><span>探索记录</span></button>
+              <button
+                id="open-archive"
+                type="button"
+                data-top-menu-action
+              ><i data-lucide="archive" aria-hidden="true"></i><span>档案</span></button>
+              <button
+                id="open-settings"
+                type="button"
+                data-top-menu-action
+              ><i data-lucide="settings" aria-hidden="true"></i><span>设置</span></button>
+              <div class="top-menu-memory-state" title="当前本地记忆长度">
+                <span>context</span>
+                <strong id="memory-size">0</strong>
+              </div>
+            </div>
+          </details>
         </div>
       </header>
 
@@ -155,13 +183,11 @@
         <div class="composer-row">
           <button
             id="add-image"
-            class="composer-icon-button"
+            class="composer-tool-button"
             type="button"
             title="添加图片"
             aria-label="添加图片"
-          >
-            <span aria-hidden="true">＋</span>
-          </button>
+          ><i data-lucide="paperclip" aria-hidden="true"></i></button>
           <label class="sr-only" for="message">消息</label>
           <textarea
             id="message"
@@ -171,18 +197,29 @@
             placeholder="说点什么…"
             autocomplete="off"
           ></textarea>
-          <label class="sr-only" for="compute-mode">本轮计算级别</label>
-          <select
-            id="compute-mode"
-            class="compute-mode-select"
-            aria-label="本轮计算级别"
-            title="本轮计算级别"
-          >
-            <option value="auto">自动</option>
-            <option value="investigate">深入</option>
-            <option value="critical">关键</option>
-          </select>
-          <button id="send" type="submit">发送</button>
+          <div class="composer-controls">
+            <label class="sr-only" for="compute-mode">本轮计算级别</label>
+            <span class="compute-mode-control">
+              <select
+                id="compute-mode"
+                class="compute-mode-select"
+                aria-label="本轮计算级别"
+                title="本轮计算级别"
+              >
+                <option value="auto">自动</option>
+                <option value="investigate">深入</option>
+                <option value="critical">关键</option>
+              </select>
+              <i data-lucide="chevron-down" aria-hidden="true"></i>
+            </span>
+            <button
+              id="send"
+              class="composer-send-button"
+              type="submit"
+              title="发送"
+              aria-label="发送"
+            ><i data-lucide="send-horizontal" aria-hidden="true"></i></button>
+          </div>
         </div>
         <input
           id="image-input"

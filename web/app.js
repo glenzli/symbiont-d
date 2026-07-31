@@ -9,8 +9,10 @@ import { initPermissionUi } from "/permission-ui.js";
 import { initQuoteUi } from "/quote-ui.js";
 import { initSettings } from "/settings.js";
 import { initTaskUi } from "/task-ui.js";
+import { initTopbarUi } from "/topbar-ui.js";
 import { initTopicUi } from "/topic-ui.js";
 import { initTraceUi } from "/trace-ui.js";
+import { renderIcons } from "/icons.js";
 
 const appState = {
   models: [],
@@ -107,6 +109,8 @@ const topicUi = initTopicUi({
     resizeComposer();
   },
 });
+initTopbarUi();
+renderIcons();
 
 function metadataText(metadata) {
   if (!metadata?.runs?.length || appState.compute?.showModel === false) return "";

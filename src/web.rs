@@ -50,6 +50,7 @@ use crate::{
 
 const INDEX_HTML: &str = include_str!("../web/index.html");
 const APP_JS: &str = include_str!("../web/app.js");
+const ICONS_JS: &str = include_str!("../web/icons.js");
 const RICH_TEXT_JS: &str = include_str!("../web/rich-text.js");
 const RICH_TEXT_CSS: &str = include_str!("../web/rich-text.css");
 const PRESENTATION_JS: &str = include_str!("../web/presentation.js");
@@ -65,6 +66,7 @@ const MESSAGE_ACTIONS_JS: &str = include_str!("../web/message-actions.js");
 const QUOTE_UI_JS: &str = include_str!("../web/quote-ui.js");
 const PERMISSION_UI_JS: &str = include_str!("../web/permission-ui.js");
 const TRACE_UI_JS: &str = include_str!("../web/trace-ui.js");
+const TOPBAR_UI_JS: &str = include_str!("../web/topbar-ui.js");
 const STYLES_CSS: &str = include_str!("../web/styles.css");
 const MAX_USER_MESSAGE_CHARS: usize = 12_000;
 const MAX_CHAT_BODY_BYTES: usize =
@@ -358,6 +360,7 @@ pub fn router(state: AppState) -> Router {
     Router::new()
         .route("/", get(index))
         .route("/app.js", get(app_js))
+        .route("/icons.js", get(icons_js))
         .route("/rich-text.js", get(rich_text_js))
         .route("/rich-text.css", get(rich_text_css))
         .route("/presentation.js", get(presentation_js))
@@ -373,6 +376,7 @@ pub fn router(state: AppState) -> Router {
         .route("/quote-ui.js", get(quote_ui_js))
         .route("/permission-ui.js", get(permission_ui_js))
         .route("/trace-ui.js", get(trace_ui_js))
+        .route("/topbar-ui.js", get(topbar_ui_js))
         .route("/styles.css", get(styles_css))
         .route("/api/health", get(health))
         .route("/api/bootstrap", get(bootstrap))
@@ -430,6 +434,13 @@ async fn app_js() -> impl IntoResponse {
     (
         [(header::CONTENT_TYPE, "text/javascript; charset=utf-8")],
         APP_JS,
+    )
+}
+
+async fn icons_js() -> impl IntoResponse {
+    (
+        [(header::CONTENT_TYPE, "text/javascript; charset=utf-8")],
+        ICONS_JS,
     )
 }
 
@@ -528,6 +539,13 @@ async fn trace_ui_js() -> impl IntoResponse {
     (
         [(header::CONTENT_TYPE, "text/javascript; charset=utf-8")],
         TRACE_UI_JS,
+    )
+}
+
+async fn topbar_ui_js() -> impl IntoResponse {
+    (
+        [(header::CONTENT_TYPE, "text/javascript; charset=utf-8")],
+        TOPBAR_UI_JS,
     )
 }
 
