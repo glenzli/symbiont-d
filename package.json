@@ -2,7 +2,8 @@
   "name": "symbiont-d-web",
   "private": true,
   "scripts": {
-    "build:web": "esbuild web/rich-text-source.js --bundle --format=esm --minify --loader:.woff2=dataurl --loader:.woff=dataurl --loader:.ttf=dataurl --outfile=web/rich-text.js"
+    "build:web": "esbuild web/rich-text-source.js --bundle --format=esm --minify --loader:.woff2=dataurl --loader:.woff=dataurl --loader:.ttf=dataurl --outfile=web/rich-text.js",
+    "test:web": "node --test web/*.test.mjs"
   },
   "dependencies": {
     "dompurify": "^3.2.6",

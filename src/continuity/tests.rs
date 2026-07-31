@@ -10,7 +10,10 @@ use serde_json::json;
 use super::{ContinuityHost, MessageLinks};
 use crate::{
     asset::AssetStore,
-    memory::{MemoryRole, MessageDeliveryState, MessagePart},
+    memory::{
+        MemoryRole, MessageDeliveryState, MessageMetadata, MessagePart, MessageQuoteDraft,
+        MessageRunMetadata,
+    },
 };
 
 const ONE_PIXEL_PNG: &[u8] = &[
@@ -66,6 +69,127 @@ async fn context_seed_exposes_the_complete_archive_boundary_and_latest_checkpoin
 }
 
 #[tokio::test]
+async fn quotes_multiple_excerpts_from_one_message_with_one_source_relation() {
+    let nonce = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .expect("clock")
+        .as_nanos();
+    let root = std::env::temp_dir().join(format!("symbiont-quotes-{nonce}"));
+    let store = Arc::new(
+        SqlitePcpStore::open(root.join("context.sqlite3"))
+            .await
+            .expect("open PCP store"),
+    );
+    let continuity = ContinuityHost::open(store).await.expect("open host");
+    let source = continuity
+        .ingest_message(
+            MemoryRole::Assistant,
+            "The first idea matters. The second idea changes the decision.",
+            Vec::new(),
+            None,
+            MessageLinks::default(),
+        )
+        .await
+        .expect("ingest quoted source");
+    let quotes = continuity
+        .resolve_message_quotes(vec![
+            MessageQuoteDraft {
+                source_revision_id: source.page.revision_id.clone(),
+                selected_text: "The first idea matters.".to_owned(),
+                start_offset: Some(0),
+                end_offset: Some(23),
+                whole_message: false,
+            },
+            MessageQuoteDraft {
+                source_revision_id: source.page.revision_id.clone(),
+                selected_text: "The second idea changes the decision.".to_owned(),
+                start_offset: Some(24),
+                end_offset: Some(61),
+                whole_message: false,
+            },
+            MessageQuoteDraft {
+                source_revision_id: source.page.revision_id.clone(),
+                selected_text: "This client preview must not become the quote.".to_owned(),
+                start_offset: None,
+                end_offset: None,
+                whole_message: true,
+            },
+        ])
+        .await
+        .expect("resolve source excerpts");
+    assert_eq!(quotes.len(), 3);
+    assert_eq!(quotes[0].source_role, MemoryRole::Assistant);
+    assert_eq!(quotes[0].source_sha256, quotes[1].source_sha256);
+    assert_eq!(
+        quotes[2].text,
+        "The first idea matters. The second idea changes the decision."
+    );
+
+    let reply = continuity
+        .ingest_message(
+            MemoryRole::User,
+            "These two passages should be considered together.",
+            Vec::new(),
+            None,
+            MessageLinks {
+                quotes,
+                ..MessageLinks::default()
+            },
+        )
+        .await
+        .expect("ingest quoted reply");
+    assert!(matches!(
+        reply.entry.parts.first(),
+        Some(MessagePart::Quote { .. })
+    ));
+    assert!(matches!(
+        reply.entry.parts.get(1),
+        Some(MessagePart::Quote { .. })
+    ));
+
+    let pages = continuity
+        .read(ReadPagesRequest {
+            revision_ids: vec![reply.page.revision_id.clone()],
+            projections: vec![
+                Projection::Facets,
+                Projection::Provenance,
+                Projection::Relations,
+            ],
+            max_chars: 16_000,
+        })
+        .await
+        .expect("read quoted reply");
+    let quote_relations = pages[0]
+        .relations
+        .iter()
+        .filter(|relation| relation.relation_type == "quotes")
+        .collect::<Vec<_>>();
+    assert_eq!(quote_relations.len(), 1);
+    assert_eq!(quote_relations[0].to_revision_id, source.page.revision_id);
+    assert!(
+        pages[0].revision.provenance[0]
+            .input_revision_ids
+            .contains(&source.page.revision_id)
+    );
+
+    let recent = continuity
+        .recent_messages(10)
+        .await
+        .expect("read quoted conversation");
+    assert_eq!(recent.len(), 2);
+    assert_eq!(
+        recent[1]
+            .parts
+            .iter()
+            .filter(|part| matches!(part, MessagePart::Quote { .. }))
+            .count(),
+        3
+    );
+
+    let _ = tokio::fs::remove_dir_all(root).await;
+}
+
+#[tokio::test]
 async fn links_images_user_events_and_assistant_responses() {
     let nonce = SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -104,24 +228,45 @@ async fn links_images_user_events_and_assistant_responses() {
             None,
             MessageLinks {
                 responds_to: Some(user.page.revision_id.clone()),
+                continues_from: None,
                 input_revision_ids: user.attachment_revision_ids.clone(),
+                surfaced_hunch_revision_ids: Vec::new(),
+                quotes: Vec::new(),
+                topic: None,
             },
         )
         .await
         .expect("ingest assistant event");
+    let continuation = continuity
+        .ingest_message(
+            MemoryRole::Assistant,
+            "One more detail is worth adding.",
+            Vec::new(),
+            None,
+            MessageLinks {
+                responds_to: None,
+                continues_from: Some(assistant.page.revision_id.clone()),
+                input_revision_ids: Vec::new(),
+                surfaced_hunch_revision_ids: Vec::new(),
+                quotes: Vec::new(),
+                topic: None,
+            },
+        )
+        .await
+        .expect("ingest assistant continuation");
     assert_eq!(
         continuity
             .latest_assistant_revision()
             .await
             .expect("read reply anchor")
             .as_deref(),
-        Some(assistant.page.revision_id.as_str())
+        Some(continuation.page.revision_id.as_str())
     );
     let messages_after_user = continuity
         .recent_messages_after(Some(&user.page.revision_id), 20)
         .await
         .expect("read messages after user");
-    assert_eq!(messages_after_user.len(), 1);
+    assert_eq!(messages_after_user.len(), 2);
     assert_eq!(
         messages_after_user[0].revision_id,
         Some(assistant.page.revision_id.clone())
@@ -130,7 +275,7 @@ async fn links_images_user_events_and_assistant_responses() {
         .recent_messages(20)
         .await
         .expect("read ordered messages");
-    assert_eq!(recent_messages.len(), 2);
+    assert_eq!(recent_messages.len(), 3);
     assert_eq!(
         recent_messages[0].revision_id,
         Some(user.page.revision_id.clone())
@@ -138,6 +283,26 @@ async fn links_images_user_events_and_assistant_responses() {
     assert_eq!(
         recent_messages[1].revision_id,
         Some(assistant.page.revision_id.clone())
+    );
+    assert_eq!(
+        recent_messages[2].revision_id,
+        Some(continuation.page.revision_id.clone())
+    );
+    let selected_messages = continuity
+        .messages_by_revision_ids(&[
+            continuation.page.revision_id.clone(),
+            user.page.revision_id.clone(),
+        ])
+        .await
+        .expect("read selected conversation Revisions");
+    assert_eq!(selected_messages.len(), 2);
+    assert_eq!(
+        selected_messages[0].revision_id,
+        Some(user.page.revision_id.clone())
+    );
+    assert_eq!(
+        selected_messages[1].revision_id,
+        Some(continuation.page.revision_id.clone())
     );
     assert_eq!(
         recent_messages[0].delivery_state,
@@ -148,6 +313,7 @@ async fn links_images_user_events_and_assistant_responses() {
             revision_ids: vec![
                 user.page.revision_id.clone(),
                 assistant.page.revision_id.clone(),
+                continuation.page.revision_id.clone(),
             ],
             projections: vec![
                 Projection::Payload,
@@ -176,11 +342,20 @@ async fn links_images_user_events_and_assistant_responses() {
             .iter()
             .any(|relation| relation.relation_type == "derived_from")
     );
+    assert!(pages[2].relations.iter().any(|relation| {
+        relation.relation_type == "continues"
+            && relation.to_revision_id == assistant.page.revision_id
+    }));
     assert!(pages[0].revision.source_refs.is_empty());
     let inputs = &pages[1].revision.provenance[0].input_revision_ids;
     assert_eq!(inputs.len(), 2);
     assert!(inputs.contains(&user.attachment_revision_ids[0]));
     assert!(inputs.contains(&user.page.revision_id));
+    assert!(
+        pages[2].revision.provenance[0]
+            .input_revision_ids
+            .contains(&assistant.page.revision_id)
+    );
     assert!(matches!(
         user.entry.parts.get(1),
         Some(MessagePart::Image { .. })
@@ -209,6 +384,141 @@ async fn links_images_user_events_and_assistant_responses() {
         serde_json::from_str(&asset_revision.payload.as_ref().unwrap().content)
             .expect("parse canonical image descriptor");
     assert_eq!(descriptor["filename"], "pixel.png");
+
+    let _ = tokio::fs::remove_dir_all(root).await;
+}
+
+#[tokio::test]
+async fn stores_generated_images_as_assistant_page_attachments() {
+    let nonce = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .expect("clock")
+        .as_nanos();
+    let root = std::env::temp_dir().join(format!("symbiont-generated-continuity-{nonce}"));
+    let store = Arc::new(
+        SqlitePcpStore::open(root.join("context.sqlite3"))
+            .await
+            .expect("open PCP store"),
+    );
+    let continuity = ContinuityHost::open(store).await.expect("open host");
+    let assets = AssetStore::open(root.join("assets"))
+        .await
+        .expect("open assets");
+    let generated_path = root.join("codex-generated.png");
+    tokio::fs::write(&generated_path, ONE_PIXEL_PNG)
+        .await
+        .expect("write generated fixture");
+    let image = assets
+        .import_generated_image(
+            &generated_path,
+            Some(json!({
+                "codexItemId": "image-item-1",
+                "revisedPrompt": "A one-pixel generated prototype"
+            })),
+        )
+        .await
+        .expect("import generated image");
+
+    let assistant = continuity
+        .ingest_message(
+            MemoryRole::Assistant,
+            "Here is the generated prototype.",
+            vec![image],
+            Some(MessageMetadata {
+                runs: vec![MessageRunMetadata {
+                    model: "gpt-image-test".to_owned(),
+                    display_name: "Image Test".to_owned(),
+                    effort: "medium".to_owned(),
+                    lane: "conversation".to_owned(),
+                    total_tokens: 10,
+                    duration_ms: 20,
+                }],
+                total_tokens: 10,
+                duration_ms: 20,
+                tool_calls: 1,
+                pcp_tool_calls: 0,
+                trace_id: Some("trace-image".to_owned()),
+                origin: Some("interactive".to_owned()),
+            }),
+            MessageLinks::default(),
+        )
+        .await
+        .expect("ingest assistant image");
+
+    assert!(matches!(
+        assistant.entry.parts.get(1),
+        Some(MessagePart::Image { .. })
+    ));
+    assert_eq!(assistant.attachment_revision_ids.len(), 1);
+
+    let pages = continuity
+        .read(ReadPagesRequest {
+            revision_ids: vec![
+                assistant.page.revision_id.clone(),
+                assistant.attachment_revision_ids[0].clone(),
+            ],
+            projections: vec![
+                Projection::Payload,
+                Projection::Facets,
+                Projection::Sources,
+                Projection::Provenance,
+                Projection::Relations,
+            ],
+            max_chars: 8_000,
+        })
+        .await
+        .expect("read assistant and generated asset pages");
+    assert!(pages[0].relations.iter().any(|relation| {
+        relation.relation_type == "has_attachment"
+            && relation.to_revision_id == assistant.attachment_revision_ids[0]
+    }));
+    assert_eq!(
+        pages[1].revision.source_refs[0].source_type,
+        "codex_image_generation"
+    );
+    assert_eq!(
+        pages[1].revision.source_refs[0].metadata.as_ref().unwrap()["codexItemId"],
+        "image-item-1"
+    );
+    assert_eq!(
+        pages[1].revision.provenance[0].tool_or_model.as_deref(),
+        Some("gpt-image-test")
+    );
+    assert_eq!(pages[1].revision.created_by.actor_id, "codex:symbiont-d");
+
+    let recent_images = continuity
+        .recent_image_assets(4)
+        .await
+        .expect("read recent image assets");
+    assert_eq!(recent_images.len(), 1);
+    assert_eq!(
+        recent_images[0].revision_id,
+        assistant.attachment_revision_ids[0]
+    );
+    assert_eq!(
+        recent_images[0].attached_to_revision_id.as_deref(),
+        Some(assistant.page.revision_id.as_str())
+    );
+    assert_eq!(
+        recent_images[0].revised_prompt.as_deref(),
+        Some("A one-pixel generated prototype")
+    );
+    assert_eq!(
+        continuity
+            .attached_image_revision_ids(std::slice::from_ref(&assistant.page.revision_id))
+            .await
+            .expect("follow message image relation"),
+        assistant.attachment_revision_ids
+    );
+
+    let recent = continuity
+        .recent_messages(10)
+        .await
+        .expect("reload assistant message");
+    assert!(matches!(
+        recent[0].parts.get(1),
+        Some(MessagePart::Image { .. })
+    ));
 
     let _ = tokio::fs::remove_dir_all(root).await;
 }

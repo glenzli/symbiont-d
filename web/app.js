@@ -5,13 +5,17 @@ import { renderMessageContent, renderRichText } from "/rich-text.js";
 import { initExplorationUi } from "/exploration-ui.js";
 import { initMessageActions } from "/message-actions.js";
 import { initMessageSync } from "/message-sync.js";
+import { initPermissionUi } from "/permission-ui.js";
+import { initQuoteUi } from "/quote-ui.js";
 import { initSettings } from "/settings.js";
 import { initTaskUi } from "/task-ui.js";
+import { initTopicUi } from "/topic-ui.js";
 import { initTraceUi } from "/trace-ui.js";
 
 const appState = {
   models: [],
   compute: null,
+  computePolicies: [],
   profile: { status: "unconfigured", mode: null, orientation: "" },
   autonomy: null,
   autonomyPermitted: false,
@@ -24,13 +28,21 @@ const appState = {
   exploration: null,
   reflection: null,
   conversation: null,
-  bridge: { codexTaskAccess: false },
+  bridge: {
+    codexTaskAccess: false,
+    taskExecutionEnabled: false,
+    pinnedTask: null,
+    activeTaskLease: null,
+  },
+  taskRuns: [],
+  permissions: [],
 };
 
 const conversation = document.querySelector("#conversation");
 const emptyState = document.querySelector("#empty-state");
 const composer = document.querySelector("#composer");
 const input = document.querySelector("#message");
+const computeMode = document.querySelector("#compute-mode");
 const sendButton = document.querySelector("#send");
 const addImageButton = document.querySelector("#add-image");
 const imageInput = document.querySelector("#image-input");
@@ -48,12 +60,15 @@ let selectedImages = [];
 let activeOutgoing = [];
 let activePending = null;
 let typingSignalTimer = null;
+let composerNoticeTimer = null;
 
 const MAX_IMAGES = 4;
 const MAX_IMAGE_BYTES = 15 * 1024 * 1024;
 
-const settingsUi = initSettings(appState);
-initTaskUi(
+const explorationUi = initExplorationUi(appState);
+const settingsUi = initSettings(appState, explorationUi.trigger);
+const permissionUi = initPermissionUi(appState);
+const taskUi = initTaskUi(
   appState,
   (text) => {
     input.value = text;
@@ -62,7 +77,6 @@ initTaskUi(
   },
   settingsUi.open,
 );
-const explorationUi = initExplorationUi(appState);
 const reflectionUi = initReflectionUi(appState);
 const profileUi = initProfileUi(appState, sendMessage);
 initTraceUi();
@@ -77,15 +91,42 @@ const messageActions = initMessageActions({
   isBusy: () => busy,
   perform: performMessageAction,
 });
+const quoteUi = initQuoteUi({
+  conversation,
+  entryFor: messageActions.entryFor,
+  focusComposer() {
+    input.focus();
+    resizeComposer();
+  },
+  notify: notifyComposer,
+});
+const topicUi = initTopicUi({
+  conversation,
+  focusComposer() {
+    input.focus();
+    resizeComposer();
+  },
+});
 
 function metadataText(metadata) {
   if (!metadata?.runs?.length || appState.compute?.showModel === false) return "";
   const runs = metadata.runs.map((run) => {
     const name = run.displayName || run.model;
-    return `${name} · ${run.effort}`;
+    const lane = {
+      observe: "观察",
+      conversation: "日常",
+      investigate: "深入",
+      critical: "关键",
+    }[run.lane];
+    return [name, run.effort, lane].filter(Boolean).join(" · ");
   });
+  const origin = {
+    autonomous: "主动探索",
+    codex_task: "Codex 任务",
+    continuation: "续话",
+  }[metadata.origin] || "";
   return [
-    metadata.origin === "autonomous" ? "主动探索" : "",
+    origin,
     runs.join(" → "),
     formatDuration(metadata.durationMs || 0),
     formatTokens(metadata.totalTokens || 0),
@@ -160,6 +201,7 @@ function setActivity(message, event) {
   const body = message.querySelector(".message-body");
   const foot = message.querySelector(".message-foot");
   const runtime = foot.querySelector(".message-runtime");
+  message.classList.remove("response-placeholder");
   message.classList.add("pending");
   body.textContent = event.label;
   connectionStatus.textContent = event.label;
@@ -188,11 +230,12 @@ function applyAccepted(message, entry) {
 function applyComplete(message, entry) {
   clearInterval(activityTimer);
   activityTimer = null;
-  message.classList.remove("pending", "streaming");
+  message.classList.remove("pending", "streaming", "response-placeholder");
   if (entry.revisionId) message.dataset.revisionId = entry.revisionId;
   renderMessageContent(message.querySelector(".message-body"), entry);
   renderMessageFoot(message, entry.metadata);
   messageSync.track(message, entry, { interactive: true });
+  messageActions.update(message, entry);
 }
 
 function renderUsage() {
@@ -211,6 +254,14 @@ function renderRuntimeStatus() {
   if (busy) return;
   if (appState.profile.status === "calibrating") {
     connectionStatus.textContent = "初始化对话中";
+    return;
+  }
+  const taskRun = (appState.taskRuns || []).find((run) =>
+    ["queued", "running"].includes(run.phase),
+  );
+  if (taskRun) {
+    connectionStatus.textContent =
+      taskRun.currentActivity || `正在处理 ${taskRun.task.title}`;
     return;
   }
   const exploration = appState.exploration;
@@ -248,11 +299,18 @@ function applyRuntime(payload) {
       : payload.reflection;
   }
   appState.conversation = payload.conversation || appState.conversation;
+  appState.computePolicies =
+    payload.computePolicies || appState.computePolicies;
+  appState.permissions = payload.permissions || appState.permissions;
+  appState.bridge = payload.bridge || appState.bridge;
+  appState.taskRuns = payload.taskRuns || appState.taskRuns;
   renderUsage();
   renderRuntimeStatus();
   settingsUi.renderAutonomyRuntime();
   reflectionUi.renderRuntime();
   explorationUi.runtimeUpdated();
+  taskUi.runtimeUpdated();
+  permissionUi.render();
 }
 
 async function bootstrap() {
@@ -267,8 +325,11 @@ async function bootstrap() {
     renderUsage();
     renderRuntimeStatus();
     settingsUi.render();
+    explorationUi.runtimeUpdated();
+    taskUi.runtimeUpdated();
     reflectionUi.render();
     profileUi.render();
+    permissionUi.render();
     messageSync.start();
   } catch (error) {
     connectionStatus.textContent = "连接失败";
@@ -311,7 +372,7 @@ async function consumeStream(response, pending, outgoing) {
         setActivity(pending, event);
       } else if (event.type === "delta") {
         receivedText += event.text;
-        pending.classList.remove("pending");
+        pending.classList.remove("pending", "response-placeholder");
         pending.classList.add("streaming");
         renderRichText(
           pending.querySelector(".message-body"),
@@ -321,9 +382,10 @@ async function consumeStream(response, pending, outgoing) {
         conversation.scrollTop = conversation.scrollHeight;
       } else if (event.type === "reset") {
         receivedText = "";
-        pending.classList.add("pending");
+        pending.classList.add("pending", "response-placeholder");
         pending.classList.remove("streaming");
-        pending.querySelector(".message-body").textContent = "正在深入处理";
+        pending.querySelector(".message-body").textContent = "";
+        connectionStatus.textContent = "正在回应";
       } else if (event.type === "complete") {
         completed = true;
         for (const message of activeOutgoing) {
@@ -335,9 +397,12 @@ async function consumeStream(response, pending, outgoing) {
         appState.autonomyPermitted = event.autonomyPermitted;
         appState.usage = event.usage;
         appState.exploration = event.exploration;
+        appState.computePolicies =
+          event.computePolicies || appState.computePolicies;
         renderUsage();
         profileUi.render();
         settingsUi.renderAutonomy();
+        explorationUi.runtimeUpdated();
       } else if (event.type === "error") {
         throw new Error(event.error);
       }
@@ -347,31 +412,42 @@ async function consumeStream(response, pending, outgoing) {
   if (!completed) throw new Error("回复在完成前中断。");
 }
 
-async function sendMessage(text, images = []) {
-  if (!text.trim() && !images.length) return;
+async function sendMessage(
+  text,
+  images = [],
+  minimumLane = "auto",
+  quotes = [],
+  topic = null,
+) {
+  if (!text.trim() && !images.length && !quotes.length) return;
   if (busy) {
-    await appendToActiveResponse(text, images);
+    await appendToActiveResponse(text, images, minimumLane, quotes, topic);
     return;
   }
-  const localEntry = localUserEntry(text, images);
+  const localEntry = localUserEntry(text, images, quotes, topic);
   const outgoing = appendMessage(localEntry, { deliveryState: "pending" });
   activeOutgoing = [outgoing];
   const pending = appendMessage(
     {
       role: "assistant",
       at: new Date().toISOString(),
-      content: "等你说完",
+      content: "",
     },
     { pending: true },
   );
+  pending.classList.add("response-placeholder");
+  pending
+    .querySelector(".message-body")
+    .setAttribute("aria-label", "symbiont-d 正在回应");
   activePending = pending;
   activityStartedAt = Date.now();
   setBusy(true);
+  connectionStatus.textContent = "正在回应";
 
   try {
     const response = await fetch("/api/chat", {
       method: "POST",
-      body: chatBody(text, images),
+      body: chatBody(text, images, minimumLane, quotes, topic),
     });
     await consumeStream(response, pending, outgoing);
   } catch (error) {
@@ -391,8 +467,8 @@ async function sendMessage(text, images = []) {
   }
 }
 
-async function appendToActiveResponse(text, images) {
-  const outgoing = appendMessage(localUserEntry(text, images), {
+async function appendToActiveResponse(text, images, minimumLane, quotes, topic) {
+  const outgoing = appendMessage(localUserEntry(text, images, quotes, topic), {
     deliveryState: "pending",
   });
   if (activePending?.isConnected) {
@@ -404,7 +480,7 @@ async function appendToActiveResponse(text, images) {
   try {
     const response = await fetch("/api/chat/append", {
       method: "POST",
-      body: chatBody(text, images),
+      body: chatBody(text, images, minimumLane, quotes, topic),
     });
     const entry = await response.json();
     if (!response.ok) throw new Error(entry.error || "无法追加消息。");
@@ -423,12 +499,34 @@ async function appendToActiveResponse(text, images) {
   }
 }
 
-function localUserEntry(text, images) {
+function localUserEntry(text, images, quotes, topic) {
   return {
     role: "user",
     at: new Date().toISOString(),
     content: text,
     parts: [
+      ...(topic
+        ? [
+            {
+              type: "topic",
+              topic: { topicId: topic.id, title: topic.title },
+            },
+          ]
+        : []),
+      ...quotes.map((quote) => ({
+        type: "quote",
+        quote: {
+          sourceRevisionId: quote.sourceRevisionId,
+          sourceRole: quote.sourceRole || "assistant",
+          sourceAt: quote.sourceAt || new Date().toISOString(),
+          text: quote.text || quote.selectedText,
+          sourceSha256: quote.sourceSha256 || "",
+          startOffset: quote.startOffset ?? null,
+          endOffset: quote.endOffset ?? null,
+          wholeMessage: quote.wholeMessage === true,
+          truncated: quote.truncated === true,
+        },
+      })),
       ...(text.trim() ? [{ type: "markdown", text: text.trim() }] : []),
       ...images.map((image) => ({
         type: "image",
@@ -446,9 +544,18 @@ function localUserEntry(text, images) {
   };
 }
 
-function chatBody(text, images) {
+function chatBody(
+  text,
+  images,
+  minimumLane = "auto",
+  quotes = [],
+  topic = null,
+) {
   const body = new FormData();
   body.append("message", text);
+  body.append("computeLane", minimumLane);
+  if (topic?.id) body.append("topicId", topic.id);
+  for (const quote of quotes) body.append("quote", JSON.stringify(quote));
   for (const image of images) body.append("image", image.file, image.file.name);
   return body;
 }
@@ -467,7 +574,19 @@ function signalTyping(typing) {
   }
 }
 
+function notifyComposer(message) {
+  clearTimeout(composerNoticeTimer);
+  composerState.textContent = message;
+  composerNoticeTimer = window.setTimeout(() => {
+    if (composerState.textContent === message) composerState.textContent = "";
+  }, 2200);
+}
+
 async function performMessageAction(action, message, entry) {
+  if (action === "quote") {
+    quoteUi.addWhole(entry);
+    return;
+  }
   if (action === "recall" || action === "delete") {
     await retractMessage(message, entry);
     return;
@@ -477,6 +596,10 @@ async function performMessageAction(action, message, entry) {
     await retractMessage(message, entry);
     input.value = entry.content || "";
     selectedImages = images;
+    quoteUi.set(extractQuotes(entry));
+    const topic = extractTopic(entry);
+    if (topic) topicUi.set(topic);
+    else topicUi.clear();
     renderAttachmentTray();
     resizeComposer();
     input.focus();
@@ -484,7 +607,13 @@ async function performMessageAction(action, message, entry) {
   }
   if (action === "retry") {
     await retractMessage(message, entry);
-    await sendMessage(entry.content || "", images);
+    await sendMessage(
+      entry.content || "",
+      images,
+      "auto",
+      extractQuotes(entry),
+      extractTopic(entry),
+    );
   }
 }
 
@@ -537,18 +666,38 @@ async function recoverImages(entry) {
   return images;
 }
 
+function extractQuotes(entry) {
+  return (entry.parts || [])
+    .filter((part) => part.type === "quote" && part.quote)
+    .map((part) => part.quote);
+}
+
+function extractTopic(entry) {
+  const reference = (entry.parts || []).find(
+    (part) => part.type === "topic" && part.topic?.topicId,
+  )?.topic;
+  return reference
+    ? { id: reference.topicId, title: reference.title || "未命名主题" }
+    : null;
+}
+
 composer.addEventListener("submit", (event) => {
   event.preventDefault();
   const text = input.value.trim();
   const images = selectedImages;
-  if (!text && !images.length) return;
+  const quotes = quoteUi.drafts();
+  const minimumLane = computeMode.value;
+  if (!text && !images.length && !quotes.length) return;
+  const topic = topicUi.consume();
   input.value = "";
   selectedImages = [];
+  quoteUi.clear();
+  computeMode.value = "auto";
   composerState.textContent = "";
   renderAttachmentTray();
   resizeComposer();
   signalTyping(false);
-  sendMessage(text, images);
+  sendMessage(text, images, minimumLane, quotes, topic);
 });
 
 input.addEventListener("input", () => {

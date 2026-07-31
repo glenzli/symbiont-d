@@ -33,6 +33,15 @@ pub(super) fn observable_item_event(item: &Value) -> Option<(TraceEventKind, &'s
                 "results": item.get("results")
             }),
         )),
+        "imageGeneration" => Some((
+            TraceEventKind::ToolCall,
+            "Generated image",
+            json!({
+                "status": item.get("status"),
+                "savedPath": item.get("savedPath"),
+                "revisedPrompt": item.get("revisedPrompt")
+            }),
+        )),
         "contextCompaction" => Some((
             TraceEventKind::ContextCompaction,
             "Codex compacted the native thread context",

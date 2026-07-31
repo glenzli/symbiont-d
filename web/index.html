@@ -43,7 +43,21 @@
             <span>context</span>
             <strong id="memory-size">0</strong>
           </div>
-          <button class="quiet-button" id="open-explorations" type="button">探索</button>
+          <button class="quiet-button" id="open-topics" type="button">主题</button>
+          <button
+            class="quiet-button"
+            id="run-exploration-quick"
+            type="button"
+            title="立即进行一次探索"
+            disabled
+          >探索</button>
+          <button
+            class="quiet-button exploration-history-button"
+            id="open-explorations"
+            type="button"
+            title="查看探索记录"
+            aria-label="查看探索记录"
+          ><span aria-hidden="true">↺</span></button>
           <button class="quiet-button" id="open-tasks" type="button">任务</button>
           <button class="quiet-button" id="open-archive" type="button">档案</button>
           <button class="quiet-button" id="open-settings" type="button">设置</button>
@@ -96,8 +110,48 @@
         </div>
       </section>
 
+      <section
+        id="permission-center"
+        class="permission-center"
+        aria-live="assertive"
+        aria-label="等待确认的权限请求"
+        hidden
+      >
+        <header>
+          <strong>操作确认</strong>
+          <span id="permission-status" role="status"></span>
+        </header>
+        <div id="permission-list" class="permission-list"></div>
+      </section>
+
       <form id="composer" class="composer" hidden>
         <div id="attachment-tray" class="attachment-tray" hidden></div>
+        <div id="quote-tray" class="quote-tray" aria-label="待发送引用" hidden></div>
+        <div id="topic-target-tray" class="topic-target-tray" hidden>
+          <button id="open-selected-topic" type="button" title="查看当前主题">
+            <small>主题</small>
+            <span id="topic-target-title"></span>
+          </button>
+          <button
+            id="clear-topic-target"
+            type="button"
+            title="清除主题上下文"
+            aria-label="清除主题上下文"
+          >×</button>
+        </div>
+        <div id="task-target-tray" class="task-target-tray" hidden>
+          <button id="change-task-target" type="button" title="更改 Codex 任务">
+            <span id="task-target-title"></span>
+            <small id="task-target-scope"></small>
+          </button>
+          <button
+            id="clear-task-target"
+            class="task-target-clear"
+            type="button"
+            title="清除当前任务关系"
+            aria-label="清除当前任务关系"
+          >×</button>
+        </div>
         <div class="composer-row">
           <button
             id="add-image"
@@ -117,6 +171,17 @@
             placeholder="说点什么…"
             autocomplete="off"
           ></textarea>
+          <label class="sr-only" for="compute-mode">本轮计算级别</label>
+          <select
+            id="compute-mode"
+            class="compute-mode-select"
+            aria-label="本轮计算级别"
+            title="本轮计算级别"
+          >
+            <option value="auto">自动</option>
+            <option value="investigate">深入</option>
+            <option value="critical">关键</option>
+          </select>
           <button id="send" type="submit">发送</button>
         </div>
         <input
@@ -284,6 +349,13 @@
               <span><strong>允许延迟跟进</strong></span>
               <input id="reflection-follow-ups" type="checkbox">
             </label>
+            <label class="toggle-row">
+              <span>
+                <strong>允许短时续话</strong>
+                <small>仅在首轮明确预约时额外调用一次</small>
+              </span>
+              <input id="reflection-continuations" type="checkbox">
+            </label>
           </div>
           <footer class="dialog-actions">
             <span id="reflection-save-state" role="status"></span>
@@ -325,6 +397,23 @@
             </div>
           </div>
 
+          <section class="compute-policy-section">
+            <header>
+              <div>
+                <strong>话题计算规则</strong>
+                <small>明确命中时直接使用最低计算级别</small>
+              </div>
+              <button
+                id="add-compute-policy"
+                class="icon-button"
+                type="button"
+                aria-label="添加话题计算规则"
+                title="添加话题计算规则"
+              >＋</button>
+            </header>
+            <div id="compute-policy-list" class="compute-policy-list"></div>
+          </section>
+
           <footer class="dialog-actions">
             <span id="compute-save-state" role="status"></span>
             <button class="primary-button" type="submit">保存</button>
@@ -341,6 +430,13 @@
                 <small>仅在任务面板中点选后读取，不后台扫描，不自动入库</small>
               </span>
               <input id="codex-task-access" type="checkbox">
+            </label>
+            <label class="toggle-row">
+              <span>
+                <strong>允许向选定任务执行代码</strong>
+                <small id="codex-task-execution-note">只在输入区明确选择任务后生效</small>
+              </span>
+              <input id="codex-task-execution" type="checkbox">
             </label>
           </div>
           <div class="setting-section bridge-note">
@@ -471,6 +567,42 @@
       <div id="exploration-history" class="exploration-history" aria-live="polite"></div>
     </dialog>
 
+    <dialog id="exploration-budget-dialog" class="panel-dialog exploration-budget-dialog">
+      <header class="dialog-header">
+        <div>
+          <h2>继续探索？</h2>
+          <p>今天的自主探索已达到设定上限</p>
+        </div>
+      </header>
+      <div class="exploration-budget-copy">
+        <p>这次探索会继续产生 token 消耗，但不会修改你设置的每日上限。</p>
+        <dl>
+          <div><dt>今日已用</dt><dd id="exploration-budget-used">0</dd></div>
+          <div><dt>每日上限</dt><dd id="exploration-budget-limit">0</dd></div>
+        </dl>
+      </div>
+      <footer class="dialog-actions">
+        <button id="cancel-exploration-override" class="secondary-button" type="button">取消</button>
+        <button id="confirm-exploration-override" class="primary-button" type="button">仍然探索</button>
+      </footer>
+    </dialog>
+
+    <dialog id="topic-dialog" class="panel-dialog topic-dialog">
+      <header class="dialog-header">
+        <div>
+          <h2>主题</h2>
+          <p id="topic-dialog-status">长期讨论形成的思绪结构</p>
+        </div>
+        <button class="icon-button" data-close="topic-dialog" type="button" aria-label="关闭">×</button>
+      </header>
+      <div class="topic-browser">
+        <nav id="topic-list" class="topic-list" aria-label="主题列表"></nav>
+        <section id="topic-detail" class="topic-detail" aria-live="polite">
+          <div class="topic-empty">选择一个主题</div>
+        </section>
+      </div>
+    </dialog>
+
     <dialog id="task-dialog" class="panel-dialog task-dialog">
       <header class="dialog-header">
         <div>
@@ -507,6 +639,42 @@
           >⎇</button>
         </div>
       </article>
+    </template>
+
+    <template id="compute-policy-template">
+      <div class="compute-policy-row">
+        <input data-policy-field="id" type="hidden">
+        <label class="field">
+          <span>话题</span>
+          <input data-policy-field="topic" type="text" maxlength="120" placeholder="例如 OET">
+        </label>
+        <label class="field compute-policy-aliases">
+          <span>别名</span>
+          <input
+            data-policy-field="aliases"
+            type="text"
+            maxlength="600"
+            placeholder="OET, 算子演化理论"
+          >
+        </label>
+        <label class="field">
+          <span>最低级别</span>
+          <select data-policy-field="minimumLane">
+            <option value="investigate">深入</option>
+            <option value="critical">关键</option>
+          </select>
+        </label>
+        <label class="compute-policy-enabled" title="启用规则">
+          <input data-policy-field="enabled" type="checkbox" checked>
+          <span>启用</span>
+        </label>
+        <button
+          class="icon-button remove-compute-policy"
+          type="button"
+          aria-label="删除话题计算规则"
+          title="删除话题计算规则"
+        >×</button>
+      </div>
     </template>
 
     <script type="module" src="/app.js"></script>

@@ -3,7 +3,9 @@ mod autonomy;
 mod bridge;
 mod codex;
 mod compute;
+mod compute_policy;
 mod context_maintenance;
+mod continuation;
 mod continuity;
 mod conversation;
 mod curiosity;
@@ -11,12 +13,16 @@ mod diagnostics;
 mod exploration;
 mod maintenance;
 mod memory;
+mod permission;
 mod profile;
 mod reflection;
 mod rollover;
 mod symbiont_context;
+mod task_execution;
+mod topics;
 mod usage;
 mod web;
+mod web_fetch;
 mod working_context;
 
 use std::{
@@ -32,20 +38,25 @@ use autonomy::AutonomyStore;
 use bridge::CodexBridge;
 use codex::{CodexClient, CodexConfig};
 use compute::ComputeStore;
+use compute_policy::ComputePolicyStore;
+use continuation::ContinuationQueue;
 use continuity::ContinuityHost;
 use conversation::ConversationCoordinator;
 use curiosity::CuriosityStore;
 use exploration::ExplorationHandle;
 use memory::MemoryStore;
 use pcp_sqlite::SqlitePcpStore;
+use permission::PermissionBroker;
 use profile::ProfileStore;
 use reflection::{ReflectionHandle, ReflectionStore};
 use symbiont_context::SymbiontContextStore;
+use task_execution::TaskExecutionQueue;
 use tokio::{net::TcpListener, sync::Mutex};
 use tracing::info;
 use tracing_subscriber::EnvFilter;
 use usage::UsageStore;
 use web::AppState;
+use web_fetch::WebFetcher;
 
 const DEFAULT_BIND: &str = "127.0.0.1:4317";
 
@@ -120,6 +131,25 @@ async fn main() -> Result<()> {
         .backfill_messages(&continuity.recent_messages(100).await?)
         .await
         .context("backfill recent conversation into Reflection")?;
+    let compute_policies = Arc::new(
+        ComputePolicyStore::open(resolve_data_path(
+            &workspace,
+            "SYMBIONT_COMPUTE_POLICY_PATH",
+            "compute-policies.toml",
+        ))
+        .await?,
+    );
+    let permissions = Arc::new(PermissionBroker::new());
+    let web_fetcher = Arc::new(WebFetcher::new(Arc::clone(&permissions))?);
+    let (task_execution, task_execution_receiver) = TaskExecutionQueue::open(resolve_data_path(
+        &workspace,
+        "SYMBIONT_TASK_EXECUTION_PATH",
+        "task-runs.json",
+    ))
+    .await?;
+    let task_execution = Arc::new(task_execution);
+    let (continuations, continuation_receiver) = ContinuationQueue::new();
+    let continuations = Arc::new(continuations);
 
     let codex = CodexClient::start(
         CodexConfig {
@@ -131,6 +161,11 @@ async fn main() -> Result<()> {
         Arc::clone(&context),
         Arc::clone(&curiosity),
         Arc::clone(&reflection_store),
+        Arc::clone(&compute_policies),
+        Arc::clone(&permissions),
+        Arc::clone(&web_fetcher),
+        Arc::clone(&task_execution),
+        Arc::clone(&continuations),
     )
     .await
     .context("start the Codex app-server session")?;
@@ -165,6 +200,8 @@ async fn main() -> Result<()> {
             Arc::clone(&context),
             Arc::clone(&curiosity),
             Arc::clone(&reflection_store),
+            Arc::clone(&task_execution),
+            Arc::clone(&assets),
         )
         .await?,
     );
@@ -191,6 +228,17 @@ async fn main() -> Result<()> {
         Arc::clone(&usage),
         exploration.clone(),
     );
+    task_execution::start_worker(
+        task_execution_receiver,
+        Arc::clone(&task_execution),
+        Arc::clone(&codex),
+        Arc::clone(&compute),
+        Arc::clone(&profile),
+        Arc::clone(&continuity),
+        Arc::clone(&assets),
+        reflection.clone(),
+        Arc::clone(&usage),
+    );
     maintenance::start(
         Arc::clone(&autonomy),
         Arc::clone(&profile),
@@ -210,6 +258,17 @@ async fn main() -> Result<()> {
         Arc::clone(&usage),
     );
     let conversation = ConversationCoordinator::new();
+    continuation::start_worker(
+        continuation_receiver,
+        Arc::clone(&continuations),
+        conversation.clone(),
+        Arc::clone(&codex),
+        Arc::clone(&compute),
+        Arc::clone(&profile),
+        Arc::clone(&continuity),
+        Arc::clone(&reflection_store),
+        Arc::clone(&usage),
+    );
     let state = AppState::new(
         continuity,
         assets,
@@ -219,12 +278,16 @@ async fn main() -> Result<()> {
         autonomy,
         codex,
         compute,
+        compute_policies,
         usage,
         rate_limits,
         exploration,
         reflection,
         conversation,
         bridge,
+        permissions,
+        task_execution,
+        continuations,
     );
     let app = web::router(state);
     let bind: SocketAddr = env::var("SYMBIONT_BIND")

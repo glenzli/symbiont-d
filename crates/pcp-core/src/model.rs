@@ -97,6 +97,7 @@ impl SearchMode {
 pub enum Projection {
     Manifest,
     Summary,
+    Validity,
     Payload,
     Sources,
     Provenance,
@@ -110,12 +111,49 @@ impl Projection {
         match self {
             Self::Manifest => "manifest",
             Self::Summary => "summary",
+            Self::Validity => "validity",
             Self::Payload => "payload",
             Self::Sources => "sources",
             Self::Provenance => "provenance",
             Self::Relations => "relations",
             Self::Facets => "facets",
             Self::History => "history",
+        }
+    }
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ValidityStanding {
+    Live,
+    Qualified,
+    Disputed,
+    Superseded,
+    Retracted,
+    Unknown,
+}
+
+impl ValidityStanding {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Live => "live",
+            Self::Qualified => "qualified",
+            Self::Disputed => "disputed",
+            Self::Superseded => "superseded",
+            Self::Retracted => "retracted",
+            Self::Unknown => "unknown",
+        }
+    }
+
+    pub fn parse(value: &str) -> Option<Self> {
+        match value {
+            "live" => Some(Self::Live),
+            "qualified" => Some(Self::Qualified),
+            "disputed" => Some(Self::Disputed),
+            "superseded" => Some(Self::Superseded),
+            "retracted" => Some(Self::Retracted),
+            "unknown" => Some(Self::Unknown),
+            _ => None,
         }
     }
 }
@@ -222,10 +260,45 @@ pub struct PageSummary {
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
+pub struct PageValidity {
+    pub assessment_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub previous_assessment_id: Option<String>,
+    pub target_revision_id: String,
+    pub standing: ValidityStanding,
+    pub rationale: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub scope: Option<String>,
+    pub assessed_at: String,
+    pub created_by: Actor,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tool_or_model: Option<String>,
+    #[serde(default)]
+    pub basis_revision_ids: Vec<String>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PageValidityHint {
+    pub assessment_id: String,
+    pub standing: ValidityStanding,
+    pub rationale: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub scope: Option<String>,
+    pub assessed_at: String,
+    pub basis_revision_count: u32,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct ReadPage {
     pub revision: PageRevision,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub summary: Option<PageSummary>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub validity: Option<PageValidity>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub validity_history: Vec<PageValidity>,
     #[serde(default)]
     pub relations: Vec<Relation>,
     #[serde(default)]
@@ -263,6 +336,8 @@ pub struct SearchHit {
     pub matched_projection: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub facets: Option<Value>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub validity: Option<PageValidityHint>,
     pub available_projections: Vec<Projection>,
 }
 
@@ -287,5 +362,13 @@ pub struct WriteResult {
 pub struct WriteSummaryResult {
     pub target_revision_id: String,
     pub summary_revision_id: String,
+    pub created: bool,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct WriteValidityResult {
+    pub target_revision_id: String,
+    pub assessment_id: String,
     pub created: bool,
 }

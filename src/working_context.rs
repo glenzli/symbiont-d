@@ -1,10 +1,12 @@
 use serde::{Deserialize, Serialize};
 
-use crate::memory::{MemoryEntry, MemoryRole, MessagePart};
+use crate::memory::{MemoryEntry, MemoryRole, MessagePart, MessageQuote, MessageTopicReference};
 
 pub const WORKING_CONTEXT_SCAN_MESSAGES: usize = 64;
 const WORKING_CONTEXT_MAX_MESSAGES: usize = 16;
 const WORKING_CONTEXT_MAX_CHARS: usize = 16_000;
+const WORKING_CONTEXT_MAX_QUOTES: usize = 3;
+const WORKING_CONTEXT_MAX_QUOTE_CHARS: usize = 1_200;
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -34,6 +36,10 @@ pub struct WorkingContextMessage {
     pub observed_at: String,
     pub content: String,
     pub attachments: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub quotes: Vec<MessageQuote>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub topic: Option<MessageTopicReference>,
 }
 
 impl WorkingContext {
@@ -103,6 +109,18 @@ impl WorkingContext {
                     message.attachments.join(", ")
                 ));
             }
+            if !message.quotes.is_empty() {
+                prompt.push_str(&format!(
+                    "Explicit quotes: {}\n",
+                    serde_json::to_string(&message.quotes).unwrap_or_default()
+                ));
+            }
+            if let Some(topic) = message.topic.as_ref() {
+                prompt.push_str(&format!(
+                    "Explicit topic context: {}\n",
+                    serde_json::to_string(topic).unwrap_or_default()
+                ));
+            }
             prompt.push_str("</event>\n");
         }
         Some(prompt)
@@ -122,10 +140,45 @@ fn bounded_tail(entries: &[MemoryEntry]) -> (Vec<WorkingContextMessage>, bool) {
             .iter()
             .filter_map(|part| match part {
                 MessagePart::Image { asset } => Some(asset.filename.clone()),
-                MessagePart::Markdown { .. } => None,
+                MessagePart::Markdown { .. }
+                | MessagePart::Quote { .. }
+                | MessagePart::Topic { .. } => None,
             })
             .collect::<Vec<_>>();
-        let overhead = revision_id.chars().count() + entry.at.chars().count() + 64;
+        let quotes = entry
+            .parts
+            .iter()
+            .filter_map(|part| match part {
+                MessagePart::Quote { quote } => {
+                    let mut quote = quote.clone();
+                    let (text, truncated) =
+                        truncate_chars(&quote.text, WORKING_CONTEXT_MAX_QUOTE_CHARS);
+                    quote.text = text;
+                    quote.truncated |= truncated;
+                    Some(quote)
+                }
+                MessagePart::Markdown { .. }
+                | MessagePart::Image { .. }
+                | MessagePart::Topic { .. } => None,
+            })
+            .take(WORKING_CONTEXT_MAX_QUOTES)
+            .collect::<Vec<_>>();
+        let topic = entry.parts.iter().find_map(|part| match part {
+            MessagePart::Topic { topic } => Some(topic.clone()),
+            MessagePart::Markdown { .. }
+            | MessagePart::Image { .. }
+            | MessagePart::Quote { .. } => None,
+        });
+        let quote_chars = serde_json::to_string(&quotes)
+            .unwrap_or_default()
+            .chars()
+            .count();
+        let topic_chars = serde_json::to_string(&topic)
+            .unwrap_or_default()
+            .chars()
+            .count();
+        let overhead =
+            revision_id.chars().count() + entry.at.chars().count() + quote_chars + topic_chars + 64;
         let available = WORKING_CONTEXT_MAX_CHARS.saturating_sub(used_chars + overhead);
         if available == 0 {
             truncated = true;
@@ -140,6 +193,8 @@ fn bounded_tail(entries: &[MemoryEntry]) -> (Vec<WorkingContextMessage>, bool) {
             observed_at: entry.at.clone(),
             content,
             attachments,
+            quotes,
+            topic,
         });
         if content_truncated {
             break;

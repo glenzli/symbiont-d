@@ -14,6 +14,8 @@ pub struct ReflectionConfig {
     pub retention_days: u32,
     pub capture_read_state: bool,
     pub follow_ups_enabled: bool,
+    #[serde(default = "enabled_by_default")]
+    pub continuations_enabled: bool,
     pub daily_token_limit: u64,
 }
 
@@ -25,9 +27,14 @@ impl Default for ReflectionConfig {
             retention_days: 30,
             capture_read_state: true,
             follow_ups_enabled: true,
+            continuations_enabled: true,
             daily_token_limit: 1_000_000,
         }
     }
+}
+
+fn enabled_by_default() -> bool {
+    true
 }
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -129,6 +136,13 @@ pub struct InteractionEvent {
     pub content_chars: u64,
     pub payload: serde_json::Value,
     pub retracted: bool,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct HunchFeedbackTarget {
+    pub page_id: String,
+    pub revision_id: String,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]

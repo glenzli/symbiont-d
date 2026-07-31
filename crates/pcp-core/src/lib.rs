@@ -3,10 +3,12 @@ mod request;
 
 pub use model::{
     Actor, ActorType, Capabilities, LifecycleStatus, PagePayload, PageRevision, PageSummary,
-    Projection, ProvenanceEvent, ReadPage, Relation, Scope, SearchHit, SearchMode, SearchResult,
-    SourceRef, WriteResult, WriteSummaryResult,
+    PageValidity, PageValidityHint, Projection, ProvenanceEvent, ReadPage, Relation, Scope,
+    SearchHit, SearchMode, SearchResult, SourceRef, ValidityStanding, WriteResult,
+    WriteSummaryResult, WriteValidityResult,
 };
 pub use request::{
-    CreateScopeRequest, InitialRelation, LinkPagesRequest, ReadPagesRequest, RevisePageRequest,
-    SearchFilters, SearchPagesRequest, WritePageRequest, WriteSummaryRequest,
+    AssessPageValidityRequest, CreateScopeRequest, InitialRelation, LinkPagesRequest,
+    ReadPagesRequest, RevisePageRequest, SearchFilters, SearchPagesRequest, WritePageRequest,
+    WriteSummaryRequest,
 };

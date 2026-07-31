@@ -1,11 +1,16 @@
+mod approvals;
 mod client;
+mod images;
 mod prompts;
 mod task_bridge;
 mod tool_dedup;
 mod tools;
 mod trace;
 
-pub use client::{ChatInput, CodexClient, CodexConfig, RateLimitInfo, RuntimeEvent};
+pub use client::{
+    ChatInput, CodexClient, CodexConfig, GeneratedImageOutput, RateLimitInfo, RuntimeEvent,
+};
+pub use images::import_generated_images;
 pub use task_bridge::{CodexTaskDetail, CodexTaskSummary};
 
 #[cfg(test)]

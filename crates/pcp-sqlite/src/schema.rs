@@ -104,6 +104,37 @@ pub(crate) fn initialize(connection: &Connection) -> Result<()> {
                 tool_or_model TEXT
             );
 
+            CREATE TABLE IF NOT EXISTS pcp_validity_assessments (
+                assessment_id TEXT PRIMARY KEY,
+                previous_assessment_id TEXT
+                    REFERENCES pcp_validity_assessments(assessment_id),
+                target_revision_id TEXT NOT NULL REFERENCES pcp_revisions(revision_id),
+                standing TEXT NOT NULL,
+                rationale TEXT NOT NULL,
+                scope TEXT,
+                assessed_at TEXT NOT NULL,
+                actor_type TEXT NOT NULL,
+                actor_id TEXT NOT NULL,
+                tool_or_model TEXT,
+                basis_revision_ids_json TEXT NOT NULL
+            );
+
+            CREATE TABLE IF NOT EXISTS pcp_validity_heads (
+                target_revision_id TEXT PRIMARY KEY REFERENCES pcp_revisions(revision_id),
+                current_assessment_id TEXT NOT NULL
+                    REFERENCES pcp_validity_assessments(assessment_id)
+            );
+
+            CREATE TABLE IF NOT EXISTS pcp_validity_idempotency (
+                actor_id TEXT NOT NULL,
+                idempotency_key TEXT NOT NULL,
+                target_revision_id TEXT NOT NULL REFERENCES pcp_revisions(revision_id),
+                result_assessment_id TEXT NOT NULL
+                    REFERENCES pcp_validity_assessments(assessment_id),
+                created_at TEXT NOT NULL,
+                PRIMARY KEY (actor_id, idempotency_key)
+            );
+
             CREATE TABLE IF NOT EXISTS pcp_idempotency (
                 actor_id TEXT NOT NULL,
                 operation TEXT NOT NULL,
@@ -145,6 +176,10 @@ pub(crate) fn initialize(connection: &Connection) -> Result<()> {
                 ON pcp_summaries(target_revision_id, created_at DESC);
             CREATE INDEX IF NOT EXISTS pcp_summary_assessments_policy
                 ON pcp_summary_assessments(policy_version, assessed_at DESC);
+            CREATE INDEX IF NOT EXISTS pcp_validity_target
+                ON pcp_validity_assessments(target_revision_id, assessed_at DESC);
+            CREATE INDEX IF NOT EXISTS pcp_validity_standing
+                ON pcp_validity_assessments(standing, assessed_at DESC);
 
             INSERT OR IGNORE INTO pcp_metadata (key, value)
             VALUES ('provenance_input_index_version', '0');

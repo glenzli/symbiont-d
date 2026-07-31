@@ -58,6 +58,46 @@ pub struct MemoryEntry {
 pub enum MessagePart {
     Markdown { text: String },
     Image { asset: ImageAttachment },
+    Quote { quote: MessageQuote },
+    Topic { topic: MessageTopicReference },
+}
+
+#[derive(Clone, Debug, Deserialize, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MessageTopicReference {
+    pub topic_id: String,
+    pub title: String,
+}
+
+#[derive(Clone, Debug, Deserialize, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MessageQuoteDraft {
+    pub source_revision_id: String,
+    pub selected_text: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub start_offset: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub end_offset: Option<u32>,
+    #[serde(default)]
+    pub whole_message: bool,
+}
+
+#[derive(Clone, Debug, Deserialize, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MessageQuote {
+    pub source_revision_id: String,
+    pub source_role: MemoryRole,
+    pub source_at: String,
+    pub text: String,
+    pub source_sha256: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub start_offset: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub end_offset: Option<u32>,
+    #[serde(default)]
+    pub whole_message: bool,
+    #[serde(default)]
+    pub truncated: bool,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]

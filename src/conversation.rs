@@ -9,11 +9,14 @@ use std::{
 use anyhow::Result;
 use serde::Serialize;
 use tokio::{
-    sync::{Mutex, Notify},
+    sync::{Mutex, Notify, watch},
     time::{Instant, sleep_until},
 };
 
+use crate::compute::ComputeLane;
 use crate::continuity::StoredMessage;
+use crate::memory::MessageQuote;
+use crate::topics::TopicContext;
 
 const QUIET_WINDOW: Duration = Duration::from_millis(1_500);
 const TYPING_GRACE: Duration = Duration::from_millis(2_500);
@@ -26,6 +29,9 @@ pub struct QueuedUserMessage {
     pub local_images: Vec<std::path::PathBuf>,
     pub stored: StoredMessage,
     pub reply_to_revision_id: Option<String>,
+    pub quotes: Vec<MessageQuote>,
+    pub topic: Option<TopicContext>,
+    pub minimum_lane: Option<ComputeLane>,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -45,10 +51,12 @@ pub struct ConversationSnapshot {
 pub struct ConversationCoordinator {
     state: Arc<Mutex<State>>,
     changed: Arc<Notify>,
+    input_epoch: watch::Sender<u64>,
 }
 
 struct State {
     active: Option<ActiveConversation>,
+    typing_until: Option<Instant>,
 }
 
 struct ActiveConversation {
@@ -56,15 +64,19 @@ struct ActiveConversation {
     pending: Vec<QueuedUserMessage>,
     append_reservations: usize,
     last_input_at: Instant,
-    typing_until: Option<Instant>,
     started_at: String,
 }
 
 impl ConversationCoordinator {
     pub fn new() -> Self {
+        let (input_epoch, _) = watch::channel(0);
         Self {
-            state: Arc::new(Mutex::new(State { active: None })),
+            state: Arc::new(Mutex::new(State {
+                active: None,
+                typing_until: None,
+            })),
             changed: Arc::new(Notify::new()),
+            input_epoch,
         }
     }
 
@@ -79,9 +91,9 @@ impl ConversationCoordinator {
             pending: vec![message],
             append_reservations: 0,
             last_input_at: Instant::now(),
-            typing_until: None,
             started_at: chrono::Utc::now().to_rfc3339(),
         });
+        self.bump_input_epoch();
         self.changed.notify_waiters();
         Ok(ConversationLease { id })
     }
@@ -109,6 +121,7 @@ impl ConversationCoordinator {
         active.append_reservations -= 1;
         active.pending.push(message);
         active.last_input_at = Instant::now();
+        self.bump_input_epoch();
         self.changed.notify_waiters();
         Ok(())
     }
@@ -124,11 +137,47 @@ impl ConversationCoordinator {
 
     pub async fn note_typing(&self, typing: bool) {
         let mut state = self.state.lock().await;
-        let Some(active) = state.active.as_mut() else {
-            return;
-        };
-        active.typing_until = typing.then(|| Instant::now() + TYPING_GRACE);
+        state.typing_until = typing.then(|| Instant::now() + TYPING_GRACE);
         self.changed.notify_waiters();
+    }
+
+    pub fn subscribe_input(&self) -> watch::Receiver<u64> {
+        self.input_epoch.subscribe()
+    }
+
+    pub fn announce_input(&self) {
+        self.bump_input_epoch();
+    }
+
+    pub fn current_input_epoch(&self) -> u64 {
+        *self.input_epoch.borrow()
+    }
+
+    pub async fn wait_for_idle_input(&self, expected_epoch: u64, maximum: Duration) -> bool {
+        let maximum = Instant::now() + maximum;
+        loop {
+            if self.current_input_epoch() != expected_epoch {
+                return false;
+            }
+            let deadline = {
+                let state = self.state.lock().await;
+                if state.active.is_some() {
+                    return false;
+                }
+                state
+                    .typing_until
+                    .filter(|deadline| *deadline > Instant::now())
+                    .unwrap_or_else(Instant::now)
+                    .min(maximum)
+            };
+            if Instant::now() >= deadline {
+                return true;
+            }
+            tokio::select! {
+                _ = sleep_until(deadline) => {}
+                _ = self.changed.notified() => {}
+            }
+        }
     }
 
     pub async fn settle_and_take(
@@ -141,7 +190,7 @@ impl ConversationCoordinator {
                 let state = self.state.lock().await;
                 let active = matching_active(&state, lease)?;
                 let quiet = active.last_input_at + QUIET_WINDOW;
-                active
+                state
                     .typing_until
                     .map(|typing| quiet.max(typing))
                     .unwrap_or(quiet)
@@ -205,6 +254,11 @@ impl ConversationCoordinator {
                 .map(|active| active.started_at.clone()),
         }
     }
+
+    fn bump_input_epoch(&self) {
+        self.input_epoch
+            .send_modify(|epoch| *epoch = epoch.wrapping_add(1));
+    }
 }
 
 fn matching_active(state: &State, lease: ConversationLease) -> Result<&ActiveConversation> {
@@ -257,6 +311,9 @@ mod tests {
                 attachment_revision_ids: Vec::new(),
             },
             reply_to_revision_id: None,
+            quotes: Vec::new(),
+            topic: None,
+            minimum_lane: None,
         }
     }
 
@@ -292,5 +349,23 @@ mod tests {
         let batch = coordinator.settle_and_take(lease).await.unwrap();
         assert_eq!(batch[0].text, "two");
         assert!(coordinator.finish_if_idle(lease).await.unwrap());
+    }
+
+    #[tokio::test]
+    async fn input_epoch_notifies_running_turns_of_new_messages() {
+        let coordinator = ConversationCoordinator::new();
+        let mut input_events = coordinator.subscribe_input();
+        let lease = coordinator.start(message("one")).await.unwrap();
+        input_events.changed().await.unwrap();
+        assert_eq!(*input_events.borrow(), coordinator.current_input_epoch());
+
+        let reservation = coordinator.reserve_append().await.unwrap();
+        coordinator
+            .append_reserved(reservation, message("two"))
+            .await
+            .unwrap();
+        input_events.changed().await.unwrap();
+        assert_eq!(*input_events.borrow(), coordinator.current_input_epoch());
+        coordinator.abort(lease).await;
     }
 }

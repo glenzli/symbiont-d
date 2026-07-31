@@ -9,7 +9,16 @@ export function initExplorationUi(state) {
   const dialog = document.querySelector("#exploration-dialog");
   const status = document.querySelector("#exploration-dialog-status");
   const history = document.querySelector("#exploration-history");
+  const quickRun = document.querySelector("#run-exploration-quick");
+  const budgetDialog = document.querySelector("#exploration-budget-dialog");
+  const budgetUsed = document.querySelector("#exploration-budget-used");
+  const budgetLimit = document.querySelector("#exploration-budget-limit");
+  const cancelOverride = document.querySelector("#cancel-exploration-override");
+  const confirmOverride = document.querySelector("#confirm-exploration-override");
   let lastLoadedRunAt = null;
+  let triggering = false;
+  let queued = false;
+  let budgetResolver = null;
 
   async function load() {
     status.textContent = "正在读取";
@@ -52,14 +61,94 @@ export function initExplorationUi(state) {
     load();
   }
 
+  async function trigger() {
+    if (triggering || queued || state.exploration?.phase === "exploring") {
+      return { accepted: false, alreadyQueued: true };
+    }
+    triggering = true;
+    renderQuickRun();
+    try {
+      let payload = await requestExploration(false);
+      if (payload.requiresConfirmation) {
+        const confirmed = await confirmBudget(payload);
+        if (!confirmed) return { accepted: false, canceled: true };
+        payload = await requestExploration(true);
+      }
+      if (payload.accepted) {
+        queued = true;
+        window.setTimeout(() => {
+          queued = false;
+          renderQuickRun();
+        }, 5_000);
+      }
+      return payload;
+    } finally {
+      triggering = false;
+      renderQuickRun();
+    }
+  }
+
+  async function requestExploration(overrideTokenLimit) {
+    const query = overrideTokenLimit ? "?overrideTokenLimit=true" : "";
+    return responseJson(
+      await fetch(`/api/exploration/run${query}`, { method: "POST" }),
+      "无法开始探索",
+    );
+  }
+
+  function confirmBudget(payload) {
+    budgetUsed.textContent = formatTokens(payload.autonomousTokensToday || 0);
+    budgetLimit.textContent = formatTokens(payload.dailyTokenLimit || 0);
+    budgetDialog.showModal();
+    return new Promise((resolve) => {
+      budgetResolver = resolve;
+    });
+  }
+
+  function resolveBudget(confirmed) {
+    if (budgetDialog.open) budgetDialog.close();
+    const resolve = budgetResolver;
+    budgetResolver = null;
+    resolve?.(confirmed);
+  }
+
+  function renderQuickRun() {
+    const exploring = state.exploration?.phase === "exploring";
+    quickRun.disabled =
+      !state.autonomyPermitted || triggering || queued || exploring;
+    quickRun.textContent = exploring
+      ? "探索中"
+      : queued
+        ? "已加入"
+        : triggering
+          ? "检查中"
+          : "探索";
+  }
+
   document
     .querySelector("#open-explorations")
     .addEventListener("click", open);
+  quickRun.addEventListener("click", () => {
+    trigger().catch((error) => {
+      status.textContent = error.message;
+      if (!dialog.open) dialog.showModal();
+    });
+  });
+  cancelOverride.addEventListener("click", () => resolveBudget(false));
+  confirmOverride.addEventListener("click", () => resolveBudget(true));
+  budgetDialog.addEventListener("cancel", (event) => {
+    event.preventDefault();
+    resolveBudget(false);
+  });
+  renderQuickRun();
 
   return {
+    trigger,
     runtimeUpdated() {
-      if (!dialog.open) return;
       const runAt = state.exploration?.lastRunAt || null;
+      if (state.exploration?.phase === "exploring") queued = false;
+      renderQuickRun();
+      if (!dialog.open) return;
       status.textContent = currentStatus(state.exploration);
       if (runAt && runAt !== lastLoadedRunAt) load();
     },
@@ -169,6 +258,7 @@ function triggerLabel(trigger) {
       scheduled: "定时",
       manual: "手动",
       conversation_hunch: "对话触发",
+      deferred_follow_up: "延迟续话",
     }[trigger] || ""
   );
 }

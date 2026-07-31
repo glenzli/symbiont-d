@@ -8,6 +8,7 @@ use crate::{
     row::{REVISION_COLUMNS, relation_from_row, revision_from_row},
     store::{MAX_READ_CHARS, MAX_READ_PAGES, SqlitePcpStore},
     summary::current_summary,
+    validity::{current_validity, validity_history},
 };
 
 impl SqlitePcpStore {
@@ -131,6 +132,10 @@ impl SqlitePcpStore {
             .projections
             .iter()
             .any(|projection| projection == &Projection::Payload);
+        let include_validity = request
+            .projections
+            .iter()
+            .any(|projection| projection == &Projection::Validity);
         let include_facets = request
             .projections
             .iter()
@@ -185,6 +190,22 @@ impl SqlitePcpStore {
                 } else {
                     None
                 };
+                let mut validity = if include_validity {
+                    current_validity(&connection, &revision_id)?
+                } else {
+                    None
+                };
+                let mut validity_history = if include_validity && include_history {
+                    validity_history(&connection, &revision_id)?
+                } else {
+                    Vec::new()
+                };
+                if let Some(validity) = validity.as_mut() {
+                    bound_validity(validity, &mut remaining_chars);
+                }
+                for assessment in &mut validity_history {
+                    bound_validity(assessment, &mut remaining_chars);
+                }
                 if let Some(summary) = summary.as_mut() {
                     let content_chars = summary.content.chars().count();
                     if content_chars > remaining_chars {
@@ -239,6 +260,8 @@ impl SqlitePcpStore {
                 output.push(ReadPage {
                     revision,
                     summary,
+                    validity,
+                    validity_history,
                     relations,
                     history,
                 });
@@ -322,6 +345,26 @@ impl SqlitePcpStore {
         })
         .await
     }
+}
+
+fn bound_validity(validity: &mut pcp_core::PageValidity, remaining_chars: &mut usize) {
+    validity.rationale = take_budgeted(&validity.rationale, remaining_chars);
+    if let Some(scope) = validity.scope.as_mut() {
+        *scope = take_budgeted(scope, remaining_chars);
+    }
+}
+
+fn take_budgeted(content: &str, remaining_chars: &mut usize) -> String {
+    let content_chars = content.chars().count();
+    if content_chars <= *remaining_chars {
+        *remaining_chars -= content_chars;
+        return content.to_owned();
+    }
+    let retained = remaining_chars.saturating_sub(40);
+    let mut output = content.chars().take(retained).collect::<String>();
+    output.push_str("\n[projection truncated by host budget]");
+    *remaining_chars = 0;
+    output
 }
 
 fn read_relations(

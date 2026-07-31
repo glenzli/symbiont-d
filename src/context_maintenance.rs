@@ -256,7 +256,11 @@ async fn review_profile(
                 Some(outcome.metadata),
                 MessageLinks {
                     responds_to: None,
+                    continues_from: None,
                     input_revision_ids,
+                    surfaced_hunch_revision_ids: Vec::new(),
+                    quotes: Vec::new(),
+                    topic: None,
                 },
             )
             .await?;

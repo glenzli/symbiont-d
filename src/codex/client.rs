@@ -13,12 +13,13 @@ use serde_json::{Map, Value, json};
 use tokio::{
     io::{AsyncBufReadExt, AsyncWriteExt, BufReader, Lines},
     process::{Child, ChildStdin, ChildStdout, Command},
-    sync::{RwLock, mpsc},
+    sync::{RwLock, mpsc, watch},
     time::{sleep, timeout},
 };
 use tracing::{debug, warn};
 
 use super::{
+    approvals::{approval_response, automatic_server_request_response, permission_request},
     prompts::{
         additional_context_value, autonomous_exploration_prompt, context_fragments,
         context_maintenance_prompt, developer_instructions, interaction_reflection_prompt,
@@ -33,15 +34,19 @@ use super::{
 };
 use crate::{
     compute::{ComputeConfig, ComputeLane, LaneConfig, ModelInfo},
+    continuation::ContinuationQueue,
     continuity::ContinuityHost,
     curiosity::CuriosityStore,
     diagnostics::{ContextSnapshot, ExecutionTraceEvent, NativeThreadSnapshot, TraceEventKind},
     memory::{MessageMetadata, MessageRunMetadata},
+    permission::PermissionBroker,
     profile::{ProfileSnapshot, ProfileStore},
     reflection::ReflectionStore,
     rollover::{self, NativeThreadCursor, RolloverDecision, ThreadContextPressure},
     symbiont_context::SymbiontContextStore,
+    task_execution::{TaskExecutionQueue, TaskExecutionRequest},
     usage::{InvocationRecord, ToolTraceStep},
+    web_fetch::WebFetcher,
     working_context::WorkingContext,
 };
 
@@ -50,6 +55,7 @@ const MAINTENANCE_COMPLETE_MARKER: &str = "<symbiont-maintained/>";
 const CONTEXT_MAINTENANCE_COMPLETE_MARKER: &str = "<symbiont-context-maintained/>";
 const PROFILE_REVIEW_COMPLETE_MARKER: &str = "<symbiont-profile-reviewed/>";
 const REFLECTION_COMPLETE_MARKER: &str = "<symbiont-reflected/>";
+const CONTINUATION_SILENT_MARKER: &str = "<symbiont-no-continuation/>";
 
 #[derive(Clone)]
 pub struct CodexConfig {
@@ -89,10 +95,21 @@ pub enum RuntimeEvent {
 
 pub struct ChatOutcome {
     pub text: String,
+    pub generated_images: Vec<GeneratedImageOutput>,
     pub metadata: MessageMetadata,
     pub invocations: Vec<InvocationRecord>,
     pub context_revision_ids: Vec<String>,
     pub hunch_touched: bool,
+    pub scheduled_follow_up_ids: Vec<String>,
+    pub reserved_continuation_ids: Vec<String>,
+    pub interrupted: bool,
+}
+
+#[derive(Clone, Debug)]
+pub struct GeneratedImageOutput {
+    pub item_id: String,
+    pub saved_path: PathBuf,
+    pub revised_prompt: Option<String>,
 }
 
 pub struct ExplorationOutcome {
@@ -100,6 +117,13 @@ pub struct ExplorationOutcome {
     pub metadata: MessageMetadata,
     pub invocations: Vec<InvocationRecord>,
     pub context_revision_ids: Vec<String>,
+    pub hunch_revisions: Vec<HunchRevisionRef>,
+}
+
+#[derive(Clone, Debug)]
+pub struct HunchRevisionRef {
+    pub page_id: String,
+    pub revision_id: String,
 }
 
 pub struct MaintenanceOutcome {
@@ -133,6 +157,8 @@ pub struct ChatInput {
     pub local_images: Vec<PathBuf>,
     pub current_revision_id: String,
     pub reply_to_revision_id: Option<String>,
+    pub initial_lane: ComputeLane,
+    pub input_events: watch::Receiver<u64>,
 }
 
 #[derive(Clone, Debug, Default)]
@@ -146,8 +172,15 @@ struct TokenBreakdown {
 
 struct TurnOutcome {
     text: String,
+    generated_images: Vec<GeneratedImageOutput>,
     invocation: InvocationRecord,
     escalation: Option<EscalationRequest>,
+    interrupted: bool,
+}
+
+struct TurnOverrides {
+    cwd: PathBuf,
+    sandbox_policy: Value,
 }
 
 #[derive(Clone, Copy)]
@@ -174,6 +207,7 @@ pub struct CodexClient {
     thread_compactions: HashMap<String, u64>,
     thread_context_pressure: HashMap<String, ThreadContextPressure>,
     rate_limits: Arc<RwLock<Option<RateLimitInfo>>>,
+    permissions: Arc<PermissionBroker>,
 }
 
 impl CodexClient {
@@ -184,6 +218,11 @@ impl CodexClient {
         context: Arc<SymbiontContextStore>,
         curiosity: Arc<CuriosityStore>,
         reflection: Arc<ReflectionStore>,
+        compute_policies: Arc<crate::compute_policy::ComputePolicyStore>,
+        permissions: Arc<PermissionBroker>,
+        web_fetcher: Arc<WebFetcher>,
+        task_execution: Arc<TaskExecutionQueue>,
+        continuations: Arc<ContinuationQueue>,
     ) -> Result<Self> {
         let mut last_error = None;
         for attempt in 1..=3 {
@@ -196,6 +235,11 @@ impl CodexClient {
                     Arc::clone(&context),
                     Arc::clone(&curiosity),
                     Arc::clone(&reflection),
+                    Arc::clone(&compute_policies),
+                    Arc::clone(&permissions),
+                    Arc::clone(&web_fetcher),
+                    Arc::clone(&task_execution),
+                    Arc::clone(&continuations),
                 ),
             )
             .await
@@ -224,6 +268,11 @@ impl CodexClient {
         context: Arc<SymbiontContextStore>,
         curiosity: Arc<CuriosityStore>,
         reflection: Arc<ReflectionStore>,
+        compute_policies: Arc<crate::compute_policy::ComputePolicyStore>,
+        permissions: Arc<PermissionBroker>,
+        web_fetcher: Arc<WebFetcher>,
+        task_execution: Arc<TaskExecutionQueue>,
+        continuations: Arc<ContinuationQueue>,
     ) -> Result<Self> {
         let mut child = Command::new(&config.binary)
             .arg("app-server")
@@ -255,13 +304,24 @@ impl CodexClient {
             workspace: config.workspace.clone(),
             continuity: Arc::clone(&continuity),
             interactive_cursor: NativeThreadCursor::new(),
-            tools: SymbiontTools::new(continuity, profile, context, curiosity, reflection),
+            tools: SymbiontTools::new(
+                continuity,
+                profile,
+                context,
+                curiosity,
+                reflection,
+                compute_policies,
+                Some(web_fetcher),
+                task_execution,
+                continuations,
+            ),
             models: Vec::new(),
             thread_usage: HashMap::new(),
             thread_turns: HashMap::new(),
             thread_compactions: HashMap::new(),
             thread_context_pressure: HashMap::new(),
             rate_limits: Arc::new(RwLock::new(None)),
+            permissions,
         };
         client.initialize().await?;
         client.models = client.load_models().await?;
@@ -288,7 +348,7 @@ impl CodexClient {
                     "limit": limit.clamp(1, 50),
                     "sortKey": "updated_at",
                     "sortDirection": "desc",
-                    "sourceKinds": ["cli", "vscode"],
+                    "sourceKinds": ["cli", "vscode", "appServer"],
                     "archived": false
                 }),
             )
@@ -312,10 +372,109 @@ impl CodexClient {
             .await
             .context("read Codex task")?;
         let detail = parse_task_detail(&result)?;
-        if !matches!(detail.task.source.as_str(), "cli" | "vscode") {
+        if detail.task.ephemeral
+            || !matches!(detail.task.source.as_str(), "cli" | "vscode" | "appServer")
+        {
             anyhow::bail!("only interactive Codex tasks can be read");
         }
         Ok(detail)
+    }
+
+    pub async fn execute_bound_task(
+        &mut self,
+        request: &TaskExecutionRequest,
+        local_images: &[PathBuf],
+        compute: &ComputeConfig,
+        profile: &ProfileSnapshot,
+        events: mpsc::Sender<RuntimeEvent>,
+    ) -> Result<ChatOutcome> {
+        if request.task.thread_id.trim().is_empty() || request.task.thread_id.len() > 128 {
+            anyhow::bail!("invalid bound Codex task id");
+        }
+        let cwd = PathBuf::from(&request.task.cwd);
+        if !cwd.is_absolute() {
+            anyhow::bail!("bound Codex task working directory must be absolute");
+        }
+        self.request(
+            "thread/resume",
+            json!({
+                "threadId": request.task.thread_id,
+                "cwd": cwd,
+                "approvalPolicy": granular_approval_policy(),
+                "sandbox": "workspace-write"
+            }),
+        )
+        .await
+        .context("resume the bound Codex task")?;
+        let image_note = if local_images.is_empty() {
+            String::new()
+        } else {
+            format!(
+                "\n\nSelected image inputs:\n{} immutable symbiont image asset(s) are attached to \
+                 this turn as `localImage` items. They were resolved from exact PCP Revisions at \
+                 queue time. Inspect and use them as references for the request; do not substitute \
+                 a newer or similarly named image.",
+                local_images.len()
+            )
+        };
+        let prompt = format!(
+            "The user explicitly delegated this concrete repository operation from symbiont-d \
+             into this bound Codex task.\n\nRequest:\n{}\n\nWhy now:\n{}{}\n\nWork directly in \
+             the existing repository. Inspect the current worktree before editing, preserve \
+             unrelated user changes, implement the request end to end, and run proportionate \
+             verification. Return a concise account of the changes, verification, and any \
+             unresolved limitation.",
+            request.instruction, request.reason, image_note
+        );
+        let context = format!(
+            "Bound Codex task execution for `{}`. This is an explicitly authorized implementation \
+             handoff, not ordinary symbiont conversation. Use the task's repository context and \
+             coding tools. Do not modify symbiont memory, profile, Curiosity, or PCP from this run.",
+            request.task.title
+        );
+        let overrides = TurnOverrides {
+            cwd: cwd.clone(),
+            sandbox_policy: json!({
+                "type": "workspaceWrite",
+                "writableRoots": [cwd],
+                "networkAccess": false,
+                "excludeSlashTmp": false,
+                "excludeTmpdirEnvVar": false
+            }),
+        };
+        let input_items =
+            self.input_items_with_local_images(&prompt, local_images, request.lane, compute)?;
+        let mut turn = self
+            .run_turn(
+                &request.task.thread_id,
+                input_items,
+                request.lane,
+                "codex_task",
+                compute,
+                profile,
+                &context,
+                None,
+                None,
+                false,
+                Some(&overrides),
+                None,
+                &events,
+            )
+            .await?;
+        turn.invocation.produced_message = true;
+        let generated_images = turn.generated_images;
+        let invocations = vec![turn.invocation];
+        Ok(ChatOutcome {
+            text: turn.text,
+            generated_images,
+            metadata: metadata_for(&invocations, "codex_task"),
+            invocations,
+            context_revision_ids: Vec::new(),
+            hunch_touched: false,
+            scheduled_follow_up_ids: Vec::new(),
+            reserved_continuation_ids: Vec::new(),
+            interrupted: false,
+        })
     }
 
     pub async fn chat(
@@ -326,7 +485,10 @@ impl CodexClient {
         continuity_context: &str,
         events: mpsc::Sender<RuntimeEvent>,
     ) -> Result<ChatOutcome> {
-        let first_lane = ComputeLane::Conversation;
+        let first_lane = input.initial_lane;
+        let allow_escalation = [ComputeLane::Investigate, ComputeLane::Critical]
+            .into_iter()
+            .any(|lane| compute.allows_escalation(first_lane, lane));
         let first_input = self.user_input_items(&input, first_lane, compute)?;
         let thread_id = self.interactive_thread_id.clone();
         let rollover = rollover::decide(
@@ -358,7 +520,8 @@ impl CodexClient {
                 continuity_context,
                 Some(working_context),
                 rollover.as_ref(),
-                true,
+                allow_escalation,
+                Some(input.input_events.clone()),
                 &events,
             )
             .await?;
@@ -389,6 +552,60 @@ impl CodexClient {
                 Err(error) => {
                     warn!(%error, "could not rotate the interactive Codex thread");
                 }
+            }
+        }
+        Ok(outcome)
+    }
+
+    pub async fn continue_conversation(
+        &mut self,
+        reason: &str,
+        compute: &ComputeConfig,
+        profile: &ProfileSnapshot,
+        continuity_context: &str,
+        input_events: watch::Receiver<u64>,
+        events: mpsc::Sender<RuntimeEvent>,
+    ) -> Result<ChatOutcome> {
+        let prompt = format!(
+            "Reconsider one explicitly reserved short continuation after a brief pause.\n\
+             Reserved reason: {reason}\n\n\
+             The immediately preceding assistant message is present in the native thread or \
+             supplied exact working-context bridge.\n\n\
+             Make exactly one additional conversational move only if it adds a distinct \
+             correction, association, or question now. Do not restate or split the prior answer, \
+             browse, call tools, mention this reservation, or write a report-style preamble. If \
+             nothing distinct remains, return exactly {CONTINUATION_SILENT_MARKER}."
+        );
+        let thread_id = self.interactive_thread_id.clone();
+        let needs_bridge = self.interactive_cursor.needs_bridge();
+        let working_context = if needs_bridge {
+            Some(self.continuity.working_context(None, None, None).await?)
+        } else {
+            None
+        };
+        let mut outcome = self
+            .run_request(
+                thread_id,
+                text_input_items(&prompt),
+                ComputeLane::Conversation,
+                "continuation",
+                compute,
+                profile,
+                continuity_context,
+                working_context,
+                None,
+                false,
+                Some(input_events),
+                &events,
+            )
+            .await?;
+        if needs_bridge && !outcome.interrupted {
+            self.interactive_cursor.bridge_completed();
+        }
+        if outcome.text.trim() == CONTINUATION_SILENT_MARKER {
+            outcome.text.clear();
+            for invocation in &mut outcome.invocations {
+                invocation.produced_message = false;
             }
         }
         Ok(outcome)
@@ -432,6 +649,7 @@ impl CodexClient {
                 None,
                 None,
                 true,
+                None,
                 &events,
             )
             .await;
@@ -447,11 +665,13 @@ impl CodexClient {
             Some(outcome.text)
         };
         outcome.metadata = metadata_for(&outcome.invocations, "autonomous");
+        let hunch_revisions = successful_hunch_revisions(&outcome.invocations);
         Ok(ExplorationOutcome {
             message,
             metadata: outcome.metadata,
             invocations: outcome.invocations,
             context_revision_ids: outcome.context_revision_ids,
+            hunch_revisions,
         })
     }
 
@@ -477,6 +697,7 @@ impl CodexClient {
                 None,
                 None,
                 false,
+                None,
                 &events,
             )
             .await;
@@ -531,6 +752,7 @@ impl CodexClient {
                 None,
                 None,
                 false,
+                None,
                 &events,
             )
             .await;
@@ -572,6 +794,7 @@ impl CodexClient {
                 None,
                 None,
                 false,
+                None,
                 &events,
             )
             .await;
@@ -642,6 +865,7 @@ impl CodexClient {
                 None,
                 None,
                 false,
+                None,
                 &events,
             )
             .await;
@@ -653,7 +877,7 @@ impl CodexClient {
             .iter()
             .flat_map(|invocation| invocation.trace_steps.iter())
             .filter(|step| {
-                step.namespace == "symbiont"
+                (step.namespace == "symbiont"
                     && matches!(
                         step.tool.as_str(),
                         "upsert_episode"
@@ -662,9 +886,10 @@ impl CodexClient {
                             | "update_current_map"
                             | "update_open_loops"
                             | "complete_reflection"
-                    )
-                    && step.succeeded
+                    ))
+                    || (step.namespace == "pcp" && step.tool == "assess_validity")
             })
+            .filter(|step| step.succeeded)
             .collect::<Vec<_>>();
         let summary = reflection_steps
             .iter()
@@ -678,7 +903,7 @@ impl CodexClient {
         let actions = reflection_steps
             .iter()
             .filter(|step| step.tool != "complete_reflection")
-            .map(|step| format!("symbiont.{}", step.tool))
+            .map(|step| format!("{}.{}", step.namespace, step.tool))
             .collect();
         for invocation in &mut outcome.invocations {
             invocation.produced_message = false;
@@ -718,6 +943,7 @@ impl CodexClient {
         working_context: Option<WorkingContext>,
         rollover: Option<&RolloverDecision>,
         allow_escalation: bool,
+        mut input_events: Option<watch::Receiver<u64>>,
         events: &mpsc::Sender<RuntimeEvent>,
     ) -> Result<ChatOutcome> {
         let mut first = self
@@ -732,13 +958,20 @@ impl CodexClient {
                 working_context.as_ref(),
                 rollover,
                 allow_escalation,
+                None,
+                input_events.as_mut(),
                 events,
             )
             .await?;
         let root_id = first.invocation.id.clone();
         let mut invocations = Vec::new();
+        if first.interrupted {
+            first.invocation.produced_message = false;
+            invocations.push(first.invocation);
+            return Ok(interrupted_chat_outcome(invocations, origin));
+        }
 
-        let final_text = if let Some(escalation) = first.escalation.take() {
+        let (final_text, generated_images) = if let Some(escalation) = first.escalation.take() {
             if compute.allows_escalation(first_lane, escalation.lane) {
                 let deep_rollover =
                     rollover.filter(|_| !invocation_wrote_checkpoint(&first.invocation));
@@ -765,36 +998,55 @@ impl CodexClient {
                         None,
                         deep_rollover,
                         false,
+                        None,
+                        input_events.as_mut(),
                         events,
                     )
                     .await?;
+                if deep.interrupted {
+                    deep.invocation.parent_id = Some(root_id);
+                    deep.invocation.produced_message = false;
+                    invocations.push(deep.invocation);
+                    return Ok(interrupted_chat_outcome(invocations, origin));
+                }
                 deep.invocation.parent_id = Some(root_id);
                 deep.invocation.produced_message = true;
                 let text = deep.text;
+                let generated_images = deep.generated_images;
                 invocations.push(deep.invocation);
-                text
+                (text, generated_images)
             } else {
                 first.invocation.produced_message = true;
                 let text = first.text;
+                let generated_images = first.generated_images;
                 invocations.push(first.invocation);
-                text
+                (text, generated_images)
             }
         } else {
             first.invocation.produced_message = true;
             let text = first.text;
+            let generated_images = first.generated_images;
             invocations.push(first.invocation);
-            text
+            (text, generated_images)
         };
 
         let metadata = metadata_for(&invocations, origin);
         let context_revision_ids = context_revision_ids(&invocations);
         let hunch_touched = hunch_was_touched(&invocations);
+        let scheduled_follow_up_ids =
+            successful_tool_result_ids(&invocations, "symbiont", "schedule_follow_up", "id");
+        let reserved_continuation_ids =
+            successful_tool_result_ids(&invocations, "symbiont", "reserve_continuation", "id");
         Ok(ChatOutcome {
             text: final_text,
+            generated_images,
             metadata,
             invocations,
             context_revision_ids,
             hunch_touched,
+            scheduled_follow_up_ids,
+            reserved_continuation_ids,
+            interrupted: false,
         })
     }
 
@@ -810,6 +1062,8 @@ impl CodexClient {
         working_context: Option<&WorkingContext>,
         rollover: Option<&RolloverDecision>,
         allow_escalation: bool,
+        overrides: Option<&TurnOverrides>,
+        mut input_events: Option<&mut watch::Receiver<u64>>,
         events: &mpsc::Sender<RuntimeEvent>,
     ) -> Result<TurnOutcome> {
         let lane_config = compute.lane(lane).clone();
@@ -894,20 +1148,50 @@ impl CodexClient {
         if let Some(service_tier) = lane_config.service_tier.as_deref() {
             params.insert("serviceTier".to_owned(), json!(service_tier));
         }
+        if let Some(overrides) = overrides {
+            params.insert("cwd".to_owned(), json!(overrides.cwd));
+            params.insert("approvalPolicy".to_owned(), granular_approval_policy());
+            params.insert("sandboxPolicy".to_owned(), overrides.sandbox_policy.clone());
+        }
 
         let request_id = self
             .send_request("turn/start", Value::Object(params))
             .await?;
         let mut turn_id: Option<String> = None;
         let mut response_text = String::new();
+        let mut generated_images = Vec::new();
         let mut escalation = None;
         let mut trace_steps = Vec::new();
         let mut trace_events = Vec::new();
         let mut tool_deduplicator = TurnToolDeduplicator::default();
         let mut effective_model = lane_config.model.clone();
+        let mut interrupt_requested = false;
+        let mut interrupt_sent = false;
 
         loop {
-            let message = self.read_message().await?;
+            let message = if interrupt_sent || input_events.is_none() {
+                self.read_message().await?
+            } else {
+                tokio::select! {
+                    message = self.read_message() => message?,
+                    changed = input_events.as_mut().expect("input receiver checked").changed() => {
+                        if changed.is_err() {
+                            input_events = None;
+                            continue;
+                        }
+                        interrupt_requested = true;
+                        if let Some(turn_id) = turn_id.as_deref() {
+                            self.send_request(
+                                "turn/interrupt",
+                                json!({"threadId": thread_id, "turnId": turn_id}),
+                            )
+                            .await?;
+                            interrupt_sent = true;
+                        }
+                        continue;
+                    }
+                }
+            };
             if self
                 .handle_server_request(
                     &message,
@@ -934,6 +1218,17 @@ impl CodexClient {
                     .pointer("/result/turn/id")
                     .and_then(Value::as_str)
                     .map(str::to_owned);
+                if interrupt_requested
+                    && !interrupt_sent
+                    && let Some(turn_id) = turn_id.as_deref()
+                {
+                    self.send_request(
+                        "turn/interrupt",
+                        json!({"threadId": thread_id, "turnId": turn_id}),
+                    )
+                    .await?;
+                    interrupt_sent = true;
+                }
                 continue;
             }
 
@@ -981,6 +1276,9 @@ impl CodexClient {
                 }
                 Some("item/completed") if event_matches(params, thread_id, &turn_id) => {
                     if let Some(item) = params.get("item") {
+                        if let Some(image) = generated_image_output(item) {
+                            remember_generated_image(&mut generated_images, image);
+                        }
                         if item.get("type").and_then(Value::as_str) == Some("contextCompaction") {
                             *self
                                 .thread_compactions
@@ -1031,28 +1329,46 @@ impl CodexClient {
                     }
                 }
                 Some("turn/completed") if completed_turn_matches(params, thread_id, &turn_id) => {
+                    if let Some(items) = params.pointer("/turn/items").and_then(Value::as_array) {
+                        for item in items {
+                            if let Some(image) = generated_image_output(item) {
+                                remember_generated_image(&mut generated_images, image);
+                            }
+                        }
+                    }
                     let status = params
                         .pointer("/turn/status")
                         .and_then(Value::as_str)
                         .unwrap_or("unknown");
-                    if status != "completed" {
+                    if status != "completed" && status != "interrupted" {
                         let error = params
                             .pointer("/turn/error/message")
                             .and_then(Value::as_str)
                             .unwrap_or("Codex turn did not complete");
                         anyhow::bail!("{error}");
                     }
+                    let interrupted = status == "interrupted";
                     let response_text = completed_response_text(params, &response_text);
-                    if response_text.is_empty() {
+                    if response_text.is_empty() && !interrupted {
                         anyhow::bail!("Codex completed without an assistant message");
                     }
-                    push_trace_event(
-                        &mut trace_events,
-                        TraceEventKind::AgentMessage,
-                        "Final assistant message",
-                        json!({"text": response_text.clone()}),
-                        now(),
-                    );
+                    if interrupted {
+                        push_trace_event(
+                            &mut trace_events,
+                            TraceEventKind::TurnInterrupted,
+                            "Codex turn interrupted by newer user input",
+                            json!({}),
+                            now(),
+                        );
+                    } else {
+                        push_trace_event(
+                            &mut trace_events,
+                            TraceEventKind::AgentMessage,
+                            "Final assistant message",
+                            json!({"text": response_text.clone()}),
+                            now(),
+                        );
+                    }
                     let turn_id = turn_id
                         .or_else(|| {
                             params
@@ -1083,7 +1399,7 @@ impl CodexClient {
                     }
                     *self.thread_turns.entry(thread_id.to_owned()).or_default() += 1;
                     let model_display_name = self.model_display_name(&effective_model);
-                    let invocation = invocation_record(
+                    let mut invocation = invocation_record(
                         thread_id,
                         &turn_id,
                         lane,
@@ -1098,10 +1414,15 @@ impl CodexClient {
                         Some(context_snapshot),
                         trace_events,
                     );
+                    if interrupted {
+                        invocation.status = "interrupted".to_owned();
+                    }
                     return Ok(TurnOutcome {
                         text: response_text,
+                        generated_images,
                         invocation,
                         escalation,
+                        interrupted,
                     });
                 }
                 Some("error") if event_matches(params, thread_id, &turn_id) => {
@@ -1205,7 +1526,7 @@ impl CodexClient {
                 "thread/start",
                 json!({
                     "cwd": workspace,
-                    "approvalPolicy": "never",
+                    "approvalPolicy": granular_approval_policy(),
                     "sandbox": "read-only",
                     "ephemeral": true,
                     "serviceName": "symbiont-d",
@@ -1342,6 +1663,47 @@ impl CodexClient {
         trace_steps: &mut Vec<ToolTraceStep>,
         trace_events: &mut Vec<ExecutionTraceEvent>,
     ) -> Result<bool> {
+        if let Some(request) = permission_request(message, run_origin) {
+            let id = message
+                .get("id")
+                .cloned()
+                .context("permission request omitted id")?;
+            let method = message
+                .get("method")
+                .and_then(Value::as_str)
+                .unwrap_or("unknown");
+            let params = message.get("params").cloned().unwrap_or(Value::Null);
+            push_trace_event(
+                trace_events,
+                TraceEventKind::PermissionRequest,
+                "Codex requested host permission",
+                json!({
+                    "method": method,
+                    "params": params
+                }),
+                now(),
+            );
+            let resolution = self.permissions.request(request).await;
+            let response = approval_response(message, resolution.decision)
+                .context("unsupported Codex permission request")?;
+            push_trace_event(
+                trace_events,
+                TraceEventKind::PermissionResolution,
+                "Host resolved Codex permission request",
+                json!({
+                    "method": method,
+                    "decision": resolution.decision,
+                    "source": resolution.source
+                }),
+                now(),
+            );
+            self.send_json(&json!({
+                "id": id,
+                "result": response
+            }))
+            .await?;
+            return Ok(true);
+        }
         if message.get("method").and_then(Value::as_str) != Some("item/tool/call") {
             return Ok(false);
         }
@@ -1467,6 +1829,18 @@ impl CodexClient {
     }
 
     async fn handle_unexpected_server_request(&mut self, message: &Value) -> Result<bool> {
+        if let Some(response) = automatic_server_request_response(message) {
+            let id = message
+                .get("id")
+                .cloned()
+                .context("server request omitted id")?;
+            self.send_json(&json!({
+                "id": id,
+                "result": response
+            }))
+            .await?;
+            return Ok(true);
+        }
         if message.get("method").and_then(Value::as_str) != Some("item/tool/call") {
             return Ok(false);
         }
@@ -1495,8 +1869,18 @@ impl CodexClient {
         lane: ComputeLane,
         compute: &ComputeConfig,
     ) -> Result<Vec<Value>> {
+        self.input_items_with_local_images(&input.text, &input.local_images, lane, compute)
+    }
+
+    fn input_items_with_local_images(
+        &self,
+        text: &str,
+        local_images: &[PathBuf],
+        lane: ComputeLane,
+        compute: &ComputeConfig,
+    ) -> Result<Vec<Value>> {
         let model = self.model_info(&compute.lane(lane).model)?;
-        if !input.local_images.is_empty()
+        if !local_images.is_empty()
             && !model
                 .input_modalities
                 .iter()
@@ -1507,7 +1891,7 @@ impl CodexClient {
                 lane.as_str()
             );
         }
-        Ok(multimodal_input_items(input))
+        Ok(text_and_image_input_items(text, local_images))
     }
 
     fn model_display_name(&self, slug: &str) -> String {
@@ -1519,6 +1903,18 @@ impl CodexClient {
     }
 }
 
+fn granular_approval_policy() -> Value {
+    json!({
+        "granular": {
+            "mcp_elicitations": true,
+            "request_permissions": true,
+            "rules": true,
+            "sandbox_approval": true,
+            "skill_approval": true
+        }
+    })
+}
+
 fn text_input_items(text: &str) -> Vec<Value> {
     let text = text.trim();
     if text.is_empty() {
@@ -1528,9 +1924,9 @@ fn text_input_items(text: &str) -> Vec<Value> {
     }
 }
 
-pub(super) fn multimodal_input_items(input: &ChatInput) -> Vec<Value> {
-    let mut items = text_input_items(&input.text);
-    items.extend(input.local_images.iter().map(|path| {
+pub(super) fn text_and_image_input_items(text: &str, local_images: &[PathBuf]) -> Vec<Value> {
+    let mut items = text_input_items(text);
+    items.extend(local_images.iter().map(|path| {
         json!({
             "type": "localImage",
             "path": path,
@@ -1616,6 +2012,7 @@ fn activity_label(item: Option<&Value>) -> Option<String> {
         "agentMessage" => Some("正在组织回复".to_owned()),
         "commandExecution" => Some("正在使用本地工具".to_owned()),
         "mcpToolCall" => Some("正在调用外部能力".to_owned()),
+        "imageGeneration" => Some("正在生成图片".to_owned()),
         "dynamicToolCall" => {
             let tool = item
                 .get("tool")
@@ -1639,9 +2036,16 @@ fn activity_label(item: Option<&Value>) -> Option<String> {
                     "update_current_map" => "正在整理近期脉络",
                     "update_open_loops" => "正在整理未决问题",
                     "record_profile_review" => "正在审查长期画像",
+                    "upsert_compute_policy" => "正在保存话题计算规则",
+                    "remove_compute_policy" => "正在移除话题计算规则",
+                    "fetch_url" => "正在读取指定网页",
+                    "delegate_to_selected_task" | "delegate_to_bound_task" => {
+                        "正在把实现交给选定的 Codex 任务"
+                    }
                     "open_hunch" => "正在留下一个待探索的问题",
                     "revise_hunch" => "正在修订探索中的问题",
                     "retire_hunch" => "正在结束一个探索问题",
+                    "acknowledge_hunch_feedback" => "正在吸收对探索问题的反馈",
                     "escalate" => "正在判断是否需要深入处理",
                     _ => "正在调用 symbiont 工具",
                 }
@@ -1729,15 +2133,135 @@ fn metadata_for(invocations: &[InvocationRecord], origin: &str) -> MessageMetada
     }
 }
 
+fn interrupted_chat_outcome(invocations: Vec<InvocationRecord>, origin: &str) -> ChatOutcome {
+    ChatOutcome {
+        text: String::new(),
+        generated_images: Vec::new(),
+        metadata: metadata_for(&invocations, origin),
+        context_revision_ids: context_revision_ids(&invocations),
+        hunch_touched: hunch_was_touched(&invocations),
+        scheduled_follow_up_ids: successful_tool_result_ids(
+            &invocations,
+            "symbiont",
+            "schedule_follow_up",
+            "id",
+        ),
+        reserved_continuation_ids: successful_tool_result_ids(
+            &invocations,
+            "symbiont",
+            "reserve_continuation",
+            "id",
+        ),
+        invocations,
+        interrupted: true,
+    }
+}
+
+pub(super) fn generated_image_output(item: &Value) -> Option<GeneratedImageOutput> {
+    if item.get("type").and_then(Value::as_str) != Some("imageGeneration") {
+        return None;
+    }
+    let saved_path = PathBuf::from(item.get("savedPath")?.as_str()?);
+    if !saved_path.is_absolute() {
+        return None;
+    }
+    Some(GeneratedImageOutput {
+        item_id: item.get("id")?.as_str()?.to_owned(),
+        saved_path,
+        revised_prompt: item
+            .get("revisedPrompt")
+            .and_then(Value::as_str)
+            .map(str::to_owned),
+    })
+}
+
+pub(super) fn remember_generated_image(
+    generated_images: &mut Vec<GeneratedImageOutput>,
+    image: GeneratedImageOutput,
+) {
+    if generated_images
+        .iter()
+        .any(|existing| existing.saved_path == image.saved_path)
+    {
+        return;
+    }
+    generated_images.push(image);
+}
+
 fn hunch_was_touched(invocations: &[InvocationRecord]) -> bool {
     invocations
         .iter()
         .flat_map(|invocation| &invocation.trace_steps)
-        .any(|step| {
+        .any(|step| step.succeeded && step.namespace == "symbiont" && step.tool == "open_hunch")
+}
+
+fn successful_hunch_revisions(invocations: &[InvocationRecord]) -> Vec<HunchRevisionRef> {
+    let mut revisions = Vec::<HunchRevisionRef>::new();
+    for step in invocations
+        .iter()
+        .flat_map(|invocation| &invocation.trace_steps)
+        .filter(|step| {
             step.succeeded
                 && step.namespace == "symbiont"
-                && matches!(step.tool.as_str(), "open_hunch" | "revise_hunch")
+                && matches!(
+                    step.tool.as_str(),
+                    "open_hunch" | "revise_hunch" | "retire_hunch"
+                )
         })
+    {
+        let Some(text) = step
+            .result
+            .pointer("/contentItems/0/text")
+            .and_then(Value::as_str)
+        else {
+            continue;
+        };
+        let Ok(value) = serde_json::from_str::<Value>(text) else {
+            continue;
+        };
+        let (Some(page_id), Some(revision_id)) = (
+            value.get("pageId").and_then(Value::as_str),
+            value.get("revisionId").and_then(Value::as_str),
+        ) else {
+            continue;
+        };
+        let reference = HunchRevisionRef {
+            page_id: page_id.to_owned(),
+            revision_id: revision_id.to_owned(),
+        };
+        if let Some(existing) = revisions
+            .iter_mut()
+            .find(|existing| existing.page_id == reference.page_id)
+        {
+            *existing = reference;
+        } else {
+            revisions.push(reference);
+        }
+    }
+    revisions
+}
+
+fn successful_tool_result_ids(
+    invocations: &[InvocationRecord],
+    namespace: &str,
+    tool: &str,
+    field: &str,
+) -> Vec<String> {
+    let mut ids = invocations
+        .iter()
+        .flat_map(|invocation| &invocation.trace_steps)
+        .filter(|step| step.succeeded && step.namespace == namespace && step.tool == tool)
+        .filter_map(|step| {
+            step.result
+                .pointer("/contentItems/0/text")
+                .and_then(Value::as_str)
+        })
+        .filter_map(|text| serde_json::from_str::<Value>(text).ok())
+        .filter_map(|value| value.get(field).and_then(Value::as_str).map(str::to_owned))
+        .collect::<Vec<_>>();
+    ids.sort();
+    ids.dedup();
+    ids
 }
 
 fn invocation_wrote_checkpoint(invocation: &InvocationRecord) -> bool {

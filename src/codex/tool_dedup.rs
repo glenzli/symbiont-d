@@ -56,7 +56,7 @@ fn is_cacheable_read(tool: &str) -> bool {
 fn is_pcp_mutation(tool: &str) -> bool {
     matches!(
         tool,
-        "write_summary" | "write_page" | "revise_page" | "link_pages"
+        "assess_validity" | "write_summary" | "write_page" | "revise_page" | "link_pages"
     )
 }
 
@@ -71,9 +71,11 @@ fn is_symbiont_context_mutation(tool: &str) -> bool {
             | "open_hunch"
             | "revise_hunch"
             | "retire_hunch"
+            | "acknowledge_hunch_feedback"
             | "upsert_episode"
             | "upsert_interaction_hypothesis"
             | "schedule_follow_up"
+            | "reserve_continuation"
             | "complete_reflection"
     )
 }

@@ -5,7 +5,7 @@ export function initMessageActions({ conversation, isBusy, perform }) {
 
   conversation.addEventListener("click", async (event) => {
     const button = event.target.closest("[data-message-action]");
-    if (!button || isBusy()) return;
+    if (!button || (button.dataset.messageAction !== "quote" && isBusy())) return;
     const message = button.closest(".message");
     const entry = entries.get(message);
     if (!message || !entry || message.dataset.actionBusy === "true") return;
@@ -23,13 +23,16 @@ export function initMessageActions({ conversation, isBusy, perform }) {
   });
 
   function track(message, entry, options = {}) {
-    if (entry.role !== "user") return;
     entries.set(message, entry);
-    setState(
-      message,
-      options.deliveryState || entry.deliveryState || "delivered",
-      options.failureReason,
-    );
+    if (entry.role === "user") {
+      setState(
+        message,
+        options.deliveryState || entry.deliveryState || "delivered",
+        options.failureReason,
+      );
+    } else {
+      refresh();
+    }
   }
 
   function update(message, entry, options = {}) {
@@ -57,7 +60,9 @@ export function initMessageActions({ conversation, isBusy, perform }) {
       ...conversation.querySelectorAll('.message[data-role="user"]'),
     ];
     const latest = userMessages.at(-1);
-    for (const message of userMessages) render(message, message === latest);
+    for (const message of conversation.querySelectorAll(".message")) {
+      render(message, message === latest);
+    }
   }
 
   function render(message, isLatest) {
@@ -65,14 +70,23 @@ export function initMessageActions({ conversation, isBusy, perform }) {
     const stateLabel = foot.querySelector(".message-state");
     const actions = foot.querySelector(".message-actions");
     const state = states.get(message) || "delivered";
+    const entry = entries.get(message);
     const actionBusy = message.dataset.actionBusy === "true";
     stateLabel.textContent =
-      state === "pending" ? "发送中" : state === "failed" ? "未完成" : "";
+      state === "pending" ? "等待回复" : state === "failed" ? "回复中断" : "";
     stateLabel.title = failures.get(message) || "";
     message.classList.toggle("message-failed", state === "failed");
     actions.replaceChildren();
 
-    if (isLatest && !isBusy() && !actionBusy) {
+    if (entry?.revisionId && state === "delivered" && !actionBusy) {
+      actions.append(actionButton("quote", "引用"));
+    }
+    if (
+      message.dataset.role === "user" &&
+      isLatest &&
+      !isBusy() &&
+      !actionBusy
+    ) {
       if (state === "failed") {
         actions.append(actionButton("retry", "重试"), actionButton("delete", "删除"));
       } else if (state === "delivered") {
@@ -87,7 +101,14 @@ export function initMessageActions({ conversation, isBusy, perform }) {
     ].some(Boolean);
   }
 
-  return { refresh, track, update };
+  return {
+    entryFor(message) {
+      return entries.get(message);
+    },
+    refresh,
+    track,
+    update,
+  };
 }
 
 function actionButton(action, label) {

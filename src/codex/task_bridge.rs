@@ -14,6 +14,7 @@ pub struct CodexTaskSummary {
     pub preview: String,
     pub cwd: String,
     pub source: String,
+    pub ephemeral: bool,
     pub status: String,
     pub created_at: i64,
     pub updated_at: i64,
@@ -41,6 +42,12 @@ pub(crate) fn parse_task_list(result: &Value) -> Result<Vec<CodexTaskSummary>> {
         .and_then(Value::as_array)
         .context("thread/list response omitted data")?
         .iter()
+        .filter(|thread| {
+            !thread
+                .get("ephemeral")
+                .and_then(Value::as_bool)
+                .unwrap_or(false)
+        })
         .map(parse_task_summary)
         .collect()
 }
@@ -134,6 +141,10 @@ fn parse_task_summary(value: &Value) -> Result<CodexTaskSummary> {
             .unwrap_or_default()
             .to_owned(),
         source: source_label(value.get("source")),
+        ephemeral: value
+            .get("ephemeral")
+            .and_then(Value::as_bool)
+            .unwrap_or(false),
         status: value
             .pointer("/status/type")
             .and_then(Value::as_str)
@@ -228,22 +239,37 @@ mod tests {
     #[test]
     fn parses_task_list_without_loading_turns() {
         let tasks = parse_task_list(&json!({
-            "data": [{
-                "id": "thread-1",
-                "name": "Bridge design",
-                "preview": "Discuss a bridge",
-                "cwd": "/tmp/project",
-                "source": "vscode",
-                "status": {"type": "idle"},
-                "createdAt": 10,
-                "updatedAt": 20
-            }]
+            "data": [
+                {
+                    "id": "thread-1",
+                    "name": "Bridge design",
+                    "preview": "Discuss a bridge",
+                    "cwd": "/tmp/project",
+                    "source": "vscode",
+                    "ephemeral": false,
+                    "status": {"type": "idle"},
+                    "createdAt": 10,
+                    "updatedAt": 20
+                },
+                {
+                    "id": "thread-background",
+                    "name": "Internal background work",
+                    "preview": "",
+                    "cwd": "/tmp/project",
+                    "source": "appServer",
+                    "ephemeral": true,
+                    "status": {"type": "idle"},
+                    "createdAt": 10,
+                    "updatedAt": 30
+                }
+            ]
         }))
         .expect("parse task list");
 
         assert_eq!(tasks.len(), 1);
         assert_eq!(tasks[0].title, "Bridge design");
         assert_eq!(tasks[0].source, "vscode");
+        assert!(!tasks[0].ephemeral);
     }
 
     #[test]

@@ -34,7 +34,7 @@ pub struct ServiceTierInfo {
     pub description: String,
 }
 
-#[derive(Clone, Copy, Debug, Deserialize, Eq, Hash, PartialEq, Serialize)]
+#[derive(Clone, Copy, Debug, Deserialize, Eq, Hash, Ord, PartialEq, PartialOrd, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ComputeLane {
     Observe,
@@ -138,6 +138,16 @@ impl ComputeLane {
             Self::Conversation => "conversation",
             Self::Investigate => "investigate",
             Self::Critical => "critical",
+        }
+    }
+
+    pub fn parse(value: &str) -> Option<Self> {
+        match value {
+            "observe" => Some(Self::Observe),
+            "conversation" | "auto" => Some(Self::Conversation),
+            "investigate" | "deep" => Some(Self::Investigate),
+            "critical" | "max" => Some(Self::Critical),
+            _ => None,
         }
     }
 

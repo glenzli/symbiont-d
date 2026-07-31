@@ -13,6 +13,13 @@ const ORIGIN_LABELS = {
   external: "外部信息触发",
 };
 
+const ATTENTION_LABELS = {
+  ready: "可探索",
+  awaiting_user: "等待回应",
+  feedback_pending: "正在吸收回复",
+  cooldown: "已纳入，暂缓",
+};
+
 export function initCuriosityUi() {
   const root = document.querySelector("#archive-curiosity");
 
@@ -50,7 +57,13 @@ export function initCuriosityUi() {
       const question = document.createElement("strong");
       const state = document.createElement("span");
       question.textContent = hunch.question;
-      state.textContent = STATE_LABELS[hunch.state] || hunch.state;
+      const semanticState = STATE_LABELS[hunch.state] || hunch.state;
+      const attentionState =
+        ATTENTION_LABELS[hunch.attention] || hunch.attention;
+      state.textContent =
+        hunch.attention && hunch.attention !== "ready"
+          ? `${semanticState} · ${attentionState}`
+          : semanticState;
       summary.append(question, state);
       details.append(summary);
 
@@ -60,6 +73,9 @@ export function initCuriosityUi() {
       appendField(body, "什么会改变它", hunch.whatWouldChangeIt);
       if (hunch.resolution) {
         appendField(body, "结论", hunch.resolution);
+      }
+      if (hunch.attention === "cooldown" && hunch.feedbackAssessment) {
+        appendField(body, "最近反馈处理", hunch.feedbackAssessment);
       }
       const metadata = document.createElement("dl");
       metadata.className = "hunch-metadata";
@@ -74,6 +90,21 @@ export function initCuriosityUi() {
         "最近探索",
         hunch.lastExploredAt ? formatDate(hunch.lastExploredAt) : "尚未",
       );
+      appendDefinition(
+        metadata,
+        "交互状态",
+        ATTENTION_LABELS[hunch.attention] || hunch.attention || "可探索",
+      );
+      if (hunch.eligibleAfter) {
+        appendDefinition(
+          metadata,
+          "可再次探索",
+          formatDate(hunch.eligibleAfter),
+        );
+      }
+      if (hunch.lastFeedbackRevisionId) {
+        appendDefinition(metadata, "最近反馈", hunch.lastFeedbackRevisionId);
+      }
       appendDefinition(
         metadata,
         "依据",

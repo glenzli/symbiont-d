@@ -3,20 +3,16 @@ import katex from "katex";
 import "katex/dist/katex.min.css";
 import { marked } from "marked";
 
+import { protectMath } from "./math-delimiters.mjs";
+
 marked.setOptions({
   breaks: true,
   gfm: true,
 });
 
-const blockMath = /\$\$([\s\S]+?)\$\$/g;
-const inlineMath = /(?<!\\)\$([^$\n]+?)(?<!\\)\$/g;
-
 export function renderRichText(target, source, options = {}) {
   const markdown = String(source || "");
-  const math = [];
-  const protectedMarkdown = markdown
-    .replace(blockMath, (_, expression) => mathToken(math, expression, true))
-    .replace(inlineMath, (_, expression) => mathToken(math, expression, false));
+  const { protectedMarkdown, math } = protectMath(markdown);
   const rendered = marked.parse(protectedMarkdown);
   target.innerHTML = DOMPurify.sanitize(rendered, {
     USE_PROFILES: { html: true },
@@ -59,7 +55,19 @@ export function renderMessageContent(target, entry, options = {}) {
     ? entry.parts
     : [{ type: "markdown", text: entry?.content || "" }];
   for (const part of parts) {
-    if (part.type === "markdown") {
+    if (part.type === "topic" && part.topic?.topicId) {
+      const topic = document.createElement("button");
+      topic.type = "button";
+      topic.className = "message-topic-reference";
+      topic.dataset.messageTopicId = part.topic.topicId;
+      topic.title = "查看主题";
+      const label = document.createElement("small");
+      label.textContent = "主题";
+      const title = document.createElement("span");
+      title.textContent = part.topic.title || "未命名主题";
+      topic.append(label, title);
+      target.append(topic);
+    } else if (part.type === "markdown") {
       const richText = document.createElement("div");
       richText.className = "rich-text";
       renderRichText(richText, part.text, options);
@@ -76,11 +84,32 @@ export function renderMessageContent(target, entry, options = {}) {
       caption.textContent = part.asset.filename || "Image";
       figure.append(image, caption);
       target.append(figure);
+    } else if (part.type === "quote" && part.quote?.sourceRevisionId) {
+      const quote = document.createElement("button");
+      quote.type = "button";
+      quote.className = "message-quote";
+      quote.dataset.sourceRevisionId = part.quote.sourceRevisionId;
+      quote.title = "跳到引用原文";
+      const meta = document.createElement("span");
+      meta.className = "message-quote-meta";
+      meta.textContent = [
+        part.quote.sourceRole === "user" ? "你" : "symbiont-d",
+        formatQuoteTime(part.quote.sourceAt),
+        part.quote.wholeMessage ? "整条消息" : "所选片段",
+      ]
+        .filter(Boolean)
+        .join(" · ");
+      const excerpt = document.createElement("span");
+      excerpt.className = "message-quote-text";
+      excerpt.textContent = part.quote.text;
+      quote.append(meta, excerpt);
+      target.append(quote);
     }
   }
 }
 
-function mathToken(math, expression, display) {
-  const index = math.push({ expression: expression.trim(), display }) - 1;
-  return `<span data-symbiont-math="${index}"></span>`;
+function formatQuoteTime(value) {
+  const date = new Date(value);
+  if (Number.isNaN(date.valueOf())) return "";
+  return date.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
 }

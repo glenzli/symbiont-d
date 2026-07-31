@@ -60,6 +60,7 @@ async fn main() -> Result<()> {
                         projections: vec![
                             Projection::Manifest,
                             Projection::Summary,
+                            Projection::Validity,
                             Projection::Payload,
                             Projection::Sources,
                             Projection::Provenance,
@@ -130,6 +131,7 @@ async fn export_pages(store: &SqlitePcpStore, scopes: Vec<String>) -> Result<Vec
                         projections: vec![
                             Projection::Manifest,
                             Projection::Summary,
+                            Projection::Validity,
                             Projection::Payload,
                             Projection::Sources,
                             Projection::Provenance,

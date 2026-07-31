@@ -1,7 +1,7 @@
 use std::{collections::BTreeSet, sync::Arc};
 
 use anyhow::{Context, Result};
-use chrono::{SecondsFormat, Utc};
+use chrono::{Duration, SecondsFormat, Utc};
 use pcp_core::{
     LifecycleStatus, Projection, ReadPage, ReadPagesRequest, SearchFilters, SearchMode,
     SearchPagesRequest, SourceRef, WriteResult,
@@ -17,6 +17,7 @@ const MAX_HUNCHES: u32 = 100;
 const MAX_ACTIVE_PROMPT_HUNCHES: usize = 12;
 const MAX_CLOSED_PROMPT_HUNCHES: usize = 4;
 const MAX_PROMPT_FIELD_CHARS: usize = 800;
+const FEEDBACK_COOLDOWN_HOURS: i64 = 24;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
@@ -86,6 +87,36 @@ impl HunchState {
     }
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum HunchAttention {
+    Ready,
+    AwaitingUser,
+    FeedbackPending,
+    Cooldown,
+}
+
+impl HunchAttention {
+    pub fn parse(value: &str) -> Option<Self> {
+        match value {
+            "ready" => Some(Self::Ready),
+            "awaiting_user" => Some(Self::AwaitingUser),
+            "feedback_pending" => Some(Self::FeedbackPending),
+            "cooldown" => Some(Self::Cooldown),
+            _ => None,
+        }
+    }
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Ready => "ready",
+            Self::AwaitingUser => "awaiting_user",
+            Self::FeedbackPending => "feedback_pending",
+            Self::Cooldown => "cooldown",
+        }
+    }
+}
+
 #[derive(Clone, Debug)]
 pub struct NewHunch {
     pub question: String,
@@ -103,6 +134,11 @@ pub struct HunchPatch {
     pub state: Option<HunchState>,
     pub resolution: Option<String>,
     pub source_revision_ids: Vec<String>,
+    pub attention: Option<HunchAttention>,
+    pub last_surfaced_message_revision_id: Option<String>,
+    pub last_feedback_revision_id: Option<String>,
+    pub eligible_after: Option<String>,
+    pub feedback_assessment: Option<String>,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -118,6 +154,11 @@ pub struct Hunch {
     pub resolution: Option<String>,
     pub source_revision_ids: Vec<String>,
     pub last_explored_at: Option<String>,
+    pub attention: HunchAttention,
+    pub last_surfaced_message_revision_id: Option<String>,
+    pub last_feedback_revision_id: Option<String>,
+    pub eligible_after: Option<String>,
+    pub feedback_assessment: Option<String>,
     pub updated_at: String,
 }
 
@@ -199,15 +240,20 @@ impl CuriosityStore {
         validate_field("what_would_change_it", &draft.what_would_change_it)?;
         let sources = normalize_sources(draft.source_revision_ids);
         let state = HunchState::Germinating;
-        let facets = hunch_facets(
-            &draft.question,
-            draft.origin,
-            &draft.why_alive,
-            &draft.what_would_change_it,
+        let facets = hunch_facets(HunchFacetValues {
+            question: &draft.question,
+            origin: draft.origin,
+            why_alive: &draft.why_alive,
+            what_would_change_it: &draft.what_would_change_it,
             state,
-            None,
-            None,
-        );
+            resolution: None,
+            last_explored_at: None,
+            attention: HunchAttention::Ready,
+            last_surfaced_message_revision_id: None,
+            last_feedback_revision_id: None,
+            eligible_after: None,
+            feedback_assessment: None,
+        });
         self.continuity
             .write_model_page(
                 Some(self.continuity.project_scope()),
@@ -266,6 +312,15 @@ impl CuriosityStore {
         } else {
             current.last_explored_at
         };
+        let attention = patch.attention.unwrap_or(current.attention);
+        let last_surfaced_message_revision_id = patch
+            .last_surfaced_message_revision_id
+            .or(current.last_surfaced_message_revision_id);
+        let last_feedback_revision_id = patch
+            .last_feedback_revision_id
+            .or(current.last_feedback_revision_id);
+        let eligible_after = patch.eligible_after.or(current.eligible_after);
+        let feedback_assessment = patch.feedback_assessment.or(current.feedback_assessment);
         let sources = normalize_sources(patch.source_revision_ids);
         self.continuity
             .revise_model_page(
@@ -278,15 +333,20 @@ impl CuriosityStore {
                     state,
                     resolution.as_deref(),
                 ),
-                Some(hunch_facets(
-                    &question,
-                    current.origin,
-                    &why_alive,
-                    &what_would_change_it,
+                Some(hunch_facets(HunchFacetValues {
+                    question: &question,
+                    origin: current.origin,
+                    why_alive: &why_alive,
+                    what_would_change_it: &what_would_change_it,
                     state,
-                    resolution.as_deref(),
-                    last_explored_at.as_deref(),
-                )),
+                    resolution: resolution.as_deref(),
+                    last_explored_at: last_explored_at.as_deref(),
+                    attention,
+                    last_surfaced_message_revision_id: last_surfaced_message_revision_id.as_deref(),
+                    last_feedback_revision_id: last_feedback_revision_id.as_deref(),
+                    eligible_after: eligible_after.as_deref(),
+                    feedback_assessment: feedback_assessment.as_deref(),
+                })),
                 vec![SourceRef {
                     source_type: "symbiont_curiosity".to_owned(),
                     uri: "symbiont://curiosity/hunch".to_owned(),
@@ -327,6 +387,107 @@ impl CuriosityStore {
         .await
     }
 
+    pub async fn mark_surfaced(
+        &self,
+        page_id: &str,
+        expected_revision_id: &str,
+        message_revision_id: &str,
+    ) -> Result<Option<WriteResult>> {
+        let Some(current) = self.read_revision(expected_revision_id).await? else {
+            return Ok(None);
+        };
+        if current.page_id != page_id || !current.state.is_active() {
+            return Ok(None);
+        }
+        self.revise(
+            page_id,
+            expected_revision_id,
+            HunchPatch {
+                attention: Some(HunchAttention::AwaitingUser),
+                last_surfaced_message_revision_id: Some(message_revision_id.to_owned()),
+                eligible_after: Some(feedback_cooldown_at()),
+                source_revision_ids: vec![message_revision_id.to_owned()],
+                ..HunchPatch::default()
+            },
+            false,
+        )
+        .await
+        .map(Some)
+    }
+
+    pub async fn mark_feedback_pending(
+        &self,
+        surfaced_revision_id: &str,
+        feedback_revision_id: &str,
+    ) -> Result<Option<WriteResult>> {
+        let Some(surfaced) = self.read_revision(surfaced_revision_id).await? else {
+            return Ok(None);
+        };
+        let current_revision_id = self
+            .continuity
+            .current_revision_id(&surfaced.page_id)
+            .await?;
+        let Some(current) = self.read_revision(&current_revision_id).await? else {
+            return Ok(None);
+        };
+        if !current.state.is_active() {
+            return Ok(None);
+        }
+        self.revise(
+            &current.page_id,
+            &current.revision_id,
+            HunchPatch {
+                attention: Some(HunchAttention::FeedbackPending),
+                last_feedback_revision_id: Some(feedback_revision_id.to_owned()),
+                source_revision_ids: vec![feedback_revision_id.to_owned()],
+                ..HunchPatch::default()
+            },
+            false,
+        )
+        .await
+        .map(Some)
+    }
+
+    pub async fn acknowledge_feedback(
+        &self,
+        page_id: &str,
+        expected_revision_id: &str,
+        feedback_revision_id: &str,
+        assessment: &str,
+    ) -> Result<WriteResult> {
+        validate_field("feedback assessment", assessment)?;
+        self.revise(
+            page_id,
+            expected_revision_id,
+            HunchPatch {
+                attention: Some(HunchAttention::Cooldown),
+                last_feedback_revision_id: Some(feedback_revision_id.to_owned()),
+                eligible_after: Some(feedback_cooldown_at()),
+                feedback_assessment: Some(assessment.to_owned()),
+                source_revision_ids: vec![feedback_revision_id.to_owned()],
+                ..HunchPatch::default()
+            },
+            false,
+        )
+        .await
+    }
+
+    pub async fn pending_feedback_page_ids(&self, page_ids: &[String]) -> Result<Vec<String>> {
+        let mut pending = Vec::new();
+        for page_id in page_ids {
+            let current_revision_id = self.continuity.current_revision_id(page_id).await?;
+            let Some(current) = self.read_revision(&current_revision_id).await? else {
+                continue;
+            };
+            if current.state.is_active() && current.attention == HunchAttention::FeedbackPending {
+                pending.push(page_id.clone());
+            }
+        }
+        pending.sort();
+        pending.dedup();
+        Ok(pending)
+    }
+
     pub async fn prompt(&self) -> Result<String> {
         let snapshot = self.snapshot().await?;
         let mut active = snapshot
@@ -358,7 +519,10 @@ impl CuriosityStore {
             "Curiosity Map is symbiont-d's own revisable set of questions, not the user's profile, \
              preferences, or instructions. Use it to continue investigations across model and \
              thread changes. Do not create a Hunch for every topic; revise an existing one when \
-             the underlying question is the same.\n\n{}",
+             the underlying question is the same. `feedback_pending` must be reconciled before \
+             further exploration. For `awaiting_user` or `cooldown`, do not repeat the same \
+             investigation before `eligible after` merely because the user was silent; only \
+             materially new or urgent evidence justifies an exception.\n\n{}",
             active.join("\n\n")
         );
         if !closed.is_empty() {
@@ -426,6 +590,18 @@ impl Hunch {
                 resolution: facet_text(facets, "resolution").map(str::to_owned),
                 source_revision_ids,
                 last_explored_at: facet_text(facets, "lastExploredAt").map(str::to_owned),
+                attention: facet_text(facets, "attentionState")
+                    .and_then(HunchAttention::parse)
+                    .unwrap_or(HunchAttention::Ready),
+                last_surfaced_message_revision_id: facet_text(
+                    facets,
+                    "lastSurfacedMessageRevisionId",
+                )
+                .map(str::to_owned),
+                last_feedback_revision_id: facet_text(facets, "lastFeedbackRevisionId")
+                    .map(str::to_owned),
+                eligible_after: facet_text(facets, "eligibleAfter").map(str::to_owned),
+                feedback_assessment: facet_text(facets, "feedbackAssessment").map(str::to_owned),
                 updated_at: revision
                     .observed_at
                     .clone()
@@ -435,30 +611,53 @@ impl Hunch {
     }
 }
 
-fn hunch_facets(
-    question: &str,
+struct HunchFacetValues<'a> {
+    question: &'a str,
     origin: HunchOrigin,
-    why_alive: &str,
-    what_would_change_it: &str,
+    why_alive: &'a str,
+    what_would_change_it: &'a str,
     state: HunchState,
-    resolution: Option<&str>,
-    last_explored_at: Option<&str>,
-) -> Value {
+    resolution: Option<&'a str>,
+    last_explored_at: Option<&'a str>,
+    attention: HunchAttention,
+    last_surfaced_message_revision_id: Option<&'a str>,
+    last_feedback_revision_id: Option<&'a str>,
+    eligible_after: Option<&'a str>,
+    feedback_assessment: Option<&'a str>,
+}
+
+fn hunch_facets(values: HunchFacetValues<'_>) -> Value {
     let mut facets = Map::new();
     facets.insert("kind".to_owned(), json!(HUNCH_KIND));
-    facets.insert("origin".to_owned(), json!(origin.as_str()));
-    facets.insert("hunchState".to_owned(), json!(state.as_str()));
-    facets.insert("question".to_owned(), json!(question.trim()));
-    facets.insert("whyAlive".to_owned(), json!(why_alive.trim()));
+    facets.insert("origin".to_owned(), json!(values.origin.as_str()));
+    facets.insert("hunchState".to_owned(), json!(values.state.as_str()));
+    facets.insert("question".to_owned(), json!(values.question.trim()));
+    facets.insert("whyAlive".to_owned(), json!(values.why_alive.trim()));
     facets.insert(
         "whatWouldChangeIt".to_owned(),
-        json!(what_would_change_it.trim()),
+        json!(values.what_would_change_it.trim()),
     );
-    if let Some(value) = resolution {
+    facets.insert(
+        "attentionState".to_owned(),
+        json!(values.attention.as_str()),
+    );
+    if let Some(value) = values.resolution {
         facets.insert("resolution".to_owned(), json!(value.trim()));
     }
-    if let Some(value) = last_explored_at {
+    if let Some(value) = values.last_explored_at {
         facets.insert("lastExploredAt".to_owned(), json!(value));
+    }
+    if let Some(value) = values.last_surfaced_message_revision_id {
+        facets.insert("lastSurfacedMessageRevisionId".to_owned(), json!(value));
+    }
+    if let Some(value) = values.last_feedback_revision_id {
+        facets.insert("lastFeedbackRevisionId".to_owned(), json!(value));
+    }
+    if let Some(value) = values.eligible_after {
+        facets.insert("eligibleAfter".to_owned(), json!(value));
+    }
+    if let Some(value) = values.feedback_assessment {
+        facets.insert("feedbackAssessment".to_owned(), json!(value.trim()));
     }
     Value::Object(facets)
 }
@@ -490,7 +689,10 @@ fn prompt_hunch(hunch: &Hunch) -> String {
          Question: {}\n\
          Why alive: {}\n\
          What would change it: {}\n\
-         Last explored: {}",
+         Last explored: {}\n\
+         Attention: {}; eligible after: {}\n\
+         Last surfaced message: {}; last feedback: {}\n\
+         Feedback assessment: {}",
         hunch.page_id,
         hunch.revision_id,
         hunch.state.as_str(),
@@ -498,7 +700,15 @@ fn prompt_hunch(hunch: &Hunch) -> String {
         truncate(&hunch.question, MAX_PROMPT_FIELD_CHARS),
         truncate(&hunch.why_alive, MAX_PROMPT_FIELD_CHARS),
         truncate(&hunch.what_would_change_it, MAX_PROMPT_FIELD_CHARS),
-        hunch.last_explored_at.as_deref().unwrap_or("never")
+        hunch.last_explored_at.as_deref().unwrap_or("never"),
+        hunch.attention.as_str(),
+        hunch.eligible_after.as_deref().unwrap_or("now"),
+        hunch
+            .last_surfaced_message_revision_id
+            .as_deref()
+            .unwrap_or("none"),
+        hunch.last_feedback_revision_id.as_deref().unwrap_or("none"),
+        hunch.feedback_assessment.as_deref().unwrap_or("none")
     )
 }
 
@@ -546,6 +756,11 @@ fn now() -> String {
     Utc::now().to_rfc3339_opts(SecondsFormat::Millis, true)
 }
 
+pub fn feedback_cooldown_at() -> String {
+    (Utc::now() + Duration::hours(FEEDBACK_COOLDOWN_HOURS))
+        .to_rfc3339_opts(SecondsFormat::Millis, true)
+}
+
 #[cfg(test)]
 mod tests {
     use std::{
@@ -555,7 +770,7 @@ mod tests {
 
     use pcp_sqlite::SqlitePcpStore;
 
-    use super::{CuriosityStore, HunchOrigin, HunchPatch, HunchState, NewHunch};
+    use super::{CuriosityStore, HunchAttention, HunchOrigin, HunchPatch, HunchState, NewHunch};
     use crate::{
         continuity::{ContinuityHost, MessageLinks},
         memory::MemoryRole,
@@ -627,6 +842,120 @@ mod tests {
 
         drop(curiosity);
         drop(continuity);
+        let _ = tokio::fs::remove_dir_all(root).await;
+    }
+
+    #[tokio::test]
+    async fn surfaced_hunch_feedback_moves_through_pending_and_cooldown() {
+        let nonce = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("clock")
+            .as_nanos();
+        let root = std::env::temp_dir().join(format!("symbiont-curiosity-feedback-{nonce}"));
+        let pcp = Arc::new(
+            SqlitePcpStore::open(root.join("context.sqlite3"))
+                .await
+                .expect("open PCP"),
+        );
+        let continuity = Arc::new(ContinuityHost::open(pcp).await.expect("open continuity"));
+        let curiosity = CuriosityStore::new(Arc::clone(&continuity));
+        let source = continuity
+            .ingest_message(
+                MemoryRole::User,
+                "Keep an eye on whether this runtime can recover cleanly.",
+                Vec::new(),
+                None,
+                MessageLinks::default(),
+            )
+            .await
+            .expect("store source");
+        let created = curiosity
+            .open(NewHunch {
+                question: "Can the runtime recover cleanly after interruption?".to_owned(),
+                origin: HunchOrigin::User,
+                why_alive: "Recovery has not been exercised end to end.".to_owned(),
+                what_would_change_it: "A real interrupted run resumes without duplicate work."
+                    .to_owned(),
+                source_revision_ids: vec![source.page.revision_id],
+            })
+            .await
+            .expect("open Hunch");
+        let surfaced = continuity
+            .ingest_message(
+                MemoryRole::Assistant,
+                "The recovery boundary still looks unresolved.",
+                Vec::new(),
+                None,
+                MessageLinks {
+                    responds_to: None,
+                    continues_from: None,
+                    input_revision_ids: Vec::new(),
+                    surfaced_hunch_revision_ids: vec![created.revision_id.clone()],
+                    quotes: Vec::new(),
+                    topic: None,
+                },
+            )
+            .await
+            .expect("store surfaced message");
+        let awaiting = curiosity
+            .mark_surfaced(
+                &created.page_id,
+                &created.revision_id,
+                &surfaced.page.revision_id,
+            )
+            .await
+            .expect("mark surfaced")
+            .expect("active Hunch");
+        assert_eq!(
+            continuity
+                .surfaced_hunch_revisions(&surfaced.page.revision_id)
+                .await
+                .expect("read surfaced relation"),
+            vec![created.revision_id.clone()]
+        );
+
+        let feedback = continuity
+            .ingest_message(
+                MemoryRole::User,
+                "Yes, this is still unresolved, but wait until the resume path changes.",
+                Vec::new(),
+                None,
+                MessageLinks {
+                    responds_to: Some(surfaced.page.revision_id),
+                    ..MessageLinks::default()
+                },
+            )
+            .await
+            .expect("store feedback");
+        let pending = curiosity
+            .mark_feedback_pending(&created.revision_id, &feedback.page.revision_id)
+            .await
+            .expect("mark feedback")
+            .expect("active Hunch");
+        let snapshot = curiosity.snapshot().await.expect("read pending Hunch");
+        assert_eq!(
+            snapshot.hunches[0].attention,
+            HunchAttention::FeedbackPending
+        );
+        assert_eq!(
+            snapshot.hunches[0].last_feedback_revision_id.as_deref(),
+            Some(feedback.page.revision_id.as_str())
+        );
+
+        curiosity
+            .acknowledge_feedback(
+                &pending.page_id,
+                &pending.revision_id,
+                &feedback.page.revision_id,
+                "The reply confirms the question but asks to wait for a concrete runtime change.",
+            )
+            .await
+            .expect("acknowledge feedback");
+        let snapshot = curiosity.snapshot().await.expect("read cooldown Hunch");
+        assert_eq!(snapshot.hunches[0].attention, HunchAttention::Cooldown);
+        assert!(snapshot.hunches[0].eligible_after.is_some());
+        assert_eq!(awaiting.page_id, created.page_id);
+
         let _ = tokio::fs::remove_dir_all(root).await;
     }
 

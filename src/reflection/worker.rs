@@ -9,7 +9,8 @@ use tokio::{
 use tracing::{debug, warn};
 
 use super::{
-    ReflectionConfig, ReflectionPhase, ReflectionRuntime, ReflectionSnapshot, ReflectionStore,
+    HunchFeedbackTarget, ReflectionConfig, ReflectionPhase, ReflectionRuntime, ReflectionSnapshot,
+    ReflectionStore,
 };
 use crate::{
     autonomy::AutonomyStore,
@@ -152,9 +153,10 @@ impl ReflectionHandle {
         &self,
         entry: &MemoryEntry,
         related_revision_id: Option<&str>,
+        hunch_feedback: &[HunchFeedbackTarget],
     ) -> Result<()> {
         self.store
-            .record_message(entry, related_revision_id, false)
+            .record_message(entry, related_revision_id, false, hunch_feedback)
             .await?;
         self.refresh_pending_runtime().await;
         let _ = self.trigger.try_send(ReflectionTrigger::Conversation);
@@ -383,6 +385,27 @@ async fn reflect_once(
         }
     };
     usage.record_all(&outcome.invocations).await?;
+    let feedback_page_ids = batch
+        .events
+        .iter()
+        .filter_map(|event| event.payload.get("hunchFeedback"))
+        .filter_map(serde_json::Value::as_array)
+        .flatten()
+        .filter_map(|target| target.get("pageId"))
+        .filter_map(serde_json::Value::as_str)
+        .map(str::to_owned)
+        .collect::<Vec<_>>();
+    let unreconciled = curiosity
+        .pending_feedback_page_ids(&feedback_page_ids)
+        .await?;
+    if !unreconciled.is_empty() {
+        let message = format!(
+            "Reflection left Hunch feedback pending for {}",
+            unreconciled.join(", ")
+        );
+        store.fail_run(&run_id, &message).await?;
+        anyhow::bail!("{message}");
+    }
     let trace_id = outcome
         .invocations
         .last()
@@ -446,7 +469,7 @@ async fn check_deferred_follow_ups(
             return;
         }
     };
-    if due.is_empty() || !exploration.trigger_conversation_hunch() {
+    if due.is_empty() || !exploration.trigger_follow_up() {
         return;
     }
     let ids = due

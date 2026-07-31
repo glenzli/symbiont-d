@@ -42,7 +42,7 @@ impl SqlitePcpStore {
 
     pub fn capabilities(&self) -> Capabilities {
         Capabilities {
-            protocol_version: "0.4.0-draft".to_owned(),
+            protocol_version: "0.5.0-draft".to_owned(),
             search_modes: vec![
                 SearchMode::Auto,
                 SearchMode::Exact,
@@ -54,6 +54,7 @@ impl SqlitePcpStore {
             projections: vec![
                 Projection::Manifest,
                 Projection::Summary,
+                Projection::Validity,
                 Projection::Payload,
                 Projection::Sources,
                 Projection::Provenance,
@@ -74,6 +75,7 @@ impl SqlitePcpStore {
                 "summarizes",
                 "follows",
                 "responds_to",
+                "continues",
                 "has_attachment",
                 "about",
                 "updates",
@@ -83,6 +85,9 @@ impl SqlitePcpStore {
                 "supports",
                 "contradicts",
                 "supersedes",
+                "qualifies",
+                "reaffirms",
+                "outdated_by",
                 "inspired_by",
                 "related_to",
             ]

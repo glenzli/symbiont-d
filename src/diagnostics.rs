@@ -57,6 +57,9 @@ pub enum TraceEventKind {
     ContextCompaction,
     ThreadRollover,
     ModelReroute,
+    PermissionRequest,
+    PermissionResolution,
+    TurnInterrupted,
     AgentMessage,
 }
 

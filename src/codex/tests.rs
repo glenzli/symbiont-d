@@ -5,8 +5,9 @@ use std::{
 
 use super::{
     client::{
-        ChatInput, autonomous_response_is_silent, extract_completed_response_text,
-        extract_final_agent_message, multimodal_input_items,
+        autonomous_response_is_silent, extract_completed_response_text,
+        extract_final_agent_message, generated_image_output, remember_generated_image,
+        text_and_image_input_items,
     },
     prompts::{
         autonomous_exploration_prompt, developer_instructions, interaction_reflection_prompt,
@@ -16,12 +17,14 @@ use super::{
     trace::observable_item_event,
 };
 use crate::{
+    compute_policy::ComputePolicyStore,
     continuity::{ContinuityHost, MessageLinks},
     curiosity::CuriosityStore,
     memory::MemoryRole,
     profile::{CalibrationMode, ProfileStore, SetupStatus},
     reflection::ReflectionStore,
     symbiont_context::SymbiontContextStore,
+    task_execution::TaskExecutionQueue,
 };
 use pcp_sqlite::SqlitePcpStore;
 use serde_json::json;
@@ -65,14 +68,22 @@ fn dynamic_tools_expose_host_and_pcp_namespaces() {
             .as_array()
             .unwrap()
             .iter()
+            .any(|tool| tool["name"] == "reserve_continuation")
+    );
+    assert!(
+        specs[0]["tools"]
+            .as_array()
+            .unwrap()
+            .iter()
             .any(|tool| tool["name"] == "escalate")
     );
     assert_eq!(specs[1]["name"], "pcp");
     assert_eq!(specs[1]["tools"][0]["name"], "describe");
     assert_eq!(specs[1]["tools"][2]["name"], "search_pages");
     assert_eq!(specs[1]["tools"][3]["name"], "read_pages");
-    assert_eq!(specs[1]["tools"][4]["name"], "write_summary");
-    assert_eq!(specs[1]["tools"][5]["name"], "write_page");
+    assert_eq!(specs[1]["tools"][4]["name"], "assess_validity");
+    assert_eq!(specs[1]["tools"][5]["name"], "write_summary");
+    assert_eq!(specs[1]["tools"][6]["name"], "write_page");
 }
 
 #[test]
@@ -89,7 +100,10 @@ fn persistent_instructions_define_a_short_unambiguous_pcp_boundary() {
     let instructions = developer_instructions();
     assert!(instructions.contains("PCP is the user-owned long-term archive"));
     assert!(instructions.contains("before asking the user to repeat known history"));
+    assert!(instructions.contains("absence means unreviewed, not invalid"));
+    assert!(instructions.contains("Never treat validity as a hard filter"));
     assert!(instructions.contains("Do not repeat an identical PCP search or read"));
+    assert!(instructions.contains("Rarely use `symbiont.reserve_continuation`"));
     assert!(instructions.contains("PCP memory operations remain available"));
     assert!(!instructions.contains("do not modify files or attempt side effects"));
     assert!(instructions.chars().count() < 3_500);
@@ -127,8 +141,9 @@ fn autonomous_exploration_is_silent_or_starts_one_conversation() {
     assert!(prompt.contains("Search results are raw material"));
     assert!(prompt.contains("one conversational move"));
     assert!(prompt.contains("Never send a roundup"));
-    assert!(prompt.contains("begin directly with the thought"));
-    assert!(prompt.contains("No preamble or process narration"));
+    assert!(prompt.contains("shortest natural bridge"));
+    assert!(prompt.contains("older open thread"));
+    assert!(prompt.contains("No process narration"));
 }
 
 #[test]
@@ -138,19 +153,23 @@ fn reflection_prompt_preserves_facts_uncertainty_and_profile_boundaries() {
     assert!(prompt.contains("never ratings"));
     assert!(prompt.contains("Keep alternative explanations"));
     assert!(prompt.contains("do not force a tree"));
+    assert!(prompt.contains("one-off questions"));
+    assert!(prompt.contains("without scores or fixed message thresholds"));
+    assert!(prompt.contains("message_revision_ids"));
+    assert!(
+        prompt.contains("same Revision may contribute to several Topics")
+            || prompt.contains("same Revision may belong to several Topics")
+    );
     assert!(prompt.contains("never promote temporary behavior directly"));
     assert!(prompt.contains("publication gate will still decide whether to speak"));
-    assert!(prompt.chars().count() < 2_500);
+    assert!(prompt.contains("pcp.assess_validity"));
+    assert!(prompt.contains("not ordinary messages"));
+    assert!(prompt.chars().count() < 3_200);
 }
 
 #[test]
 fn codex_input_preserves_text_and_local_images() {
-    let input = multimodal_input_items(&ChatInput {
-        text: "What is shown here?".to_owned(),
-        local_images: vec!["/tmp/example.png".into()],
-        current_revision_id: "rev_current".to_owned(),
-        reply_to_revision_id: None,
-    });
+    let input = text_and_image_input_items("What is shown here?", &["/tmp/example.png".into()]);
     assert_eq!(
         input[0],
         json!({"type": "text", "text": "What is shown here?"})
@@ -163,6 +182,38 @@ fn codex_input_preserves_text_and_local_images() {
             "detail": "auto"
         })
     );
+}
+
+#[test]
+fn codex_output_collects_generated_image_paths_once() {
+    let item = json!({
+        "type": "imageGeneration",
+        "id": "image-1",
+        "status": "completed",
+        "result": "generated",
+        "revisedPrompt": "A restrained abstract icon",
+        "savedPath": "/tmp/generated-icon.png"
+    });
+    let image = generated_image_output(&item).expect("generated image output");
+    assert_eq!(image.item_id, "image-1");
+    assert_eq!(
+        image.saved_path.to_string_lossy(),
+        "/tmp/generated-icon.png"
+    );
+    assert_eq!(
+        image.revised_prompt.as_deref(),
+        Some("A restrained abstract icon")
+    );
+
+    let mut images = Vec::new();
+    remember_generated_image(&mut images, image.clone());
+    remember_generated_image(&mut images, image);
+    assert_eq!(images.len(), 1);
+
+    let (kind, title, details) = observable_item_event(&item).expect("trace image generation");
+    assert!(matches!(kind, crate::diagnostics::TraceEventKind::ToolCall));
+    assert_eq!(title, "Generated image");
+    assert_eq!(details["savedPath"], "/tmp/generated-icon.png");
 }
 
 #[test]
@@ -219,6 +270,19 @@ async fn orientation_tool_requires_active_calibration() {
         context,
         curiosity,
         reflection,
+        Arc::new(
+            ComputePolicyStore::open(root.join("compute-policies.toml"))
+                .await
+                .expect("open compute policies"),
+        ),
+        None,
+        Arc::new(
+            TaskExecutionQueue::open(root.join("task-runs.json"))
+                .await
+                .expect("open task execution queue")
+                .0,
+        ),
+        Arc::new(crate::continuation::ContinuationQueue::new().0),
     );
     let call = json!({
         "namespace": "symbiont",
@@ -274,7 +338,26 @@ async fn pcp_tools_write_search_and_read_through_the_dynamic_bridge() {
         .await
         .expect("open Reflection store"),
     );
-    let tools = SymbiontTools::new(continuity, profile, context, curiosity, reflection);
+    let tools = SymbiontTools::new(
+        continuity,
+        profile,
+        context,
+        curiosity,
+        Arc::clone(&reflection),
+        Arc::new(
+            ComputePolicyStore::open(root.join("compute-policies.toml"))
+                .await
+                .expect("open compute policies"),
+        ),
+        None,
+        Arc::new(
+            TaskExecutionQueue::open(root.join("task-runs.json"))
+                .await
+                .expect("open task execution queue")
+                .0,
+        ),
+        Arc::new(crate::continuation::ContinuationQueue::new().0),
+    );
 
     let written = tools
         .execute(&json!({
@@ -312,6 +395,25 @@ async fn pcp_tools_write_search_and_read_through_the_dynamic_bridge() {
     let derived_revision_id = derived_json["revisionId"]
         .as_str()
         .expect("derived revision id");
+    let assessed = tools
+        .execute_for_model(
+            &json!({
+                "namespace": "pcp",
+                "tool": "assess_validity",
+                "arguments": {
+                    "target_revision_id": revision_id,
+                    "standing": "qualified",
+                    "rationale": "The derived Page narrows why this detail remains useful.",
+                    "scope": "Useful as a bridge fixture, not as a general observatory claim.",
+                    "basis_revision_ids": [derived_revision_id],
+                    "idempotency_key": "bridge-validity-test"
+                }
+            }),
+            Some("test-model"),
+            "maintenance",
+        )
+        .await;
+    assert_eq!(assessed.response["success"], true);
     let summarized = tools
         .execute(&json!({
             "namespace": "pcp",
@@ -338,6 +440,10 @@ async fn pcp_tools_write_search_and_read_through_the_dynamic_bridge() {
     assert_eq!(searched.response["success"], true);
     let searched_json = tool_content_json(&searched.response);
     assert_eq!(searched_json["hits"][0]["revisionId"], revision_id);
+    assert_eq!(
+        searched_json["hits"][0]["validity"]["standing"],
+        "qualified"
+    );
 
     let summary_search = tools
         .execute(&json!({
@@ -363,7 +469,7 @@ async fn pcp_tools_write_search_and_read_through_the_dynamic_bridge() {
             "tool": "read_pages",
             "arguments": {
                 "revision_ids": [revision_id],
-                "projections": ["summary", "payload", "facets"]
+                "projections": ["summary", "validity", "payload", "facets"]
             }
         }))
         .await;
@@ -378,6 +484,10 @@ async fn pcp_tools_write_search_and_read_through_the_dynamic_bridge() {
             .as_str()
             .expect("summary content")
             .contains("semantic observatory")
+    );
+    assert_eq!(
+        read_json["pages"][0]["validity"]["basisRevisionIds"][0],
+        derived_revision_id
     );
     assert!(
         read_json["pages"][0]["revision"]
@@ -494,7 +604,26 @@ async fn reflection_tools_accept_recalled_conversation_revisions_outside_the_eve
         .await
         .expect("open Reflection store"),
     );
-    let tools = SymbiontTools::new(continuity, profile, context, curiosity, reflection);
+    let tools = SymbiontTools::new(
+        continuity,
+        profile,
+        context,
+        curiosity,
+        Arc::clone(&reflection),
+        Arc::new(
+            ComputePolicyStore::open(root.join("compute-policies.toml"))
+                .await
+                .expect("open compute policies"),
+        ),
+        None,
+        Arc::new(
+            TaskExecutionQueue::open(root.join("task-runs.json"))
+                .await
+                .expect("open task execution queue")
+                .0,
+        ),
+        Arc::new(crate::continuation::ContinuationQueue::new().0),
+    );
 
     let result = tools
         .execute_for_model(
@@ -505,7 +634,7 @@ async fn reflection_tools_accept_recalled_conversation_revisions_outside_the_eve
                     "title": "Recalled design line",
                     "summary": "The source is outside Reflection's imported event tail but remains auditable through PCP.",
                     "state": "active",
-                    "source_revision_ids": [recalled.page.revision_id]
+                    "source_revision_ids": [recalled.page.revision_id.clone()]
                 }
             }),
             Some("test-model"),
@@ -513,6 +642,24 @@ async fn reflection_tools_accept_recalled_conversation_revisions_outside_the_eve
         )
         .await;
     assert_eq!(result.response["success"], true);
+
+    let follow_up = tools
+        .execute_for_model(
+            &json!({
+                "namespace": "symbiont",
+                "tool": "schedule_follow_up",
+                "arguments": {
+                    "reason": "Reconsider this as a distinct continuation after the current exchange has settled.",
+                    "not_before": (chrono::Utc::now() + chrono::Duration::minutes(2)).to_rfc3339(),
+                    "source_revision_ids": [recalled.page.revision_id]
+                }
+            }),
+            Some("test-model"),
+            "interactive",
+        )
+        .await;
+    assert_eq!(follow_up.response["success"], true);
+    assert_eq!(reflection.follow_ups(10).await.unwrap().len(), 1);
 
     let _ = tokio::fs::remove_dir_all(root).await;
 }
@@ -565,6 +712,19 @@ async fn hunch_tools_preserve_model_owned_state_and_record_autonomous_exploratio
         context,
         Arc::clone(&curiosity),
         reflection,
+        Arc::new(
+            ComputePolicyStore::open(root.join("compute-policies.toml"))
+                .await
+                .expect("open compute policies"),
+        ),
+        None,
+        Arc::new(
+            TaskExecutionQueue::open(root.join("task-runs.json"))
+                .await
+                .expect("open task execution queue")
+                .0,
+        ),
+        Arc::new(crate::continuation::ContinuationQueue::new().0),
     );
 
     let opened = tools

@@ -3,6 +3,7 @@ use serde_json::Value;
 
 use crate::{
     Actor, LifecycleStatus, PagePayload, Projection, ProvenanceEvent, SearchMode, SourceRef,
+    ValidityStanding,
 };
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -127,6 +128,25 @@ pub struct WriteSummaryRequest {
     pub tool_or_model: Option<String>,
     #[serde(default)]
     pub provenance: Vec<ProvenanceEvent>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub idempotency_key: Option<String>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AssessPageValidityRequest {
+    pub target_revision_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub expected_assessment_id: Option<String>,
+    pub standing: ValidityStanding,
+    pub rationale: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub scope: Option<String>,
+    #[serde(default)]
+    pub basis_revision_ids: Vec<String>,
+    pub created_by: Actor,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tool_or_model: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub idempotency_key: Option<String>,
 }

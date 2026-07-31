@@ -1,6 +1,7 @@
 use anyhow::{Context, Result};
 use pcp_core::{
-    LifecycleStatus, Projection, SearchHit, SearchMode, SearchPagesRequest, SearchResult,
+    LifecycleStatus, PageValidity, PageValidityHint, Projection, SearchHit, SearchMode,
+    SearchPagesRequest, SearchResult,
 };
 use rusqlite::{Connection, params_from_iter, types::Value as SqlValue};
 use serde_json::{Map, Value};
@@ -8,6 +9,7 @@ use serde_json::{Map, Value};
 use crate::{
     row::{REVISION_COLUMNS, revision_from_row},
     store::{MAX_SEARCH_RESULTS, SqlitePcpStore},
+    validity::current_validity,
 };
 
 impl SqlitePcpStore {
@@ -336,6 +338,8 @@ fn collect_hits(
         let revision = revision_from_row(row, false, true, false, false)?;
         let snippet: String = row.get(17)?;
         let has_summary: bool = row.get(18)?;
+        let validity =
+            current_validity(connection, &revision.revision_id)?.map(compact_validity_hint);
         let mut available_projections = vec![
             Projection::Manifest,
             Projection::Payload,
@@ -348,6 +352,10 @@ fn collect_hits(
         if has_summary {
             available_projections.insert(1, Projection::Summary);
         }
+        if validity.is_some() {
+            let index = usize::from(has_summary) + 1;
+            available_projections.insert(index, Projection::Validity);
+        }
         hits.push(SearchHit {
             page_id: revision.page_id,
             revision_id: revision.revision_id,
@@ -359,6 +367,7 @@ fn collect_hits(
             matched_by: matched_by.to_owned(),
             matched_projection: matched_projection.to_owned(),
             facets: compact_search_facets(revision.facets),
+            validity,
             available_projections,
         });
     }
@@ -368,6 +377,31 @@ fn collect_hits(
         hits,
         next_cursor: has_more.then(|| (offset + limit).to_string()),
     })
+}
+
+fn compact_validity_hint(validity: PageValidity) -> PageValidityHint {
+    PageValidityHint {
+        assessment_id: validity.assessment_id,
+        standing: validity.standing,
+        rationale: truncate_search_text(&validity.rationale, 360),
+        scope: validity
+            .scope
+            .map(|scope| truncate_search_text(&scope, 240)),
+        assessed_at: validity.assessed_at,
+        basis_revision_count: validity.basis_revision_ids.len() as u32,
+    }
+}
+
+fn truncate_search_text(content: &str, limit: usize) -> String {
+    if content.chars().count() <= limit {
+        return content.to_owned();
+    }
+    let mut compact = content
+        .chars()
+        .take(limit.saturating_sub(3))
+        .collect::<String>();
+    compact.push_str("...");
+    compact
 }
 
 fn compact_search_facets(facets: Option<Value>) -> Option<Value> {

@@ -1,4 +1,5 @@
 use std::{
+    collections::HashMap,
     io::ErrorKind,
     path::PathBuf,
     sync::atomic::{AtomicU64, Ordering},
@@ -13,8 +14,8 @@ use tokio::{fs, sync::RwLock, task};
 
 use super::{
     ConversationEpisode, DeferredFollowUp, EpisodeInput, EpisodeState, FollowUpInput,
-    HypothesisHorizon, HypothesisInput, HypothesisStatus, InteractionEvent, ReflectionConfig,
-    ReflectionRun, WorkingHypothesis,
+    HunchFeedbackTarget, HypothesisHorizon, HypothesisInput, HypothesisStatus, InteractionEvent,
+    ReflectionConfig, ReflectionRun, WorkingHypothesis,
 };
 use crate::memory::{MemoryEntry, MemoryRole};
 
@@ -74,7 +75,7 @@ impl ReflectionStore {
                 MemoryRole::Assistant => None,
                 MemoryRole::Memory => continue,
             };
-            self.record_message(entry, related, true).await?;
+            self.record_message(entry, related, true, &[]).await?;
             if matches!(entry.role, MemoryRole::Assistant) {
                 previous_assistant = entry.revision_id.clone();
             }
@@ -87,6 +88,7 @@ impl ReflectionStore {
         entry: &MemoryEntry,
         related_revision_id: Option<&str>,
         imported: bool,
+        hunch_feedback: &[HunchFeedbackTarget],
     ) -> Result<()> {
         let Some(revision_id) = entry.revision_id.clone() else {
             return Ok(());
@@ -102,6 +104,7 @@ impl ReflectionStore {
         let excerpt = truncate(&entry.content, MAX_EVENT_EXCERPT_CHARS);
         let path = self.path.clone();
         let related_revision_id = related_revision_id.map(str::to_owned);
+        let hunch_feedback = hunch_feedback.to_vec();
         task::spawn_blocking(move || -> Result<()> {
             let connection = open_connection(&path)?;
             let timing = if role == "user" {
@@ -112,7 +115,8 @@ impl ReflectionStore {
             let payload = json!({
                 "excerpt": excerpt,
                 "imported": imported,
-                "replyTiming": timing
+                "replyTiming": timing,
+                "hunchFeedback": hunch_feedback
             });
             connection
                 .execute(
@@ -177,6 +181,10 @@ impl ReflectionStore {
             for revision_id in revision_ids {
                 transaction.execute(
                     "UPDATE conversation_events SET retracted = 1 WHERE revision_id = ?1",
+                    params![revision_id],
+                )?;
+                transaction.execute(
+                    "DELETE FROM episode_messages WHERE revision_id = ?1",
                     params![revision_id],
                 )?;
                 transaction.execute(
@@ -246,9 +254,11 @@ impl ReflectionStore {
         let path = self.path.clone();
         task::spawn_blocking(move || -> Result<ConversationEpisode> {
             let connection = open_connection(&path)?;
-            ensure_known_source_revisions(&connection, &input.source_revision_ids)?;
+            let source_revision_ids = dedup(input.source_revision_ids);
+            let parent_episode_ids = dedup(input.parent_episode_ids);
+            ensure_known_source_revisions(&connection, &source_revision_ids)?;
             let id = input.id.unwrap_or_else(|| new_id("ep"));
-            validate_episode_parents(&connection, &id, &input.parent_episode_ids)?;
+            validate_episode_parents(&connection, &id, &parent_episode_ids)?;
             let existing_started_at = connection
                 .query_row(
                     "SELECT started_at FROM episodes WHERE id = ?1",
@@ -258,11 +268,10 @@ impl ReflectionStore {
                 .optional()?;
             let now = now();
             let started_at = existing_started_at.unwrap_or_else(|| {
-                source_time(&connection, &input.source_revision_ids, false)
-                    .unwrap_or_else(|| now.clone())
+                source_time(&connection, &source_revision_ids, false).unwrap_or_else(|| now.clone())
             });
-            let last_activity_at = source_time(&connection, &input.source_revision_ids, true)
-                .unwrap_or_else(|| now.clone());
+            let last_activity_at =
+                source_time(&connection, &source_revision_ids, true).unwrap_or_else(|| now.clone());
             connection.execute(
                 "
                 INSERT INTO episodes (
@@ -286,10 +295,20 @@ impl ReflectionStore {
                     started_at,
                     last_activity_at,
                     now,
-                    serde_json::to_string(&dedup(input.source_revision_ids))?,
-                    serde_json::to_string(&dedup(input.parent_episode_ids))?
+                    serde_json::to_string(&source_revision_ids)?,
+                    serde_json::to_string(&parent_episode_ids)?
                 ],
             )?;
+            for revision_id in source_revision_ids {
+                connection.execute(
+                    "
+                    INSERT OR IGNORE INTO episode_messages (
+                        episode_id, revision_id, associated_at, association_source
+                    ) VALUES (?1, ?2, ?3, 'reflection')
+                    ",
+                    params![id, revision_id, now],
+                )?;
+            }
             read_episode(&connection, &id)?.context("read written Episode")
         })
         .await
@@ -411,6 +430,93 @@ impl ReflectionStore {
         })
         .await
         .context("join Episode read")?
+    }
+
+    pub async fn episode(&self, id: &str) -> Result<Option<ConversationEpisode>> {
+        let path = self.path.clone();
+        let id = id.to_owned();
+        task::spawn_blocking(move || {
+            let connection = open_connection(&path)?;
+            read_episode(&connection, &id)
+        })
+        .await
+        .context("join Episode read")?
+    }
+
+    pub async fn episode_message_counts(&self) -> Result<HashMap<String, u64>> {
+        let path = self.path.clone();
+        task::spawn_blocking(move || -> Result<HashMap<String, u64>> {
+            let connection = open_connection(&path)?;
+            let mut statement = connection
+                .prepare("SELECT episode_id, COUNT(*) FROM episode_messages GROUP BY episode_id")?;
+            let rows = statement.query_map([], |row| {
+                Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)? as u64))
+            })?;
+            Ok(rows.collect::<rusqlite::Result<HashMap<_, _>>>()?)
+        })
+        .await
+        .context("join Episode message-count read")?
+    }
+
+    pub async fn episode_revision_ids(&self, id: &str, limit: usize) -> Result<Vec<String>> {
+        let path = self.path.clone();
+        let id = id.to_owned();
+        task::spawn_blocking(move || -> Result<Vec<String>> {
+            let connection = open_connection(&path)?;
+            let mut statement = connection.prepare(
+                "
+                SELECT em.revision_id
+                FROM episode_messages em
+                LEFT JOIN conversation_events ce ON ce.revision_id = em.revision_id
+                WHERE em.episode_id = ?1 AND COALESCE(ce.retracted, 0) = 0
+                GROUP BY em.revision_id
+                ORDER BY MIN(COALESCE(ce.occurred_at, em.associated_at)) ASC
+                LIMIT ?2
+                ",
+            )?;
+            Ok(statement
+                .query_map(params![id, limit.clamp(1, 200) as i64], |row| row.get(0))?
+                .collect::<rusqlite::Result<Vec<_>>>()?)
+        })
+        .await
+        .context("join Episode message read")?
+    }
+
+    pub async fn attach_episode_messages(&self, id: &str, revision_ids: &[String]) -> Result<()> {
+        if revision_ids.is_empty() {
+            return Ok(());
+        }
+        validate_sources(revision_ids)?;
+        let path = self.path.clone();
+        let id = id.to_owned();
+        let revision_ids = dedup(revision_ids.to_vec());
+        task::spawn_blocking(move || -> Result<()> {
+            let mut connection = open_connection(&path)?;
+            if read_episode(&connection, &id)?.is_none() {
+                anyhow::bail!("unknown conversation Topic: {id}");
+            }
+            ensure_known_source_revisions(&connection, &revision_ids)?;
+            let transaction = connection.transaction()?;
+            let associated_at = now();
+            for revision_id in revision_ids {
+                transaction.execute(
+                    "
+                    INSERT OR IGNORE INTO episode_messages (
+                        episode_id, revision_id, associated_at, association_source
+                    ) VALUES (?1, ?2, ?3, 'explicit_context')
+                    ",
+                    params![id, revision_id, associated_at],
+                )?;
+            }
+            transaction.execute(
+                "UPDATE episodes SET last_activity_at = ?2, updated_at = ?2 WHERE id = ?1",
+                params![id, associated_at],
+            )?;
+            transaction.commit()?;
+            Ok(())
+        })
+        .await
+        .context("join Episode message attachment")?
     }
 
     pub async fn hypotheses(&self, limit: usize) -> Result<Vec<WorkingHypothesis>> {
@@ -645,6 +751,35 @@ impl ReflectionStore {
         .context("join follow-up trigger update")?
     }
 
+    pub async fn cancel_follow_ups(&self, ids: &[String], outcome: &str) -> Result<()> {
+        if ids.is_empty() {
+            return Ok(());
+        }
+        let path = self.path.clone();
+        let ids = ids.to_vec();
+        let outcome = outcome.to_owned();
+        task::spawn_blocking(move || -> Result<()> {
+            let mut connection = open_connection(&path)?;
+            let transaction = connection.transaction()?;
+            let now = now();
+            for id in ids {
+                transaction.execute(
+                    "
+                    UPDATE follow_ups SET
+                        status = 'canceled', completed_at = ?1,
+                        updated_at = ?1, outcome = ?2
+                    WHERE id = ?3 AND status = 'pending'
+                    ",
+                    params![now, outcome, id],
+                )?;
+            }
+            transaction.commit()?;
+            Ok(())
+        })
+        .await
+        .context("join follow-up cancellation write")?
+    }
+
     pub async fn complete_triggered_follow_ups(&self, outcome: &str) -> Result<()> {
         let path = self.path.clone();
         let outcome = outcome.to_owned();
@@ -758,6 +893,15 @@ fn initialize_database(path: &PathBuf) -> Result<()> {
         );
         CREATE INDEX IF NOT EXISTS episode_activity
             ON episodes(last_activity_at DESC);
+        CREATE TABLE IF NOT EXISTS episode_messages (
+            episode_id TEXT NOT NULL,
+            revision_id TEXT NOT NULL,
+            associated_at TEXT NOT NULL,
+            association_source TEXT NOT NULL,
+            PRIMARY KEY (episode_id, revision_id)
+        );
+        CREATE INDEX IF NOT EXISTS episode_message_revision
+            ON episode_messages(revision_id);
         CREATE TABLE IF NOT EXISTS hypotheses (
             id TEXT PRIMARY KEY,
             statement TEXT NOT NULL,
@@ -804,6 +948,16 @@ fn initialize_database(path: &PathBuf) -> Result<()> {
         CREATE INDEX IF NOT EXISTS reflection_run_started
             ON reflection_runs(started_at DESC);
         ",
+    )?;
+    connection.execute(
+        "
+        INSERT OR IGNORE INTO episode_messages (
+            episode_id, revision_id, associated_at, association_source
+        )
+        SELECT episodes.id, json_each.value, episodes.updated_at, 'migration'
+        FROM episodes, json_each(episodes.source_revision_ids_json)
+        ",
+        [],
     )?;
     Ok(())
 }
@@ -1282,8 +1436,26 @@ fn format_event(event: &InteractionEvent) -> String {
         .get("replyTiming")
         .cloned()
         .unwrap_or(Value::Null);
+    let hunch_feedback = event
+        .payload
+        .get("hunchFeedback")
+        .and_then(Value::as_array)
+        .map(|targets| {
+            targets
+                .iter()
+                .filter_map(|target| {
+                    Some(format!(
+                        "{}@{}",
+                        target.get("pageId")?.as_str()?,
+                        target.get("revisionId")?.as_str()?
+                    ))
+                })
+                .collect::<Vec<_>>()
+                .join(",")
+        })
+        .unwrap_or_default();
     format!(
-        "<event id=\"{}\" kind=\"{}\" at=\"{}\" revision=\"{}\" related=\"{}\" role=\"{}\" chars=\"{}\" retracted=\"{}\" reply_timing='{}'>{}</event>",
+        "<event id=\"{}\" kind=\"{}\" at=\"{}\" revision=\"{}\" related=\"{}\" role=\"{}\" chars=\"{}\" retracted=\"{}\" reply_timing='{}' hunch_feedback=\"{}\">{}</event>",
         event.id,
         event.kind,
         event.occurred_at,
@@ -1293,6 +1465,7 @@ fn format_event(event: &InteractionEvent) -> String {
         event.content_chars,
         event.retracted,
         timing,
+        hunch_feedback,
         excerpt
     )
 }

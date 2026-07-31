@@ -1,9 +1,10 @@
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use pcp_core::{
-    Actor, ActorType, CreateScopeRequest, LifecycleStatus, LinkPagesRequest, PagePayload,
-    Projection, ProvenanceEvent, ReadPagesRequest, RevisePageRequest, SearchFilters, SearchMode,
-    SearchPagesRequest, SourceRef, WritePageRequest, WriteSummaryRequest,
+    Actor, ActorType, AssessPageValidityRequest, CreateScopeRequest, LifecycleStatus,
+    LinkPagesRequest, PagePayload, Projection, ProvenanceEvent, ReadPagesRequest,
+    RevisePageRequest, SearchFilters, SearchMode, SearchPagesRequest, SourceRef, ValidityStanding,
+    WritePageRequest, WriteSummaryRequest,
 };
 
 use super::SqlitePcpStore;
@@ -798,6 +799,183 @@ async fn retracts_derived_pages_and_restores_preexisting_pages() {
             .iter()
             .all(|hit| hit.revision_id != source.revision_id
                 && hit.revision_id != derived.revision_id)
+    );
+
+    let _ = std::fs::remove_dir_all(root);
+}
+
+#[tokio::test]
+async fn validity_is_revisioned_and_routes_before_detail() {
+    let root = std::env::temp_dir().join(format!(
+        "pcp-validity-{}",
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("clock")
+            .as_nanos()
+    ));
+    let store = SqlitePcpStore::open(root.join("pcp.sqlite3"))
+        .await
+        .expect("open store");
+    let owner_id = store.owner_id().to_owned();
+    let namespace = "conversation:validity".to_owned();
+    store
+        .create_scope(CreateScopeRequest {
+            owner_id: owner_id.clone(),
+            namespace: namespace.clone(),
+            scope_type: "conversation".to_owned(),
+            display_name: "Validity conversation".to_owned(),
+            description: None,
+            parent_namespace: None,
+            visibility: "private".to_owned(),
+        })
+        .await
+        .expect("create scope");
+    let actor = Actor {
+        actor_type: ActorType::Model,
+        actor_id: "model:validity".to_owned(),
+    };
+    let target = store
+        .write_page(
+            write_request(
+                &owner_id,
+                &namespace,
+                actor.clone(),
+                "The runtime always restores every deferred intent.",
+                "validity:target",
+            ),
+            vec![namespace.clone()],
+        )
+        .await
+        .expect("write target");
+    let evidence = store
+        .write_page(
+            write_request(
+                &owner_id,
+                &namespace,
+                actor.clone(),
+                "The guarantee holds only for persisted and uncanceled intents.",
+                "validity:evidence",
+            ),
+            vec![namespace.clone()],
+        )
+        .await
+        .expect("write evidence");
+
+    let first = store
+        .assess_page_validity(
+            AssessPageValidityRequest {
+                target_revision_id: target.revision_id.clone(),
+                expected_assessment_id: None,
+                standing: ValidityStanding::Qualified,
+                rationale: "Later evidence narrows the unconditional claim.".to_owned(),
+                scope: Some("Persisted, uncanceled intents only.".to_owned()),
+                basis_revision_ids: vec![evidence.revision_id.clone()],
+                created_by: actor.clone(),
+                tool_or_model: Some("test-model".to_owned()),
+                idempotency_key: Some("validity:first".to_owned()),
+            },
+            vec![namespace.clone()],
+        )
+        .await
+        .expect("assess validity");
+
+    let search = store
+        .search_pages(SearchPagesRequest {
+            query: "runtime deferred intent".to_owned(),
+            scopes: vec![namespace.clone()],
+            mode: SearchMode::Text,
+            filters: SearchFilters::default(),
+            limit: 10,
+            cursor: None,
+        })
+        .await
+        .expect("search assessed page");
+    let hit = search
+        .hits
+        .iter()
+        .find(|hit| hit.revision_id == target.revision_id)
+        .expect("target search hit");
+    assert_eq!(
+        hit.validity.as_ref().map(|value| &value.standing),
+        Some(&ValidityStanding::Qualified)
+    );
+    assert_eq!(
+        hit.validity
+            .as_ref()
+            .map(|value| value.basis_revision_count),
+        Some(1)
+    );
+    assert!(hit.available_projections.contains(&Projection::Validity));
+
+    let routed = store
+        .read_pages(
+            ReadPagesRequest {
+                revision_ids: vec![target.revision_id.clone()],
+                projections: vec![Projection::Manifest, Projection::Validity],
+                max_chars: 1_000,
+            },
+            vec![namespace.clone()],
+        )
+        .await
+        .expect("read validity without detail");
+    assert!(routed[0].revision.payload.is_none());
+    let validity = routed[0].validity.as_ref().expect("validity projection");
+    assert_eq!(validity.assessment_id, first.assessment_id);
+    assert_eq!(
+        validity.basis_revision_ids,
+        vec![evidence.revision_id.clone()]
+    );
+
+    let revised = store
+        .assess_page_validity(
+            AssessPageValidityRequest {
+                target_revision_id: target.revision_id.clone(),
+                expected_assessment_id: Some(first.assessment_id.clone()),
+                standing: ValidityStanding::Superseded,
+                rationale: "A newer durable state replaces the earlier guarantee.".to_owned(),
+                scope: None,
+                basis_revision_ids: vec![evidence.revision_id],
+                created_by: actor,
+                tool_or_model: Some("test-model".to_owned()),
+                idempotency_key: Some("validity:second".to_owned()),
+            },
+            vec![namespace.clone()],
+        )
+        .await
+        .expect("revise validity");
+    let latest = store
+        .read_pages(
+            ReadPagesRequest {
+                revision_ids: vec![target.revision_id],
+                projections: vec![Projection::Validity, Projection::History],
+                max_chars: 1_000,
+            },
+            vec![namespace],
+        )
+        .await
+        .expect("read revised validity");
+    assert_eq!(
+        latest[0]
+            .validity
+            .as_ref()
+            .and_then(|value| value.previous_assessment_id.as_deref()),
+        Some(first.assessment_id.as_str())
+    );
+    assert_eq!(
+        latest[0].validity.as_ref().map(|value| &value.standing),
+        Some(&ValidityStanding::Superseded)
+    );
+    assert_eq!(
+        latest[0]
+            .validity
+            .as_ref()
+            .map(|value| value.assessment_id.as_str()),
+        Some(revised.assessment_id.as_str())
+    );
+    assert_eq!(latest[0].validity_history.len(), 1);
+    assert_eq!(
+        latest[0].validity_history[0].assessment_id,
+        first.assessment_id
     );
 
     let _ = std::fs::remove_dir_all(root);

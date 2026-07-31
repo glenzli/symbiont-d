@@ -16,6 +16,7 @@ imagesize = "0.14"
 infer = "0.19"
 pcp-core = { path = "crates/pcp-core" }
 pcp-sqlite = { path = "crates/pcp-sqlite" }
+reqwest = { version = "0.13", default-features = false, features = ["rustls"] }
 rusqlite = { version = "0.40", features = ["bundled"] }
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"

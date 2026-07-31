@@ -6,11 +6,16 @@ import {
   tokensToMillions,
 } from "/presentation.js";
 
-export function initSettings(state) {
+export function initSettings(state, triggerExploration) {
   const dialog = document.querySelector("#settings-dialog");
   const computeForm = document.querySelector("#compute-form");
   const routingSelect = document.querySelector("#routing");
   const computeSaveState = document.querySelector("#compute-save-state");
+  const computePolicyList = document.querySelector("#compute-policy-list");
+  const computePolicyTemplate = document.querySelector(
+    "#compute-policy-template",
+  );
+  const addComputePolicy = document.querySelector("#add-compute-policy");
   const autonomyForm = document.querySelector("#autonomy-form");
   const autonomyEnabled = document.querySelector("#autonomy-enabled");
   const autonomyInterval = document.querySelector("#autonomy-interval");
@@ -27,6 +32,10 @@ export function initSettings(state) {
   const quotaState = document.querySelector("#quota-state");
   const bridgeForm = document.querySelector("#bridge-form");
   const codexTaskAccess = document.querySelector("#codex-task-access");
+  const codexTaskExecution = document.querySelector("#codex-task-execution");
+  const codexTaskExecutionNote = document.querySelector(
+    "#codex-task-execution-note",
+  );
   const bridgeSaveState = document.querySelector("#bridge-save-state");
   const tabButtons = [...dialog.querySelectorAll("[data-settings-tab]")];
   const tabPanels = [...dialog.querySelectorAll("[data-settings-panel]")];
@@ -76,6 +85,26 @@ export function initSettings(state) {
       modelSelect.value = state.compute.lanes[lane].model;
       configureEffortSelect(row, state.compute.lanes[lane].effort);
     }
+    computePolicyList.replaceChildren();
+    for (const policy of state.computePolicies || []) {
+      appendComputePolicy(policy);
+    }
+  }
+
+  function appendComputePolicy(policy = {}, focus = false) {
+    const fragment = computePolicyTemplate.content.cloneNode(true);
+    const row = fragment.querySelector(".compute-policy-row");
+    row.querySelector('[data-policy-field="id"]').value = policy.id || "";
+    row.querySelector('[data-policy-field="topic"]').value = policy.topic || "";
+    row.querySelector('[data-policy-field="aliases"]').value = (
+      policy.aliases || []
+    ).join(", ");
+    row.querySelector('[data-policy-field="minimumLane"]').value =
+      policy.minimumLane || "critical";
+    row.querySelector('[data-policy-field="enabled"]').checked =
+      policy.enabled !== false;
+    computePolicyList.append(fragment);
+    if (focus) row.querySelector('[data-policy-field="topic"]').focus();
   }
 
   function renderAutonomyConfig() {
@@ -117,6 +146,14 @@ export function initSettings(state) {
 
   function renderBridge() {
     codexTaskAccess.checked = state.bridge?.codexTaskAccess === true;
+    const lease = state.bridge?.activeTaskLease;
+    const task = lease?.task || state.bridge?.pinnedTask;
+    codexTaskExecution.checked =
+      state.bridge?.taskExecutionEnabled === true;
+    codexTaskExecution.disabled = !codexTaskAccess.checked;
+    codexTaskExecutionNote.textContent = task
+      ? `只对选定任务生效 · 当前 ${task.title} · ${shortPath(task.cwd)}`
+      : "只在输入区明确选择任务后生效";
   }
 
   function toggleQuietInputs() {
@@ -139,6 +176,23 @@ export function initSettings(state) {
     };
   }
 
+  function computePolicyFormValue() {
+    return [...computePolicyList.querySelectorAll(".compute-policy-row")]
+      .map((row) => ({
+        id: row.querySelector('[data-policy-field="id"]').value || null,
+        topic: row.querySelector('[data-policy-field="topic"]').value.trim(),
+        aliases: row
+          .querySelector('[data-policy-field="aliases"]')
+          .value.split(/[,，\n]/)
+          .map((alias) => alias.trim())
+          .filter(Boolean),
+        minimumLane: row.querySelector('[data-policy-field="minimumLane"]')
+          .value,
+        enabled: row.querySelector('[data-policy-field="enabled"]').checked,
+      }))
+      .filter((policy) => policy.topic);
+  }
+
   async function saveCompute(event) {
     event.preventDefault();
     computeSaveState.textContent = "保存中";
@@ -151,6 +205,15 @@ export function initSettings(state) {
         }),
         "保存失败",
       );
+      state.computePolicies = await responseJson(
+        await fetch("/api/compute/policies", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(computePolicyFormValue()),
+        }),
+        "话题规则保存失败",
+      );
+      renderCompute();
       computeSaveState.textContent = "已保存";
     } catch (error) {
       computeSaveState.textContent = error.message;
@@ -199,6 +262,8 @@ export function initSettings(state) {
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({
             codexTaskAccess: codexTaskAccess.checked,
+            taskExecutionEnabled:
+              codexTaskAccess.checked && codexTaskExecution.checked,
           }),
         }),
         "保存失败",
@@ -283,6 +348,8 @@ export function initSettings(state) {
           reflection: "后台理解",
           maintenance: "记忆维护",
           interactive: "对话",
+          codex_task: "Codex 任务",
+          continuation: "续话",
         }[invocation.origin] || invocation.origin;
       recentList.append(
         usageRow(
@@ -309,15 +376,16 @@ export function initSettings(state) {
     if (name === "stats") loadStats();
   }
 
-  async function triggerExploration() {
+  async function runManualExploration() {
     runExploration.disabled = true;
     autonomyRuntimeState.textContent = "正在加入探索队列";
     try {
-      await responseJson(
-        await fetch("/api/exploration/run", { method: "POST" }),
-        "无法开始探索",
-      );
-      autonomyRuntimeState.textContent = "即将开始";
+      const result = await triggerExploration();
+      autonomyRuntimeState.textContent = result.canceled
+        ? "已取消"
+        : result.alreadyQueued
+          ? "探索已在进行或排队"
+          : "即将开始";
     } catch (error) {
       autonomyRuntimeState.textContent = error.message;
     } finally {
@@ -342,9 +410,18 @@ export function initSettings(state) {
     }
   });
   computeForm.addEventListener("submit", saveCompute);
+  addComputePolicy.addEventListener("click", () => appendComputePolicy({}, true));
+  computePolicyList.addEventListener("click", (event) => {
+    const button = event.target.closest(".remove-compute-policy");
+    if (button) button.closest(".compute-policy-row").remove();
+  });
   autonomyForm.addEventListener("submit", saveAutonomy);
   bridgeForm.addEventListener("submit", saveBridge);
-  runExploration.addEventListener("click", triggerExploration);
+  codexTaskAccess.addEventListener("change", () => {
+    if (!codexTaskAccess.checked) codexTaskExecution.checked = false;
+    codexTaskExecution.disabled = !codexTaskAccess.checked;
+  });
+  runExploration.addEventListener("click", runManualExploration);
   quietHoursEnabled.addEventListener("change", toggleQuietInputs);
   for (const button of tabButtons) {
     button.addEventListener("click", () =>
@@ -365,6 +442,11 @@ export function initSettings(state) {
     renderAutonomyRuntime,
     open: openSettings,
   };
+}
+
+function shortPath(path) {
+  if (!path) return "";
+  return path.split("/").filter(Boolean).slice(-2).join("/");
 }
 
 function explorationStatusText(exploration, usage, autonomy) {

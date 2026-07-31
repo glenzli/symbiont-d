@@ -299,7 +299,7 @@ function deduplicatedFromSequence(step) {
 function isPcpWrite(step) {
   return (
     step.namespace === "pcp" &&
-    ["write_page", "revise_page", "link_pages"].includes(step.tool)
+    ["assess_validity", "write_summary", "write_page", "revise_page", "link_pages"].includes(step.tool)
   );
 }
 
@@ -340,6 +340,9 @@ function eventTitle(kind) {
     contextCompaction: "上下文压缩",
     threadRollover: "原生线程换页",
     modelReroute: "模型改道",
+    permissionRequest: "权限请求",
+    permissionResolution: "权限决定",
+    turnInterrupted: "用户输入中断",
     agentMessage: "最终回复",
   };
   return titles[kind] || kind;

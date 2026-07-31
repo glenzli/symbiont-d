@@ -5,6 +5,7 @@ mod schema;
 mod search;
 mod store;
 mod summary;
+mod validity;
 mod write;
 
 pub use retract::TombstoneCascadeResult;

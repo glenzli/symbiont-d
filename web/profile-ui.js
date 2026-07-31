@@ -215,6 +215,23 @@ export function initProfileUi(state, sendMessage) {
       appendDefinition(metadata, "状态", revision.lifecycleStatus);
       appendDefinition(
         metadata,
+        "当前有效性",
+        page.validity
+          ? `${page.validity.standing} · ${page.validity.rationale}`
+          : "未评估",
+      );
+      if (page.validity?.scope) {
+        appendDefinition(metadata, "适用范围", page.validity.scope);
+      }
+      if (page.validity?.basisRevisionIds?.length) {
+        appendDefinition(
+          metadata,
+          "判断依据",
+          page.validity.basisRevisionIds.join("\n"),
+        );
+      }
+      appendDefinition(
+        metadata,
         "观察时间",
         formatDate(revision.observedAt || revision.createdAt),
       );

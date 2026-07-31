@@ -3,6 +3,7 @@ use std::path::{Path, PathBuf};
 use anyhow::{Context, Result};
 use imagesize::blob_size;
 use serde::{Deserialize, Serialize};
+use serde_json::Value;
 use sha2::{Digest, Sha256};
 use tokio::fs;
 
@@ -26,6 +27,14 @@ pub struct ImageAttachment {
 pub struct SavedImage {
     pub attachment: ImageAttachment,
     pub path: PathBuf,
+    source: ImageSource,
+}
+
+#[derive(Clone, Debug)]
+struct ImageSource {
+    source_type: String,
+    uri: String,
+    metadata: Option<Value>,
 }
 
 #[derive(Clone)]
@@ -74,8 +83,40 @@ impl AssetStore {
                 height: dimensions.height as u32,
                 sha256: digest,
             },
+            source: ImageSource {
+                source_type: "local_image".to_owned(),
+                uri: format!("file://{}", path.display()),
+                metadata: None,
+            },
             path,
         })
+    }
+
+    pub async fn import_generated_image(
+        &self,
+        path: &Path,
+        metadata: Option<Value>,
+    ) -> Result<SavedImage> {
+        if !path.is_absolute() {
+            anyhow::bail!("generated image path must be absolute");
+        }
+        let file_metadata = fs::metadata(path)
+            .await
+            .with_context(|| format!("inspect generated image {}", path.display()))?;
+        if file_metadata.len() == 0 || file_metadata.len() > MAX_IMAGE_BYTES as u64 {
+            anyhow::bail!("generated image must contain 1-{MAX_IMAGE_BYTES} bytes");
+        }
+        let bytes = fs::read(path)
+            .await
+            .with_context(|| format!("read generated image {}", path.display()))?;
+        let filename = path.file_name().and_then(|value| value.to_str());
+        let mut saved = self.save_image(filename, &bytes).await?;
+        saved.source = ImageSource {
+            source_type: "codex_image_generation".to_owned(),
+            uri: format!("file://{}", path.display()),
+            metadata,
+        };
+        Ok(saved)
     }
 
     pub async fn read(&self, asset_id: &str) -> Result<(Vec<u8>, &'static str)> {
@@ -85,11 +126,26 @@ impl AssetStore {
             .with_context(|| format!("read image asset {asset_id}"))?;
         Ok((bytes, mime_type))
     }
+
+    pub async fn local_path(&self, asset_id: &str) -> Result<PathBuf> {
+        validate_asset_id(asset_id)?;
+        fs::canonicalize(self.root.join(asset_id))
+            .await
+            .with_context(|| format!("resolve image asset {asset_id}"))
+    }
 }
 
 impl SavedImage {
-    pub fn source_uri(&self) -> String {
-        format!("file://{}", self.path.display())
+    pub fn source_type(&self) -> &str {
+        &self.source.source_type
+    }
+
+    pub fn source_uri(&self) -> &str {
+        &self.source.uri
+    }
+
+    pub fn source_metadata(&self) -> Option<Value> {
+        self.source.metadata.clone()
     }
 }
 

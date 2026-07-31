@@ -1,4 +1,5 @@
 use std::{
+    collections::{HashMap, HashSet},
     sync::{
         Arc,
         atomic::{AtomicU64, Ordering},
@@ -9,25 +10,30 @@ use std::{
 use anyhow::{Context, Result};
 use chrono::{SecondsFormat, Utc};
 use pcp_core::{
-    Actor, ActorType, CreateScopeRequest, InitialRelation, LifecycleStatus, LinkPagesRequest,
-    PagePayload, Projection, ProvenanceEvent, ReadPage, ReadPagesRequest, Relation,
-    RevisePageRequest, Scope, SearchFilters, SearchMode, SearchPagesRequest, SearchResult,
-    SourceRef, WritePageRequest, WriteResult, WriteSummaryRequest, WriteSummaryResult,
+    Actor, ActorType, AssessPageValidityRequest, CreateScopeRequest, InitialRelation,
+    LifecycleStatus, LinkPagesRequest, PagePayload, Projection, ProvenanceEvent, ReadPage,
+    ReadPagesRequest, Relation, RevisePageRequest, Scope, SearchFilters, SearchMode,
+    SearchPagesRequest, SearchResult, SourceRef, ValidityStanding, WritePageRequest, WriteResult,
+    WriteSummaryRequest, WriteSummaryResult, WriteValidityResult,
 };
 use pcp_sqlite::{SqlitePcpStore, TombstoneCascadeResult};
 use serde_json::{Value, json};
+use sha2::{Digest, Sha256};
 use tokio::sync::{Mutex, RwLock};
 
 use crate::{
-    asset::SavedImage,
+    asset::{ImageAttachment, SavedImage},
     memory::{
         MemoryEntry, MemoryRole, MemoryStore, MessageDeliveryState, MessageMetadata, MessagePart,
+        MessageQuote, MessageQuoteDraft, MessageTopicReference,
     },
     profile::{ProfileSnapshot, SetupStatus},
     working_context::{WORKING_CONTEXT_SCAN_MESSAGES, WorkingContext},
 };
 
 const USER_SCOPE_LABEL: &str = "User context";
+pub const MAX_QUOTES_PER_MESSAGE: usize = 6;
+pub const MAX_QUOTE_TEXT_CHARS: usize = 6_000;
 const PROJECT_NAMESPACE: &str = "project:symbiont-d";
 const CONVERSATION_NAMESPACE: &str = "conversation:symbiont-d-main";
 const MODEL_ACTOR_ID: &str = "codex:symbiont-d";
@@ -62,7 +68,11 @@ pub struct ContinuityHost {
 #[derive(Clone, Debug, Default)]
 pub struct MessageLinks {
     pub responds_to: Option<String>,
+    pub continues_from: Option<String>,
     pub input_revision_ids: Vec<String>,
+    pub surfaced_hunch_revision_ids: Vec<String>,
+    pub quotes: Vec<MessageQuote>,
+    pub topic: Option<MessageTopicReference>,
 }
 
 #[derive(Clone, Debug)]
@@ -70,6 +80,16 @@ pub struct StoredMessage {
     pub entry: MemoryEntry,
     pub page: WriteResult,
     pub attachment_revision_ids: Vec<String>,
+}
+
+#[derive(Clone, Debug)]
+pub struct ImageAssetPage {
+    pub revision_id: String,
+    pub observed_at: String,
+    pub attachment: ImageAttachment,
+    pub attached_to_revision_id: Option<String>,
+    pub source_type: Option<String>,
+    pub revised_prompt: Option<String>,
 }
 
 impl ContinuityHost {
@@ -424,15 +444,35 @@ impl ContinuityHost {
         links: MessageLinks,
     ) -> Result<StoredMessage> {
         let content = content.trim();
-        if content.is_empty() && images.is_empty() {
-            anyhow::bail!("conversation event requires text or an image");
+        if content.is_empty() && images.is_empty() && links.quotes.is_empty() {
+            anyhow::bail!("conversation event requires text, an image, or a quote");
         }
         let observed_at = now();
+        let actor = actor_for_role(&role);
+        let tool_or_model = metadata
+            .as_ref()
+            .and_then(|metadata| metadata.runs.last())
+            .map(|run| run.model.clone());
         let attachment_revision_ids = self
-            .ingest_image_assets(&images, &observed_at)
+            .ingest_image_assets(&images, &observed_at, &actor, tool_or_model.as_deref())
             .await
             .context("ingest image assets into PCP")?;
-        let mut parts = Vec::with_capacity(images.len() + usize::from(!content.is_empty()));
+        let mut parts = Vec::with_capacity(
+            images.len()
+                + links.quotes.len()
+                + usize::from(links.topic.is_some())
+                + usize::from(!content.is_empty()),
+        );
+        if let Some(topic) = links.topic.clone() {
+            parts.push(MessagePart::Topic { topic });
+        }
+        parts.extend(
+            links
+                .quotes
+                .iter()
+                .cloned()
+                .map(|quote| MessagePart::Quote { quote }),
+        );
         if !content.is_empty() {
             parts.push(MessagePart::Markdown {
                 text: content.to_owned(),
@@ -450,7 +490,6 @@ impl ContinuityHost {
             metadata,
             delivery_state: None,
         };
-        let actor = actor_for_role(&role);
         let event_key = self.next_event_key();
         let mut last_event_revision = self.last_event_revision.lock().await;
         let mut initial_relations = last_event_revision
@@ -468,32 +507,72 @@ impl ContinuityHost {
                 to_revision_id: revision_id.clone(),
             });
         }
+        if let Some(revision_id) = links.continues_from.as_ref() {
+            initial_relations.push(InitialRelation {
+                relation_type: "continues".to_owned(),
+                to_revision_id: revision_id.clone(),
+            });
+        }
+        initial_relations.extend(links.surfaced_hunch_revision_ids.iter().map(|revision_id| {
+            InitialRelation {
+                relation_type: "surfaces_hunch".to_owned(),
+                to_revision_id: revision_id.clone(),
+            }
+        }));
         initial_relations.extend(attachment_revision_ids.iter().map(|revision_id| {
             InitialRelation {
                 relation_type: "has_attachment".to_owned(),
                 to_revision_id: revision_id.clone(),
             }
         }));
+        let mut quoted_revision_ids = links
+            .quotes
+            .iter()
+            .map(|quote| quote.source_revision_id.clone())
+            .collect::<Vec<_>>();
+        quoted_revision_ids.sort();
+        quoted_revision_ids.dedup();
+        initial_relations.extend(
+            quoted_revision_ids
+                .iter()
+                .map(|revision_id| InitialRelation {
+                    relation_type: "quotes".to_owned(),
+                    to_revision_id: revision_id.clone(),
+                }),
+        );
         let mut provenance_inputs = links.input_revision_ids;
+        provenance_inputs.extend(links.surfaced_hunch_revision_ids);
+        provenance_inputs.extend(quoted_revision_ids);
         if let Some(revision_id) = links.responds_to {
+            provenance_inputs.push(revision_id);
+        }
+        if let Some(revision_id) = links.continues_from {
             provenance_inputs.push(revision_id);
         }
         provenance_inputs.sort();
         provenance_inputs.dedup();
-        let payload_content = if entry.content.is_empty() {
+        let payload_content = if entry.content.is_empty() && !images.is_empty() {
             images
                 .iter()
                 .map(|image| format!("[Image: {}]", image.attachment.filename))
                 .collect::<Vec<_>>()
                 .join("\n")
+        } else if entry.content.is_empty() {
+            links
+                .quotes
+                .iter()
+                .map(|quote| {
+                    format!(
+                        "[Quoted {}: {}]",
+                        quote.source_revision_id,
+                        quote.text.replace('\n', " ")
+                    )
+                })
+                .collect::<Vec<_>>()
+                .join("\n")
         } else {
             entry.content.clone()
         };
-        let tool_or_model = entry
-            .metadata
-            .as_ref()
-            .and_then(|metadata| metadata.runs.last())
-            .map(|run| run.model.clone());
         let page = self
             .store
             .write_page(
@@ -538,13 +617,11 @@ impl ContinuityHost {
         &self,
         images: &[SavedImage],
         observed_at: &str,
+        actor: &Actor,
+        tool_or_model: Option<&str>,
     ) -> Result<Vec<String>> {
         let mut revision_ids = Vec::with_capacity(images.len());
         for image in images {
-            let actor = Actor {
-                actor_type: ActorType::User,
-                actor_id: "local-user".to_owned(),
-            };
             let payload = serde_json::to_string_pretty(&image.attachment)?;
             let result = self
                 .store
@@ -563,21 +640,22 @@ impl ContinuityHost {
                             content: payload,
                         }),
                         source_refs: vec![SourceRef {
-                            source_type: "local_image".to_owned(),
-                            uri: image.source_uri(),
+                            source_type: image.source_type().to_owned(),
+                            uri: image.source_uri().to_owned(),
                             locator: None,
-                            metadata: None,
+                            metadata: image.source_metadata(),
                         }],
                         facets: Some(json!({
                             "kind": "image_asset",
-                            "sha256": image.attachment.sha256
+                            "sha256": image.attachment.sha256,
+                            "origin": image.source_type()
                         })),
                         provenance: vec![ProvenanceEvent {
                             operation: "ingest".to_owned(),
-                            actor,
+                            actor: actor.clone(),
                             timestamp: observed_at.to_owned(),
                             input_revision_ids: Vec::new(),
-                            tool_or_model: None,
+                            tool_or_model: tool_or_model.map(str::to_owned),
                         }],
                         initial_relations: Vec::new(),
                         idempotency_key: Some(format!("image-asset:{}", image.attachment.sha256)),
@@ -588,6 +666,192 @@ impl ContinuityHost {
             revision_ids.push(result.revision_id);
         }
         Ok(revision_ids)
+    }
+
+    pub async fn recent_image_assets(&self, limit: usize) -> Result<Vec<ImageAssetPage>> {
+        if limit == 0 {
+            return Ok(Vec::new());
+        }
+        let result = self
+            .search(SearchPagesRequest {
+                query: "image_asset".to_owned(),
+                scopes: vec![self.scopes.conversation.clone()],
+                mode: SearchMode::Exact,
+                filters: SearchFilters::default(),
+                limit: limit.min(20) as u32,
+                cursor: None,
+            })
+            .await?;
+        let revision_ids = result
+            .hits
+            .into_iter()
+            .map(|hit| hit.revision_id)
+            .collect::<Vec<_>>();
+        self.read_image_assets(&revision_ids).await
+    }
+
+    pub async fn read_image_assets(&self, revision_ids: &[String]) -> Result<Vec<ImageAssetPage>> {
+        if revision_ids.is_empty() {
+            return Ok(Vec::new());
+        }
+        if revision_ids.len() > 20 {
+            anyhow::bail!("at most 20 image asset Revisions can be read at once");
+        }
+        let pages = self
+            .read(ReadPagesRequest {
+                revision_ids: revision_ids.to_vec(),
+                projections: vec![
+                    Projection::Payload,
+                    Projection::Sources,
+                    Projection::Relations,
+                    Projection::Facets,
+                ],
+                max_chars: 64_000,
+            })
+            .await?;
+        let mut by_revision = pages
+            .into_iter()
+            .map(|page| {
+                let revision_id = page.revision.revision_id.clone();
+                image_asset_from_page(page)
+                    .with_context(|| format!("Revision {revision_id} is not an image asset"))
+                    .map(|image| (revision_id, image))
+            })
+            .collect::<Result<HashMap<_, _>>>()?;
+        revision_ids
+            .iter()
+            .map(|revision_id| {
+                by_revision
+                    .remove(revision_id)
+                    .with_context(|| format!("image asset Revision {revision_id} was not found"))
+            })
+            .collect()
+    }
+
+    pub async fn resolve_message_quotes(
+        &self,
+        drafts: Vec<MessageQuoteDraft>,
+    ) -> Result<Vec<MessageQuote>> {
+        if drafts.len() > MAX_QUOTES_PER_MESSAGE {
+            anyhow::bail!("a message can quote at most {MAX_QUOTES_PER_MESSAGE} excerpts");
+        }
+        if drafts.is_empty() {
+            return Ok(Vec::new());
+        }
+        for draft in &drafts {
+            if draft.source_revision_id.trim().is_empty() || draft.source_revision_id.len() > 128 {
+                anyhow::bail!("quoted source Revision ID is invalid");
+            }
+            if draft.start_offset.is_some() != draft.end_offset.is_some()
+                || draft
+                    .start_offset
+                    .zip(draft.end_offset)
+                    .is_some_and(|(start, end)| end < start)
+            {
+                anyhow::bail!("quoted selection offsets are invalid");
+            }
+            let selected_chars = draft.selected_text.trim().chars().count();
+            if !draft.whole_message && selected_chars == 0 {
+                anyhow::bail!("a selected quote cannot be empty");
+            }
+            if selected_chars > MAX_QUOTE_TEXT_CHARS {
+                anyhow::bail!("quoted text exceeds {MAX_QUOTE_TEXT_CHARS} characters");
+            }
+        }
+
+        let mut revision_ids = drafts
+            .iter()
+            .map(|draft| draft.source_revision_id.clone())
+            .collect::<Vec<_>>();
+        revision_ids.sort();
+        revision_ids.dedup();
+        let pages = self
+            .read(ReadPagesRequest {
+                revision_ids,
+                projections: vec![Projection::Payload, Projection::Facets],
+                max_chars: (MAX_QUOTES_PER_MESSAGE * (MAX_QUOTE_TEXT_CHARS + 2_000)) as u32,
+            })
+            .await?
+            .into_iter()
+            .map(|page| (page.revision.revision_id.clone(), page))
+            .collect::<HashMap<_, _>>();
+
+        drafts
+            .into_iter()
+            .map(|draft| {
+                let page = pages.get(&draft.source_revision_id).with_context(|| {
+                    format!(
+                        "quoted conversation Revision {} was not found",
+                        draft.source_revision_id
+                    )
+                })?;
+                let source_role = page_message_role(&page)
+                    .context("quoted Revision is not a conversation message")?;
+                let source_at = page
+                    .revision
+                    .observed_at
+                    .clone()
+                    .unwrap_or_else(|| page.revision.created_at.clone());
+                let source = page
+                    .revision
+                    .payload
+                    .as_ref()
+                    .context("quoted conversation Revision has no readable content")?
+                    .content
+                    .clone();
+                let source_sha256 = format!("{:x}", Sha256::digest(source.as_bytes()));
+                let (text, truncated) = if draft.whole_message {
+                    truncate_with_flag(&source, MAX_QUOTE_TEXT_CHARS)
+                } else {
+                    (draft.selected_text.trim().to_owned(), false)
+                };
+                Ok(MessageQuote {
+                    source_revision_id: draft.source_revision_id,
+                    source_role,
+                    source_at,
+                    text,
+                    source_sha256,
+                    start_offset: draft.start_offset,
+                    end_offset: draft.end_offset,
+                    whole_message: draft.whole_message,
+                    truncated,
+                })
+            })
+            .collect()
+    }
+
+    pub async fn attached_image_revision_ids(
+        &self,
+        message_revision_ids: &[String],
+    ) -> Result<Vec<String>> {
+        if message_revision_ids.is_empty() {
+            return Ok(Vec::new());
+        }
+        if message_revision_ids.len() > 20 {
+            anyhow::bail!("at most 20 message Revisions can be inspected at once");
+        }
+        let pages = self
+            .read(ReadPagesRequest {
+                revision_ids: message_revision_ids.to_vec(),
+                projections: vec![Projection::Relations],
+                max_chars: 16_000,
+            })
+            .await?;
+        let message_revisions = message_revision_ids
+            .iter()
+            .map(String::as_str)
+            .collect::<HashSet<_>>();
+        let mut seen = HashSet::new();
+        let mut image_revisions = Vec::new();
+        for relation in pages.into_iter().flat_map(|page| page.relations) {
+            if relation.relation_type == "has_attachment"
+                && message_revisions.contains(relation.from_revision_id.as_str())
+                && seen.insert(relation.to_revision_id.clone())
+            {
+                image_revisions.push(relation.to_revision_id);
+            }
+        }
+        Ok(image_revisions)
     }
 
     pub async fn recent_messages(&self, limit: usize) -> Result<Vec<MemoryEntry>> {
@@ -666,6 +930,38 @@ impl ContinuityHost {
         {
             latest_user.delivery_state = Some(MessageDeliveryState::Failed);
         }
+        Ok(entries)
+    }
+
+    pub async fn messages_by_revision_ids(
+        &self,
+        revision_ids: &[String],
+    ) -> Result<Vec<MemoryEntry>> {
+        if revision_ids.is_empty() {
+            return Ok(Vec::new());
+        }
+        if revision_ids.len() > 200 {
+            anyhow::bail!("at most 200 conversation Revisions can be read at once");
+        }
+        let mut unique = revision_ids.to_vec();
+        unique.sort();
+        unique.dedup();
+        let mut entries = Vec::with_capacity(unique.len());
+        for chunk in unique.chunks(20) {
+            let pages = self
+                .read(ReadPagesRequest {
+                    revision_ids: chunk.to_vec(),
+                    projections: vec![Projection::Payload, Projection::Facets],
+                    max_chars: 128_000,
+                })
+                .await?;
+            entries.extend(pages.into_iter().filter_map(memory_entry_from_page));
+        }
+        entries.sort_by(|left, right| {
+            left.at
+                .cmp(&right.at)
+                .then_with(|| left.revision_id.cmp(&right.revision_id))
+        });
         Ok(entries)
     }
 
@@ -772,6 +1068,34 @@ impl ContinuityHost {
         self.store.read_pages(request, self.allowed_scopes()).await
     }
 
+    pub async fn current_revision_id(&self, page_id: &str) -> Result<String> {
+        self.store
+            .current_revision_id(page_id.to_owned(), self.allowed_scopes())
+            .await
+    }
+
+    pub async fn surfaced_hunch_revisions(&self, message_revision_id: &str) -> Result<Vec<String>> {
+        let pages = self
+            .read(ReadPagesRequest {
+                revision_ids: vec![message_revision_id.to_owned()],
+                projections: vec![Projection::Relations],
+                max_chars: 8_000,
+            })
+            .await?;
+        let mut revision_ids = pages
+            .into_iter()
+            .flat_map(|page| page.relations)
+            .filter(|relation| {
+                relation.from_revision_id == message_revision_id
+                    && relation.relation_type == "surfaces_hunch"
+            })
+            .map(|relation| relation.to_revision_id)
+            .collect::<Vec<_>>();
+        revision_ids.sort();
+        revision_ids.dedup();
+        Ok(revision_ids)
+    }
+
     pub async fn next_summary_candidate(&self, minimum_chars: usize) -> Result<Option<String>> {
         self.store
             .next_summary_candidate(self.allowed_scopes(), minimum_chars)
@@ -875,6 +1199,38 @@ impl ContinuityHost {
                         input_revision_ids: inputs,
                         tool_or_model: Some(tool_or_model),
                     }],
+                    idempotency_key,
+                },
+                self.allowed_scopes(),
+            )
+            .await
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub async fn assess_model_page_validity(
+        &self,
+        target_revision_id: String,
+        expected_assessment_id: Option<String>,
+        standing: ValidityStanding,
+        rationale: String,
+        scope: Option<String>,
+        mut basis_revision_ids: Vec<String>,
+        idempotency_key: Option<String>,
+        tool_or_model: Option<String>,
+    ) -> Result<WriteValidityResult> {
+        basis_revision_ids.sort();
+        basis_revision_ids.dedup();
+        self.store
+            .assess_page_validity(
+                AssessPageValidityRequest {
+                    target_revision_id,
+                    expected_assessment_id,
+                    standing,
+                    rationale,
+                    scope,
+                    basis_revision_ids,
+                    created_by: model_actor(),
+                    tool_or_model: Some(tool_or_model.unwrap_or_else(|| "Codex".to_owned())),
                     idempotency_key,
                 },
                 self.allowed_scopes(),
@@ -989,6 +1345,18 @@ fn model_actor() -> Actor {
     }
 }
 
+fn truncate_with_flag(value: &str, max_chars: usize) -> (String, bool) {
+    if value.chars().count() <= max_chars {
+        return (value.to_owned(), false);
+    }
+    let mut truncated = value
+        .chars()
+        .take(max_chars.saturating_sub(1))
+        .collect::<String>();
+    truncated.push('…');
+    (truncated, true)
+}
+
 fn system_actor() -> Actor {
     Actor {
         actor_type: ActorType::System,
@@ -1045,6 +1413,54 @@ fn memory_entry_from_page(page: ReadPage) -> Option<MemoryEntry> {
         parts,
         metadata,
         delivery_state: None,
+    })
+}
+
+fn image_asset_from_page(page: ReadPage) -> Option<ImageAssetPage> {
+    let revision = page.revision;
+    if revision
+        .facets
+        .as_ref()?
+        .get("kind")
+        .and_then(Value::as_str)
+        != Some("image_asset")
+    {
+        return None;
+    }
+    let payload = revision.payload.as_ref()?;
+    if payload.media_type != "application/vnd.symbiont.image+json" {
+        return None;
+    }
+    let attachment = serde_json::from_str::<ImageAttachment>(&payload.content).ok()?;
+    let attached_to_revision_id = page
+        .relations
+        .iter()
+        .find(|relation| {
+            relation.relation_type == "has_attachment"
+                && relation.to_revision_id == revision.revision_id
+        })
+        .map(|relation| relation.from_revision_id.clone());
+    let source_type = revision
+        .source_refs
+        .first()
+        .map(|source| source.source_type.clone());
+    let revised_prompt = revision
+        .source_refs
+        .iter()
+        .filter_map(|source| source.metadata.as_ref())
+        .find_map(|metadata| {
+            metadata
+                .get("revisedPrompt")
+                .and_then(Value::as_str)
+                .map(str::to_owned)
+        });
+    Some(ImageAssetPage {
+        revision_id: revision.revision_id,
+        observed_at: revision.observed_at.unwrap_or(revision.created_at),
+        attachment,
+        attached_to_revision_id,
+        source_type,
+        revised_prompt,
     })
 }
 

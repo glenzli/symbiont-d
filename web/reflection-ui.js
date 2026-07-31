@@ -14,6 +14,7 @@ export function initReflectionUi(state) {
   const tokenLimit = document.querySelector("#reflection-token-limit");
   const readState = document.querySelector("#reflection-read-state");
   const followUps = document.querySelector("#reflection-follow-ups");
+  const continuations = document.querySelector("#reflection-continuations");
   const availability = document.querySelector("#reflection-availability");
   const runtimeState = document.querySelector("#reflection-runtime-state");
   const saveState = document.querySelector("#reflection-save-state");
@@ -32,6 +33,7 @@ export function initReflectionUi(state) {
     tokenLimit.value = tokensToMillions(config.dailyTokenLimit || 0);
     readState.checked = config.captureReadState;
     followUps.checked = config.followUpsEnabled;
+    continuations.checked = config.continuationsEnabled;
     availability.textContent = config.enabled ? "已启用" : "已关闭";
   }
 
@@ -56,6 +58,7 @@ export function initReflectionUi(state) {
             retentionDays: Number(retention.value),
             captureReadState: readState.checked,
             followUpsEnabled: followUps.checked,
+            continuationsEnabled: continuations.checked,
             dailyTokenLimit: millionsToTokens(tokenLimit.value),
           }),
         }),
@@ -105,10 +108,10 @@ export function initReflectionUi(state) {
     archive.replaceChildren();
     appendSection(
       archive,
-      "Episodes",
+      "Topic Episodes",
       snapshot.episodes,
       renderEpisode,
-      "还没有形成对话 Episode。",
+      "还没有形成值得长期整理的主题。",
     );
     appendSection(
       archive,
@@ -320,6 +323,7 @@ function followUpStatus(value) {
       pending: "等待",
       triggered: "已触发",
       completed: "已完成",
+      canceled: "已取消",
       cancelled: "已取消",
     }[value] || value
   );

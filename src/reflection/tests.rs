@@ -3,8 +3,8 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use chrono::{Duration, SecondsFormat, Utc};
 
 use super::{
-    EpisodeInput, EpisodeState, FollowUpInput, HypothesisHorizon, HypothesisInput,
-    HypothesisStatus, ReflectionStore,
+    EpisodeInput, EpisodeState, FollowUpInput, HunchFeedbackTarget, HypothesisHorizon,
+    HypothesisInput, HypothesisStatus, ReflectionStore,
 };
 use crate::memory::{MemoryEntry, MemoryRole};
 
@@ -50,6 +50,7 @@ async fn records_interaction_facts_without_turning_them_into_scores() {
             ),
             None,
             false,
+            &[],
         )
         .await
         .unwrap();
@@ -67,6 +68,10 @@ async fn records_interaction_facts_without_turning_them_into_scores() {
             ),
             Some("rev_assistant"),
             false,
+            &[HunchFeedbackTarget {
+                page_id: "pg_hunch".to_owned(),
+                revision_id: "rev_hunch_pending".to_owned(),
+            }],
         )
         .await
         .unwrap();
@@ -81,6 +86,11 @@ async fn records_interaction_facts_without_turning_them_into_scores() {
     assert_eq!(user.payload["replyTiming"]["delayMs"], 40_000);
     assert!(user.payload.get("score").is_none());
     assert!(batch.source_bundle.contains("rev_user"));
+    assert!(
+        batch
+            .source_bundle
+            .contains("hunch_feedback=\"pg_hunch@rev_hunch_pending\"")
+    );
 
     let _ = tokio::fs::remove_dir_all(root).await;
 }
@@ -105,6 +115,21 @@ async fn maintains_revisable_episode_and_hypothesis_projections() {
             ),
             None,
             false,
+            &[],
+        )
+        .await
+        .unwrap();
+    store
+        .record_message(
+            &message(
+                MemoryRole::Assistant,
+                "rev_followup",
+                "The temporal model should preserve overlapping topic membership.",
+                &Utc::now().to_rfc3339(),
+            ),
+            Some("rev_source"),
+            false,
+            &[],
         )
         .await
         .unwrap();
@@ -134,6 +159,44 @@ async fn maintains_revisable_episode_and_hypothesis_projections() {
         .unwrap();
     assert_eq!(revised.id, episode.id);
     assert_eq!(revised.state, EpisodeState::Active);
+    store
+        .attach_episode_messages(&episode.id, &["rev_followup".to_owned()])
+        .await
+        .unwrap();
+    let overlapping = store
+        .upsert_episode(EpisodeInput {
+            id: None,
+            title: "Overlapping thought structure".to_owned(),
+            summary: "One source message may support more than one useful line of thought."
+                .to_owned(),
+            state: EpisodeState::Forming,
+            source_revision_ids: vec!["rev_source".to_owned()],
+            parent_episode_ids: Vec::new(),
+        })
+        .await
+        .unwrap();
+    assert_eq!(
+        store.episode_revision_ids(&episode.id, 20).await.unwrap(),
+        vec!["rev_source".to_owned(), "rev_followup".to_owned()]
+    );
+    assert_eq!(
+        store
+            .episode_revision_ids(&overlapping.id, 20)
+            .await
+            .unwrap(),
+        vec!["rev_source".to_owned()]
+    );
+    let counts = store.episode_message_counts().await.unwrap();
+    assert_eq!(counts[&episode.id], 2);
+    assert_eq!(counts[&overlapping.id], 1);
+    store
+        .record_retraction(&["rev_followup".to_owned()])
+        .await
+        .unwrap();
+    assert_eq!(
+        store.episode_revision_ids(&episode.id, 20).await.unwrap(),
+        vec!["rev_source".to_owned()]
+    );
 
     store
         .upsert_hypothesis(HypothesisInput {
@@ -176,6 +239,7 @@ async fn schedules_a_candidate_follow_up_without_publishing_it() {
             ),
             None,
             false,
+            &[],
         )
         .await
         .unwrap();
@@ -192,6 +256,19 @@ async fn schedules_a_candidate_follow_up_without_publishing_it() {
         .unwrap();
     assert_eq!(follow_up.status, "pending");
     assert!(store.due_follow_ups().await.unwrap().is_empty());
+    store
+        .cancel_follow_ups(
+            std::slice::from_ref(&follow_up.id),
+            "superseded_by_continuing_user_burst",
+        )
+        .await
+        .unwrap();
+    let canceled = store.follow_ups(1).await.unwrap();
+    assert_eq!(canceled[0].status, "canceled");
+    assert_eq!(
+        canceled[0].outcome.as_deref(),
+        Some("superseded_by_continuing_user_burst")
+    );
 
     let _ = tokio::fs::remove_dir_all(root).await;
 }
@@ -215,6 +292,7 @@ async fn episode_parents_form_an_acyclic_auditable_graph() {
             ),
             None,
             false,
+            &[],
         )
         .await
         .unwrap();

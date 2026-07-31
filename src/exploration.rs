@@ -81,23 +81,43 @@ impl Default for ExplorationSnapshot {
 
 #[derive(Clone, Copy, Debug)]
 enum ExplorationTrigger {
-    Manual,
+    Manual { bypass_token_limit: bool },
     ConversationHunch,
+    DeferredFollowUp,
 }
 
 impl ExplorationTrigger {
     fn as_str(self) -> &'static str {
         match self {
-            Self::Manual => "manual",
+            Self::Manual { .. } => "manual",
             Self::ConversationHunch => "conversation_hunch",
+            Self::DeferredFollowUp => "deferred_follow_up",
         }
     }
 
     fn preparation_label(self) -> &'static str {
         match self {
-            Self::Manual => "准备自主探索",
+            Self::Manual { .. } => "准备自主探索",
             Self::ConversationHunch => "准备跟进刚才留下的问题",
+            Self::DeferredFollowUp => "准备重新看看之前留下的话题",
         }
+    }
+
+    fn bypasses_quiet_hours(self) -> bool {
+        matches!(self, Self::Manual { .. } | Self::ConversationHunch)
+    }
+
+    fn bypasses_token_limit(self) -> bool {
+        matches!(
+            self,
+            Self::Manual {
+                bypass_token_limit: true
+            }
+        )
+    }
+
+    fn bypasses_message_limit(self) -> bool {
+        matches!(self, Self::Manual { .. })
     }
 }
 
@@ -141,13 +161,21 @@ impl ExplorationHandle {
         self.state.read().await.clone()
     }
 
-    pub fn trigger(&self) -> bool {
-        self.trigger.try_send(ExplorationTrigger::Manual).is_ok()
+    pub fn trigger(&self, bypass_token_limit: bool) -> bool {
+        self.trigger
+            .try_send(ExplorationTrigger::Manual { bypass_token_limit })
+            .is_ok()
     }
 
     pub fn trigger_conversation_hunch(&self) -> bool {
         self.trigger
             .try_send(ExplorationTrigger::ConversationHunch)
+            .is_ok()
+    }
+
+    pub fn trigger_follow_up(&self) -> bool {
+        self.trigger
+            .try_send(ExplorationTrigger::DeferredFollowUp)
             .is_ok()
     }
 }
@@ -201,6 +229,9 @@ async fn run_scheduler(
             now,
             scheduled_at,
             pending_trigger.is_some(),
+            pending_trigger.is_some_and(ExplorationTrigger::bypasses_quiet_hours),
+            pending_trigger.is_some_and(ExplorationTrigger::bypasses_token_limit),
+            pending_trigger.is_some_and(ExplorationTrigger::bypasses_message_limit),
         );
 
         match gate {
@@ -269,6 +300,9 @@ fn evaluate_gate(
     now: DateTime<Utc>,
     scheduled_at: DateTime<Utc>,
     force_due: bool,
+    bypass_quiet_hours: bool,
+    bypass_token_limit: bool,
+    bypass_message_limit: bool,
 ) -> Gate {
     if !config.enabled {
         return Gate::Wait {
@@ -282,25 +316,28 @@ fn evaluate_gate(
             until: None,
         };
     }
-    if config.daily_token_limit > 0 && usage.autonomous_tokens_today >= config.daily_token_limit {
+    if !bypass_token_limit
+        && config.daily_token_limit > 0
+        && usage.autonomous_tokens_today >= config.daily_token_limit
+    {
         return Gate::Wait {
             phase: ExplorationPhase::TokenLimit,
             until: Some(next_local_day_start(now)),
         };
     }
-    if usage.autonomous_messages_today >= config.daily_interrupt_limit as u64 {
+    if !bypass_message_limit
+        && usage.autonomous_messages_today >= config.daily_interrupt_limit as u64
+    {
         return Gate::Wait {
             phase: ExplorationPhase::MessageLimit,
             until: Some(next_local_day_start(now)),
         };
     }
-    if !force_due {
-        if let Some(quiet_end) = quiet_end(now, &config.quiet_hours) {
-            return Gate::Wait {
-                phase: ExplorationPhase::QuietHours,
-                until: Some(quiet_end),
-            };
-        }
+    if !bypass_quiet_hours && let Some(quiet_end) = quiet_end(now, &config.quiet_hours) {
+        return Gate::Wait {
+            phase: ExplorationPhase::QuietHours,
+            until: Some(quiet_end),
+        };
     }
     if force_due || now >= scheduled_at {
         Gate::Run
@@ -418,6 +455,11 @@ async fn run_once(
 
     let published = if let Some(text) = outcome.message {
         let mut input_revision_ids = outcome.context_revision_ids;
+        let surfaced_hunch_revision_ids = outcome
+            .hunch_revisions
+            .iter()
+            .map(|reference| reference.revision_id.clone())
+            .collect::<Vec<_>>();
         input_revision_ids.extend(
             recent_messages
                 .iter()
@@ -433,12 +475,25 @@ async fn run_once(
                 Some(outcome.metadata),
                 MessageLinks {
                     responds_to: None,
+                    continues_from: None,
                     input_revision_ids,
+                    surfaced_hunch_revision_ids,
+                    quotes: Vec::new(),
+                    topic: None,
                 },
             )
             .await?;
+        for reference in outcome.hunch_revisions {
+            curiosity
+                .mark_surfaced(
+                    &reference.page_id,
+                    &reference.revision_id,
+                    &stored.page.revision_id,
+                )
+                .await?;
+        }
         reflection
-            .record_message(&stored.entry, None, false)
+            .record_message(&stored.entry, None, false, &[])
             .await?;
         Some(stored.entry)
     } else {
@@ -485,11 +540,15 @@ fn exploration_working_context(
             .to_owned(),
         match trigger {
             Some(ExplorationTrigger::ConversationHunch) => {
-                "Wake reason: the preceding conversation created or revised a Hunch. Inspect the freshest active Hunch and decide whether following it now can produce new evidence or a better question. This is an opportunity, not a requirement to search or message."
+                "Wake reason: the preceding conversation opened a new Hunch. Decide whether following it now can produce new evidence or a better question. This is an opportunity, not a requirement to search or message."
                     .to_owned()
             }
-            Some(ExplorationTrigger::Manual) => {
+            Some(ExplorationTrigger::Manual { .. }) => {
                 "Wake reason: the user explicitly requested an exploration cycle.".to_owned()
+            }
+            Some(ExplorationTrigger::DeferredFollowUp) => {
+                "Wake reason: a deferred conversational continuation has reached its earliest useful time. Reconsider it against everything said since it was scheduled. Continue only if it is still live and can enter the present conversation naturally; otherwise remain silent."
+                    .to_owned()
             }
             None => "Wake reason: scheduled exploration cycle.".to_owned(),
         },
@@ -508,7 +567,8 @@ fn exploration_working_context(
             .unwrap_or("conversation");
         let content = entry.content.chars().take(900).collect::<String>();
         lines.push(format!(
-            "<message role=\"{role}\" origin=\"{origin}\">{content}</message>"
+            "<message role=\"{role}\" origin=\"{origin}\" at=\"{}\">{content}</message>",
+            entry.at
         ));
     }
     lines.push("</recent-conversation>".to_owned());
@@ -623,8 +683,11 @@ fn timestamp(value: DateTime<Utc>) -> String {
 mod tests {
     use chrono::{DateTime, TimeZone, Utc};
 
-    use super::{quiet_end, today_started_at};
-    use crate::autonomy::QuietHours;
+    use super::{ExplorationPhase, Gate, evaluate_gate, quiet_end, today_started_at};
+    use crate::{
+        autonomy::{AutonomyConfig, QuietHours},
+        usage::UsageHeadline,
+    };
 
     #[test]
     fn daily_boundary_is_an_rfc3339_timestamp() {
@@ -645,5 +708,54 @@ mod tests {
             )
             .is_none()
         );
+    }
+
+    #[test]
+    fn only_a_confirmed_manual_run_bypasses_the_daily_token_limit() {
+        let mut config = AutonomyConfig::default();
+        config.enabled = true;
+        config.daily_token_limit = 100;
+        config.daily_interrupt_limit = 1;
+        config.quiet_hours.enabled = false;
+        let usage = UsageHeadline {
+            total_tokens: 1_000,
+            autonomous_tokens_today: 100,
+            autonomous_messages_today: 1,
+            reflection_tokens_today: 0,
+        };
+        let now = Utc.with_ymd_and_hms(2026, 7, 31, 8, 0, 0).unwrap();
+        let scheduled_at = now - chrono::Duration::minutes(1);
+
+        assert!(matches!(
+            evaluate_gate(
+                &config,
+                true,
+                &usage,
+                now,
+                scheduled_at,
+                true,
+                true,
+                false,
+                true,
+            ),
+            Gate::Wait {
+                phase: ExplorationPhase::TokenLimit,
+                ..
+            }
+        ));
+        assert!(matches!(
+            evaluate_gate(
+                &config,
+                true,
+                &usage,
+                now,
+                scheduled_at,
+                true,
+                true,
+                true,
+                true,
+            ),
+            Gate::Run
+        ));
     }
 }
