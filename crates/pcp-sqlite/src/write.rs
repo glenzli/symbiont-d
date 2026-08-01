@@ -501,7 +501,7 @@ pub(crate) fn insert_revision(
     Ok(())
 }
 
-fn insert_relation(
+pub(crate) fn insert_relation(
     transaction: &Transaction<'_>,
     from_revision_id: &str,
     relation_type: &str,

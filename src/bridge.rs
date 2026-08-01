@@ -7,7 +7,7 @@ use std::{
 
 use anyhow::{Context, Result};
 use chrono::{SecondsFormat, Utc};
-use pcp_core::{SearchFilters, SearchMode, SearchPagesRequest};
+use pcp_core::{Projection, SearchFilters, SearchMode, SearchPagesRequest};
 use serde::{Deserialize, Serialize};
 use tokio::{
     fs,
@@ -356,6 +356,7 @@ impl CodexBridge {
                     query: query.to_owned(),
                     scopes: Vec::new(),
                     mode: SearchMode::Text,
+                    projections: vec![Projection::Summary, Projection::Payload],
                     filters: SearchFilters::default(),
                     limit: MAX_RECALLS,
                     cursor: None,

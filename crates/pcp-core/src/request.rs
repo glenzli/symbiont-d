@@ -101,11 +101,17 @@ pub struct SearchPagesRequest {
     pub query: String,
     pub scopes: Vec<String>,
     pub mode: SearchMode,
+    #[serde(default = "default_search_projections")]
+    pub projections: Vec<Projection>,
     #[serde(default)]
     pub filters: SearchFilters,
     pub limit: u32,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cursor: Option<String>,
+}
+
+pub fn default_search_projections() -> Vec<Projection> {
+    vec![Projection::Summary, Projection::Payload, Projection::Facets]
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]

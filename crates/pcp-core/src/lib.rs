@@ -10,5 +10,5 @@ pub use model::{
 pub use request::{
     AssessPageValidityRequest, CreateScopeRequest, InitialRelation, LinkPagesRequest,
     ReadPagesRequest, RevisePageRequest, SearchFilters, SearchPagesRequest, WritePageRequest,
-    WriteSummaryRequest,
+    WriteSummaryRequest, default_search_projections,
 };

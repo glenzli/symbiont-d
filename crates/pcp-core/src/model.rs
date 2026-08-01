@@ -73,7 +73,6 @@ impl LifecycleStatus {
 pub enum SearchMode {
     Auto,
     Exact,
-    Summary,
     Text,
     Graph,
     Temporal,
@@ -84,7 +83,6 @@ impl SearchMode {
         match self {
             Self::Auto => "auto",
             Self::Exact => "exact",
-            Self::Summary => "summary",
             Self::Text => "text",
             Self::Graph => "graph",
             Self::Temporal => "temporal",
@@ -92,7 +90,7 @@ impl SearchMode {
     }
 }
 
-#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[derive(Clone, Debug, Deserialize, Eq, Hash, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Projection {
     Manifest,
@@ -247,6 +245,7 @@ pub struct Relation {
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct PageSummary {
+    pub summary_page_id: String,
     pub summary_revision_id: String,
     pub target_revision_id: String,
     pub content: String,
@@ -361,6 +360,7 @@ pub struct WriteResult {
 #[serde(rename_all = "camelCase")]
 pub struct WriteSummaryResult {
     pub target_revision_id: String,
+    pub summary_page_id: String,
     pub summary_revision_id: String,
     pub created: bool,
 }

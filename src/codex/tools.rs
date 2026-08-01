@@ -672,7 +672,7 @@ impl SymbiontTools {
                     {
                         "type": "function",
                         "name": "search_pages",
-                        "description": "Find candidate Page Revisions. summary searches model-written routing abstracts and accepts an empty query to browse the recent index; text is lexical payload/facet search; temporal browses recent Revisions; graph follows one-hop Relations and provenance. Omit scopes unless intentionally narrowing. Results are candidates, not universal relevance scores.",
+                        "description": "Find candidate Page Revisions. mode controls matching: text is lexical, exact is literal, temporal browses recent Revisions, and graph follows one-hop Relations and provenance. projections independently choose compact Summary index, Payload Detail, and/or Facets; prefer Summary for broad recall, then read selected Detail. Omit scopes unless intentionally narrowing. Results are candidates, not universal relevance scores.",
                         "inputSchema": {
                             "type": "object",
                             "properties": {
@@ -684,7 +684,15 @@ impl SymbiontTools {
                                 },
                                 "mode": {
                                     "type": "string",
-                                    "enum": ["auto", "exact", "summary", "text", "graph", "temporal"]
+                                    "enum": ["auto", "exact", "text", "graph", "temporal"]
+                                },
+                                "projections": {
+                                    "type": "array",
+                                    "items": {
+                                        "type": "string",
+                                        "enum": ["summary", "payload", "facets"]
+                                    },
+                                    "description": "Search surfaces. Defaults to summary, payload, and facets in that routing order."
                                 },
                                 "filters": {
                                     "type": "object",
@@ -789,7 +797,7 @@ impl SymbiontTools {
                     {
                         "type": "function",
                         "name": "write_summary",
-                        "description": "Write or revise a concise routing Summary for one exact Page Revision. Use only when long or dense content benefits future recall. Preserve discriminating concepts, decisions, uncertainty, and searchable terms; do not replace Detail.",
+                        "description": "Write or revise a 120-600 character routing Summary for one exact Page Revision. Use only when long or dense content can be compressed meaningfully for future recall. Preserve discriminating concepts, decisions, uncertainty, and searchable terms; do not replace or retell Detail.",
                         "inputSchema": {
                             "type": "object",
                             "properties": {
@@ -1501,6 +1509,7 @@ impl SymbiontTools {
                             .and_then(Value::as_str)
                             .unwrap_or("auto"),
                     )?,
+                    projections: parse_search_projections(arguments.get("projections"))?,
                     filters: parse_search_filters(arguments.get("filters"))?,
                     limit: integer(arguments, "limit", 12).clamp(1, 50) as u32,
                     cursor: optional_text(arguments, "cursor").map(str::to_owned),
@@ -1728,12 +1737,27 @@ fn parse_search_mode(value: &str) -> Result<SearchMode> {
     match value {
         "auto" => Ok(SearchMode::Auto),
         "exact" => Ok(SearchMode::Exact),
-        "summary" => Ok(SearchMode::Summary),
         "text" => Ok(SearchMode::Text),
         "graph" => Ok(SearchMode::Graph),
         "temporal" => Ok(SearchMode::Temporal),
         other => anyhow::bail!("unknown PCP search mode: {other}"),
     }
+}
+
+fn parse_search_projections(value: Option<&Value>) -> Result<Vec<Projection>> {
+    let Some(value) = value else {
+        return Ok(pcp_core::default_search_projections());
+    };
+    let projections = parse_projections(Some(value))?;
+    if projections.iter().any(|projection| {
+        !matches!(
+            projection,
+            Projection::Summary | Projection::Payload | Projection::Facets
+        )
+    }) {
+        anyhow::bail!("PCP search projections support summary, payload, and facets only");
+    }
+    Ok(projections)
 }
 
 fn parse_lifecycle(value: &str) -> Result<LifecycleStatus> {

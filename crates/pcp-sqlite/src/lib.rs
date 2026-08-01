@@ -5,6 +5,7 @@ mod schema;
 mod search;
 mod store;
 mod summary;
+mod summary_migration;
 mod validity;
 mod write;
 

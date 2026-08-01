@@ -543,7 +543,8 @@ async fn pcp_tools_write_search_and_read_through_the_dynamic_bridge() {
             "tool": "search_pages",
             "arguments": {
                 "query": "semantic observatory",
-                "mode": "summary"
+                "mode": "text",
+                "projections": ["summary"]
             }
         }))
         .await;
@@ -649,7 +650,13 @@ async fn pcp_tools_write_search_and_read_through_the_dynamic_bridge() {
         .await;
     assert_eq!(graph.response["success"], true);
     let graph_json = tool_content_json(&graph.response);
-    assert_eq!(graph_json["hits"][0]["revisionId"], derived_revision_id);
+    assert!(
+        graph_json["hits"]
+            .as_array()
+            .expect("graph hits")
+            .iter()
+            .any(|hit| hit["revisionId"] == derived_revision_id)
+    );
 
     let _ = tokio::fs::remove_dir_all(root).await;
 }

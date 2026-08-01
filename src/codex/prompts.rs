@@ -258,9 +258,10 @@ pub(super) fn summary_maintenance_prompt(
         "Maintain the sparse PCP Summary index for exactly `{target_revision_id}`. Read that \
          Revision's payload and facets. Decide whether its length and semantic density justify a \
          reusable routing Summary. If yes, call `pcp.write_summary` for that exact Revision with a \
-         compact abstract that preserves discriminating concepts, decisions, uncertainty, names, \
-         and searchable aliases. It must help a later model decide whether to read Detail; it is \
-         not evidence and not a retelling. If no Summary is worthwhile, do not write one. Do not \
+         120-600 character routing abstract that preserves discriminating concepts, decisions, \
+         uncertainty, names, and searchable aliases. It must help a later model decide whether to \
+         read Detail; it is not evidence, a retelling, or a shorter copy of the payload. If the \
+         content cannot be compressed meaningfully, do not write one. Do not \
          search the web, create aggregate Pages, modify user profile, or address the user. After \
          the decision, return exactly `{completion_marker}`."
     )

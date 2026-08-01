@@ -27,8 +27,8 @@ impl SqlitePcpStore {
                     format!("create PCP database directory {}", parent.display())
                 })?;
             }
-            let connection = open_connection(&path_for_open)?;
-            schema::initialize(&connection)?;
+            let mut connection = open_connection(&path_for_open)?;
+            schema::initialize(&mut connection)?;
             schema::owner_id(&connection)
         })
         .await
@@ -46,7 +46,6 @@ impl SqlitePcpStore {
             search_modes: vec![
                 SearchMode::Auto,
                 SearchMode::Exact,
-                SearchMode::Summary,
                 SearchMode::Text,
                 SearchMode::Graph,
                 SearchMode::Temporal,

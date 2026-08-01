@@ -42,6 +42,7 @@ async fn main() -> Result<()> {
                     query,
                     scopes,
                     mode,
+                    projections: pcp_core::default_search_projections(),
                     filters: SearchFilters::default(),
                     limit: 20,
                     cursor: None,
@@ -110,6 +111,7 @@ async fn export_pages(store: &SqlitePcpStore, scopes: Vec<String>) -> Result<Vec
                 query: String::new(),
                 scopes: scopes.clone(),
                 mode: SearchMode::Temporal,
+                projections: vec![Projection::Payload, Projection::Facets],
                 filters: SearchFilters::default(),
                 limit: 50,
                 cursor: cursor.clone(),
@@ -153,7 +155,6 @@ fn parse_mode(value: &str) -> Result<SearchMode> {
     match value {
         "auto" => Ok(SearchMode::Auto),
         "exact" => Ok(SearchMode::Exact),
-        "summary" => Ok(SearchMode::Summary),
         "text" => Ok(SearchMode::Text),
         "graph" => Ok(SearchMode::Graph),
         "temporal" => Ok(SearchMode::Temporal),
@@ -168,6 +169,6 @@ fn print_json(value: &impl serde::Serialize) -> Result<()> {
 
 fn print_help() {
     println!(
-        "pcp commands:\n  describe\n  scopes [query]\n  search <query> [auto|exact|text|summary|graph|temporal]\n  read <revision-id>\n  export\n  doctor"
+        "pcp commands:\n  describe\n  scopes [query]\n  search <query> [auto|exact|text|graph|temporal]\n  read <revision-id>\n  export\n  doctor"
     );
 }

@@ -1,7 +1,7 @@
 use anyhow::{Context, Result};
 use rusqlite::Connection;
 
-pub(crate) fn initialize(connection: &Connection) -> Result<()> {
+pub(crate) fn initialize(connection: &mut Connection) -> Result<()> {
     connection
         .execute_batch(
             r#"
@@ -71,6 +71,7 @@ pub(crate) fn initialize(connection: &Connection) -> Result<()> {
             CREATE TABLE IF NOT EXISTS pcp_summaries (
                 summary_revision_id TEXT PRIMARY KEY,
                 target_revision_id TEXT NOT NULL REFERENCES pcp_revisions(revision_id),
+                summary_page_id TEXT REFERENCES pcp_pages(page_id),
                 previous_summary_revision_id TEXT REFERENCES pcp_summaries(summary_revision_id),
                 content TEXT NOT NULL,
                 actor_type TEXT NOT NULL,
@@ -206,6 +207,8 @@ pub(crate) fn initialize(connection: &Connection) -> Result<()> {
         )
         .context("initialize PCP schema")?;
 
+    crate::summary_migration::migrate(connection)?;
+
     connection
         .execute(
             "
@@ -226,4 +229,106 @@ pub(crate) fn owner_id(connection: &Connection) -> Result<String> {
             |row| row.get(0),
         )
         .context("read PCP owner identity")
+}
+
+#[cfg(test)]
+mod tests {
+    use rusqlite::Connection;
+
+    use super::initialize;
+
+    #[test]
+    fn migrates_legacy_summary_sidecars_into_the_page_dag() {
+        let mut connection = Connection::open_in_memory().expect("open legacy database");
+        connection
+            .execute_batch(
+                r#"
+                CREATE TABLE pcp_scopes (
+                    namespace TEXT PRIMARY KEY, owner_id TEXT NOT NULL,
+                    scope_type TEXT NOT NULL, display_name TEXT NOT NULL,
+                    description TEXT, parent_namespace TEXT, visibility TEXT NOT NULL,
+                    created_at TEXT NOT NULL, updated_at TEXT NOT NULL
+                );
+                CREATE TABLE pcp_pages (
+                    page_id TEXT PRIMARY KEY, current_revision_id TEXT, created_at TEXT NOT NULL
+                );
+                CREATE TABLE pcp_revisions (
+                    revision_id TEXT PRIMARY KEY,
+                    page_id TEXT NOT NULL REFERENCES pcp_pages(page_id),
+                    owner_id TEXT NOT NULL, namespace TEXT NOT NULL REFERENCES pcp_scopes(namespace),
+                    visibility TEXT NOT NULL, lifecycle_status TEXT NOT NULL,
+                    created_at TEXT NOT NULL, observed_at TEXT, valid_from TEXT, valid_to TEXT,
+                    actor_type TEXT NOT NULL, actor_id TEXT NOT NULL,
+                    payload_media_type TEXT, payload_content TEXT,
+                    source_refs_json TEXT NOT NULL, facets_json TEXT,
+                    provenance_json TEXT NOT NULL
+                );
+                CREATE TABLE pcp_summaries (
+                    summary_revision_id TEXT PRIMARY KEY,
+                    target_revision_id TEXT NOT NULL REFERENCES pcp_revisions(revision_id),
+                    previous_summary_revision_id TEXT REFERENCES pcp_summaries(summary_revision_id),
+                    content TEXT NOT NULL, actor_type TEXT NOT NULL, actor_id TEXT NOT NULL,
+                    created_at TEXT NOT NULL, tool_or_model TEXT, provenance_json TEXT NOT NULL
+                );
+                CREATE TABLE pcp_summary_heads (
+                    target_revision_id TEXT PRIMARY KEY REFERENCES pcp_revisions(revision_id),
+                    current_summary_revision_id TEXT NOT NULL REFERENCES pcp_summaries(summary_revision_id)
+                );
+
+                INSERT INTO pcp_scopes VALUES (
+                    'conversation:test', 'usr_test', 'conversation', 'Test', NULL, NULL,
+                    'private', '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z'
+                );
+                INSERT INTO pcp_pages VALUES ('pg_target', 'rev_target', '2026-01-01T00:00:00Z');
+                INSERT INTO pcp_revisions VALUES (
+                    'rev_target', 'pg_target', 'usr_test', 'conversation:test', 'private',
+                    'active', '2026-01-01T00:00:00Z', NULL, NULL, NULL,
+                    'user', 'usr_test', 'text/markdown', 'Long target detail', '[]',
+                    '{"kind":"conversation_event"}', '[]'
+                );
+                INSERT INTO pcp_summaries VALUES (
+                    'sumrev_legacy', 'rev_target', NULL, 'Compact legacy route',
+                    'model', 'model:test', '2026-01-02T00:00:00Z', 'small-model',
+                    '[{"operation":"summarize","actor":{"actorType":"model","actorId":"model:test"},"timestamp":"2026-01-02T00:00:00Z","inputRevisionIds":["rev_target"],"toolOrModel":"small-model"}]'
+                );
+                INSERT INTO pcp_summary_heads VALUES ('rev_target', 'sumrev_legacy');
+                "#,
+            )
+            .expect("seed legacy Summary sidecar");
+
+        initialize(&mut connection).expect("migrate legacy Summary");
+        initialize(&mut connection).expect("repeat migration idempotently");
+
+        let summary_page_id: String = connection
+            .query_row(
+                "SELECT summary_page_id FROM pcp_summaries WHERE summary_revision_id = 'sumrev_legacy'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("read migrated Summary Page id");
+        let current_revision_id: String = connection
+            .query_row(
+                "SELECT current_revision_id FROM pcp_pages WHERE page_id = ?1",
+                [&summary_page_id],
+                |row| row.get(0),
+            )
+            .expect("read migrated Summary Page");
+        assert_eq!(current_revision_id, "sumrev_legacy");
+        let summarizes_edges: i64 = connection
+            .query_row(
+                "SELECT count(*) FROM pcp_relations WHERE from_revision_id = 'sumrev_legacy' AND relation_type = 'summarizes' AND to_revision_id = 'rev_target'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("count migrated summarizes edge");
+        assert_eq!(summarizes_edges, 1);
+        let provenance_edges: i64 = connection
+            .query_row(
+                "SELECT count(*) FROM pcp_provenance_inputs WHERE derived_revision_id = 'sumrev_legacy' AND input_revision_id = 'rev_target'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("count migrated provenance edge");
+        assert_eq!(provenance_edges, 1);
+    }
 }

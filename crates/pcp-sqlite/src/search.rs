@@ -1,3 +1,5 @@
+use std::collections::HashSet;
+
 use anyhow::{Context, Result};
 use pcp_core::{
     LifecycleStatus, PageValidity, PageValidityHint, Projection, SearchHit, SearchMode,
@@ -18,17 +20,28 @@ impl SqlitePcpStore {
             anyhow::bail!("PCP search requires at least one authorized scope");
         }
         request.limit = request.limit.clamp(1, MAX_SEARCH_RESULTS);
+        if request.projections.is_empty() {
+            request.projections = pcp_core::default_search_projections();
+        }
         let offset = parse_cursor(request.cursor.as_deref())?;
         self.run("page search", move |connection| {
             if request.mode == SearchMode::Auto {
-                let text = search_once(
+                let primary_mode = if request.query.trim().is_empty() {
+                    SearchMode::Temporal
+                } else {
+                    SearchMode::Text
+                };
+                let primary = search_once(
                     &connection,
                     &request,
-                    SearchMode::Text,
+                    primary_mode,
                     offset,
                     request.limit as usize,
                 );
-                if let Ok(result) = text
+                if request.query.trim().is_empty() {
+                    return primary;
+                }
+                if let Ok(result) = primary
                     && !result.hits.is_empty()
                 {
                     return Ok(result);
@@ -63,13 +76,75 @@ fn search_once(
     if mode == SearchMode::Graph {
         return search_graph(connection, request, offset, limit);
     }
-    if mode == SearchMode::Summary {
-        return search_summaries(connection, request, offset, limit);
+    if mode == SearchMode::Auto {
+        unreachable!();
     }
+    search_surfaces(connection, request, mode, offset, limit)
+}
+
+fn search_surfaces(
+    connection: &Connection,
+    request: &SearchPagesRequest,
+    mode: SearchMode,
+    offset: usize,
+    limit: usize,
+) -> Result<SearchResult> {
+    let fetch_limit = offset.saturating_add(limit).saturating_add(1);
+    let mut candidates = Vec::new();
+    let projections = request.projections.iter().collect::<HashSet<_>>();
+    if projections.contains(&Projection::Summary) {
+        candidates
+            .extend(search_summaries(connection, request, mode.clone(), 0, fetch_limit)?.hits);
+    }
+    if projections.contains(&Projection::Payload) {
+        candidates.extend(
+            search_revision_surface(connection, request, mode.clone(), "payload", 0, fetch_limit)?
+                .hits,
+        );
+    }
+    if projections.contains(&Projection::Facets) {
+        candidates.extend(
+            search_revision_surface(connection, request, mode, "facets", 0, fetch_limit)?.hits,
+        );
+    }
+    if candidates.is_empty()
+        && !request.projections.iter().any(|projection| {
+            matches!(
+                projection,
+                Projection::Summary | Projection::Payload | Projection::Facets
+            )
+        })
+    {
+        anyhow::bail!("PCP search projections must include summary, payload, or facets");
+    }
+
+    let mut seen = HashSet::new();
+    candidates.retain(|hit| seen.insert(hit.revision_id.clone()));
+    let has_more = candidates.len() > offset.saturating_add(limit);
+    let hits = candidates.into_iter().skip(offset).take(limit).collect();
+    Ok(SearchResult {
+        hits,
+        next_cursor: has_more.then(|| (offset + limit).to_string()),
+    })
+}
+
+fn search_revision_surface(
+    connection: &Connection,
+    request: &SearchPagesRequest,
+    mode: SearchMode,
+    surface: &'static str,
+    offset: usize,
+    limit: usize,
+) -> Result<SearchResult> {
+    let (content_column, matched_projection) = match surface {
+        "payload" => ("r.payload_content", "payload"),
+        "facets" => ("r.facets_json", "facets"),
+        _ => unreachable!(),
+    };
     let mut values = Vec::<SqlValue>::new();
     let mut sql = format!(
         "SELECT {REVISION_COLUMNS},
-                substr(COALESCE(r.payload_content, r.facets_json, ''), 1, 600),
+                substr(COALESCE({content_column}, ''), 1, 600),
                 EXISTS (
                     SELECT 1 FROM pcp_summary_heads summary_head
                     WHERE summary_head.target_revision_id = r.revision_id
@@ -88,39 +163,38 @@ fn search_once(
     append_lifecycle_filter(&mut sql, &mut values, request);
     append_time_filters(&mut sql, &mut values, request);
     append_relation_filter(&mut sql, &mut values, request);
+    sql.push_str(
+        " AND COALESCE(json_extract(r.facets_json, '$.kind'), '') <> 'summary_projection'",
+    );
 
     match mode {
         SearchMode::Text => {
             let fts = fts_query(&request.query)
                 .context("text search requires at least one searchable term")?;
-            sql.push_str(" AND pcp_revision_fts MATCH ?");
+            sql.push_str(if surface == "payload" {
+                " AND pcp_revision_fts.payload_content MATCH ?"
+            } else {
+                " AND pcp_revision_fts.facets_text MATCH ?"
+            });
             values.push(SqlValue::Text(fts));
         }
         SearchMode::Exact => {
             if !request.query.trim().is_empty() {
-                sql.push_str(
-                    " AND (
-                        instr(lower(COALESCE(r.payload_content, '')), lower(?)) > 0
-                        OR instr(lower(COALESCE(r.facets_json, '')), lower(?)) > 0
-                    )",
-                );
-                values.push(SqlValue::Text(request.query.trim().to_owned()));
+                sql.push_str(&format!(
+                    " AND instr(lower(COALESCE({content_column}, '')), lower(?)) > 0"
+                ));
                 values.push(SqlValue::Text(request.query.trim().to_owned()));
             }
         }
         SearchMode::Temporal => {
             if !request.query.trim().is_empty() {
-                sql.push_str(
-                    " AND (
-                        instr(lower(COALESCE(r.payload_content, '')), lower(?)) > 0
-                        OR instr(lower(COALESCE(r.facets_json, '')), lower(?)) > 0
-                    )",
-                );
-                values.push(SqlValue::Text(request.query.trim().to_owned()));
+                sql.push_str(&format!(
+                    " AND instr(lower(COALESCE({content_column}, '')), lower(?)) > 0"
+                ));
                 values.push(SqlValue::Text(request.query.trim().to_owned()));
             }
         }
-        SearchMode::Auto | SearchMode::Summary | SearchMode::Graph => unreachable!(),
+        SearchMode::Auto | SearchMode::Graph => unreachable!(),
     }
     if mode == SearchMode::Text {
         sql.push_str(
@@ -142,11 +216,7 @@ fn search_once(
         &sql,
         values,
         mode.as_str(),
-        if mode == SearchMode::Text {
-            "payload"
-        } else {
-            "payload_or_facets"
-        },
+        matched_projection,
         offset,
         limit,
     )
@@ -155,10 +225,16 @@ fn search_once(
 fn search_summaries(
     connection: &Connection,
     request: &SearchPagesRequest,
+    mode: SearchMode,
     offset: usize,
     limit: usize,
 ) -> Result<SearchResult> {
-    let fts = fts_query(&request.query);
+    let fts = (mode == SearchMode::Text)
+        .then(|| fts_query(&request.query))
+        .flatten();
+    if mode == SearchMode::Text && fts.is_none() {
+        anyhow::bail!("text search requires at least one searchable term");
+    }
     let mut values = Vec::<SqlValue>::new();
     let mut sql = format!(
         "SELECT {REVISION_COLUMNS},
@@ -185,6 +261,18 @@ fn search_summaries(
     append_lifecycle_filter(&mut sql, &mut values, request);
     append_time_filters(&mut sql, &mut values, request);
     append_relation_filter(&mut sql, &mut values, request);
+    sql.push_str(
+        " AND COALESCE(json_extract(r.facets_json, '$.kind'), '') NOT IN (
+            'symbiont_current_map',
+            'symbiont_open_loops',
+            'symbiont_profile_review',
+            'symbiont_hunch',
+            'user_orientation',
+            'conversation_checkpoint',
+            'image_asset',
+            'tombstone'
+        )",
+    );
     if let Some(fts) = fts {
         sql.push_str(
             " AND pcp_summary_fts MATCH ?
@@ -194,13 +282,23 @@ fn search_summaries(
         );
         values.push(SqlValue::Text(fts));
     } else {
+        if !request.query.trim().is_empty() {
+            sql.push_str(" AND instr(lower(summary.content), lower(?)) > 0");
+            values.push(SqlValue::Text(request.query.trim().to_owned()));
+        }
         sql.push_str(" ORDER BY COALESCE(r.observed_at, r.created_at) DESC, r.revision_id DESC");
     }
     sql.push_str(" LIMIT ? OFFSET ?");
     values.push(SqlValue::Integer((limit + 1) as i64));
     values.push(SqlValue::Integer(offset as i64));
     collect_hits(
-        connection, &sql, values, "summary", "summary", offset, limit,
+        connection,
+        &sql,
+        values,
+        mode.as_str(),
+        "summary",
+        offset,
+        limit,
     )
 }
 
@@ -520,7 +618,7 @@ fn fts_query(query: &str) -> Option<String> {
         .filter(|term| !term.is_empty())
         .map(|term| format!("\"{}\"", term.replace('"', "\"\"")))
         .collect::<Vec<_>>();
-    (!terms.is_empty()).then(|| terms.join(" OR "))
+    (!terms.is_empty()).then(|| terms.join(" AND "))
 }
 
 fn parse_cursor(cursor: Option<&str>) -> Result<usize> {

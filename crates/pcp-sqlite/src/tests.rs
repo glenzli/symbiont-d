@@ -6,6 +6,7 @@ use pcp_core::{
     RevisePageRequest, SearchFilters, SearchMode, SearchPagesRequest, SourceRef, ValidityStanding,
     WritePageRequest, WriteSummaryRequest,
 };
+use serde_json::json;
 
 use super::SqlitePcpStore;
 
@@ -73,6 +74,7 @@ async fn stores_searches_revises_and_links_pages() {
             query: "compactness products".to_owned(),
             scopes: vec![namespace.clone()],
             mode: SearchMode::Text,
+            projections: pcp_core::default_search_projections(),
             filters: SearchFilters::default(),
             limit: 10,
             cursor: None,
@@ -123,6 +125,7 @@ async fn stores_searches_revises_and_links_pages() {
             query: first.revision_id.clone(),
             scopes: vec![namespace.clone()],
             mode: SearchMode::Graph,
+            projections: pcp_core::default_search_projections(),
             filters: SearchFilters {
                 relation_types: vec!["derived_from".to_owned()],
                 ..SearchFilters::default()
@@ -140,6 +143,7 @@ async fn stores_searches_revises_and_links_pages() {
             query: revised.revision_id.clone(),
             scopes: vec![namespace.clone()],
             mode: SearchMode::Graph,
+            projections: pcp_core::default_search_projections(),
             filters: SearchFilters {
                 relation_types: vec!["derived_from".to_owned()],
                 ..SearchFilters::default()
@@ -184,6 +188,7 @@ async fn stores_searches_revises_and_links_pages() {
             query: second.revision_id,
             scopes: vec![namespace.clone()],
             mode: SearchMode::Graph,
+            projections: pcp_core::default_search_projections(),
             filters: SearchFilters::default(),
             limit: 10,
             cursor: None,
@@ -336,6 +341,7 @@ async fn backfills_the_provenance_graph_index() {
             query: source.revision_id,
             scopes: vec![namespace],
             mode: SearchMode::Graph,
+            projections: pcp_core::default_search_projections(),
             filters: SearchFilters {
                 relation_types: vec!["derived_from".to_owned()],
                 ..SearchFilters::default()
@@ -394,6 +400,18 @@ async fn writes_searches_reads_and_revises_sparse_summaries() {
         )
         .await
         .expect("write page");
+    let mut operational = write_request(
+        &owner_id,
+        &namespace,
+        actor.clone(),
+        &"rolling current map ".repeat(20),
+        "summary:operational",
+    );
+    operational.facets = Some(json!({"kind": "symbiont_current_map"}));
+    store
+        .write_page(operational, vec![namespace.clone()])
+        .await
+        .expect("write operational context page");
     assert_eq!(
         store
             .next_summary_candidate(vec![namespace.clone()], 10)
@@ -436,13 +454,15 @@ async fn writes_searches_reads_and_revises_sparse_summaries() {
         .await
         .expect("repeat summary write");
     assert_eq!(duplicate.summary_revision_id, summary.summary_revision_id);
+    assert_eq!(duplicate.summary_page_id, summary.summary_page_id);
     assert!(!duplicate.created);
 
     let search = store
         .search_pages(SearchPagesRequest {
             query: "resource pool cancellation".to_owned(),
             scopes: vec![namespace.clone()],
-            mode: SearchMode::Summary,
+            mode: SearchMode::Text,
+            projections: vec![Projection::Summary],
             filters: SearchFilters::default(),
             limit: 10,
             cursor: None,
@@ -461,7 +481,8 @@ async fn writes_searches_reads_and_revises_sparse_summaries() {
         .search_pages(SearchPagesRequest {
             query: String::new(),
             scopes: vec![namespace.clone()],
-            mode: SearchMode::Summary,
+            mode: SearchMode::Temporal,
+            projections: vec![Projection::Summary],
             filters: SearchFilters::default(),
             limit: 10,
             cursor: None,
@@ -484,10 +505,71 @@ async fn writes_searches_reads_and_revises_sparse_summaries() {
     assert!(read[0].revision.payload.is_none());
     let projected = read[0].summary.as_ref().expect("summary projection");
     assert_eq!(projected.summary_revision_id, summary.summary_revision_id);
+    assert_eq!(projected.summary_page_id, summary.summary_page_id);
     assert_eq!(
         projected.provenance[0].input_revision_ids,
         vec![page.revision_id.clone()]
     );
+
+    let summary_detail = store
+        .read_pages(
+            ReadPagesRequest {
+                revision_ids: vec![summary.summary_revision_id.clone()],
+                projections: vec![
+                    Projection::Payload,
+                    Projection::Facets,
+                    Projection::Provenance,
+                    Projection::Relations,
+                ],
+                max_chars: 10_000,
+            },
+            vec![namespace.clone()],
+        )
+        .await
+        .expect("read Summary as an independent Page Revision");
+    assert_eq!(summary_detail[0].revision.page_id, summary.summary_page_id);
+    assert_eq!(
+        summary_detail[0].revision.payload.as_ref().unwrap().content,
+        projected.content
+    );
+    assert_eq!(
+        summary_detail[0].revision.facets.as_ref().unwrap()["kind"],
+        "summary_projection"
+    );
+    assert!(summary_detail[0].relations.iter().any(|relation| {
+        relation.relation_type == "summarizes" && relation.to_revision_id == page.revision_id
+    }));
+
+    let summary_graph = store
+        .search_pages(SearchPagesRequest {
+            query: summary.summary_revision_id.clone(),
+            scopes: vec![namespace.clone()],
+            mode: SearchMode::Graph,
+            projections: vec![Projection::Summary],
+            filters: SearchFilters {
+                relation_types: vec!["summarizes".to_owned()],
+                ..SearchFilters::default()
+            },
+            limit: 10,
+            cursor: None,
+        })
+        .await
+        .expect("follow Summary DAG edge");
+    assert_eq!(summary_graph.hits[0].revision_id, page.revision_id);
+
+    let weak_match = store
+        .search_pages(SearchPagesRequest {
+            query: "resource unrelated".to_owned(),
+            scopes: vec![namespace.clone()],
+            mode: SearchMode::Text,
+            projections: vec![Projection::Summary],
+            filters: SearchFilters::default(),
+            limit: 10,
+            cursor: None,
+        })
+        .await
+        .expect("require all lexical terms");
+    assert!(weak_match.hits.is_empty());
 
     let revised = store
         .write_summary(
@@ -507,6 +589,7 @@ async fn writes_searches_reads_and_revises_sparse_summaries() {
         .await
         .expect("revise summary");
     assert_ne!(revised.summary_revision_id, summary.summary_revision_id);
+    assert_eq!(revised.summary_page_id, summary.summary_page_id);
     assert!(
         store
             .next_summary_candidate(vec![namespace.clone()], 10)
@@ -781,6 +864,7 @@ async fn retracts_derived_pages_and_restores_preexisting_pages() {
             query: String::new(),
             scopes: vec![namespace.clone()],
             mode: SearchMode::Temporal,
+            projections: pcp_core::default_search_projections(),
             filters: SearchFilters::default(),
             limit: 20,
             cursor: None,
@@ -884,6 +968,7 @@ async fn validity_is_revisioned_and_routes_before_detail() {
             query: "runtime deferred intent".to_owned(),
             scopes: vec![namespace.clone()],
             mode: SearchMode::Text,
+            projections: pcp_core::default_search_projections(),
             filters: SearchFilters::default(),
             limit: 10,
             cursor: None,

@@ -2,13 +2,19 @@ use std::collections::HashSet;
 
 use anyhow::{Context, Result};
 use chrono::{SecondsFormat, Utc};
-use pcp_core::{ActorType, PageSummary, ProvenanceEvent, WriteSummaryRequest, WriteSummaryResult};
+use pcp_core::{
+    ActorType, PagePayload, PageSummary, ProvenanceEvent, WriteSummaryRequest, WriteSummaryResult,
+};
 use rusqlite::{Connection, OptionalExtension, Transaction, params};
+use serde_json::json;
 
-use crate::store::SqlitePcpStore;
+use crate::{
+    store::SqlitePcpStore,
+    write::{insert_relation, insert_revision},
+};
 
-pub(crate) const MAX_SUMMARY_CHARS: usize = 4_000;
-pub const SUMMARY_POLICY_VERSION: &str = "sparse-index-v1";
+pub(crate) const MAX_SUMMARY_CHARS: usize = 1_200;
+pub const SUMMARY_POLICY_VERSION: &str = "sparse-index-v2";
 
 impl SqlitePcpStore {
     pub async fn write_summary(
@@ -35,8 +41,9 @@ impl SqlitePcpStore {
                 return Ok(existing);
             }
 
-            let current = current_summary_revision(&transaction, &request.target_revision_id)?;
-            match (&current, &request.expected_summary_revision_id) {
+            let current = current_summary_identity(&transaction, &request.target_revision_id)?;
+            let current_revision_id = current.as_ref().map(|(revision_id, _)| revision_id);
+            match (current_revision_id, &request.expected_summary_revision_id) {
                 (None, None) => {}
                 (Some(current), Some(expected)) if current == expected => {}
                 (None, Some(expected)) => {
@@ -53,7 +60,20 @@ impl SqlitePcpStore {
             }
 
             let timestamp = now();
-            let summary_revision_id = random_id(&transaction, "sumrev_")?;
+            let summary_revision_id = random_id(&transaction, "rev_")?;
+            let summary_page_id = match current.as_ref() {
+                Some((_, page_id)) => page_id.clone(),
+                None => {
+                    let page_id = random_id(&transaction, "pg_")?;
+                    transaction
+                        .execute(
+                            "INSERT INTO pcp_pages (page_id, current_revision_id, created_at) VALUES (?1, NULL, ?2)",
+                            params![page_id, timestamp],
+                        )
+                        .context("create PCP Summary Page")?;
+                    page_id
+                }
+            };
             let provenance = complete_provenance(
                 request.provenance,
                 &request.target_revision_id,
@@ -64,21 +84,64 @@ impl SqlitePcpStore {
             ensure_provenance_access(&transaction, &provenance, &allowed_scopes)?;
             let provenance_json =
                 serde_json::to_string(&provenance).context("encode PCP Summary provenance")?;
+            let (owner_id, namespace, visibility): (String, String, String) = transaction
+                .query_row(
+                    "SELECT owner_id, namespace, visibility FROM pcp_revisions WHERE revision_id = ?1",
+                    [&request.target_revision_id],
+                    |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+                )
+                .context("read PCP Summary target metadata")?;
+            let content = request.content.trim().to_owned();
+            let payload = PagePayload {
+                media_type: "text/markdown".to_owned(),
+                content: content.clone(),
+            };
+            let facets = json!({
+                "kind": "summary_projection",
+                "targetRevisionId": request.target_revision_id,
+            });
+            insert_revision(
+                &transaction,
+                &summary_page_id,
+                &summary_revision_id,
+                &owner_id,
+                &namespace,
+                &visibility,
+                "active",
+                &timestamp,
+                None,
+                None,
+                None,
+                &request.created_by,
+                Some(&payload),
+                &[],
+                Some(&facets),
+                &provenance,
+            )?;
+            insert_relation(
+                &transaction,
+                &summary_revision_id,
+                "summarizes",
+                &request.target_revision_id,
+                &request.created_by,
+                &timestamp,
+            )?;
 
             transaction
                 .execute(
                     "
                     INSERT INTO pcp_summaries (
-                        summary_revision_id, target_revision_id,
+                        summary_revision_id, target_revision_id, summary_page_id,
                         previous_summary_revision_id, content, actor_type, actor_id,
                         created_at, tool_or_model, provenance_json
-                    ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)
+                    ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)
                     ",
                     params![
                         summary_revision_id,
                         request.target_revision_id,
-                        current,
-                        request.content.trim(),
+                        summary_page_id,
+                        current_revision_id,
+                        content,
                         request.created_by.actor_type.as_str(),
                         request.created_by.actor_id,
                         timestamp,
@@ -99,6 +162,12 @@ impl SqlitePcpStore {
                     params![request.target_revision_id, summary_revision_id],
                 )
                 .context("publish PCP Summary Revision")?;
+            transaction
+                .execute(
+                    "UPDATE pcp_pages SET current_revision_id = ?2 WHERE page_id = ?1",
+                    params![summary_page_id, summary_revision_id],
+                )
+                .context("publish PCP Summary Page Revision")?;
             transaction
                 .execute(
                     "
@@ -135,6 +204,7 @@ impl SqlitePcpStore {
             transaction.commit().context("commit PCP Summary write")?;
             Ok(WriteSummaryResult {
                 target_revision_id: request.target_revision_id,
+                summary_page_id,
                 summary_revision_id,
                 created: true,
             })
@@ -179,6 +249,17 @@ impl SqlitePcpStore {
                   AND r.lifecycle_status = 'active'
                   AND r.payload_media_type LIKE 'text/%'
                   AND length(COALESCE(r.payload_content, '')) >= ?
+                  AND COALESCE(json_extract(r.facets_json, '$.kind'), '') NOT IN (
+                      'summary_projection',
+                      'symbiont_current_map',
+                      'symbiont_open_loops',
+                      'symbiont_profile_review',
+                      'symbiont_hunch',
+                      'user_orientation',
+                      'conversation_checkpoint',
+                      'image_asset',
+                      'tombstone'
+                  )
                   AND summary.target_revision_id IS NULL
                   AND assessment.target_revision_id IS NULL
                 ORDER BY COALESCE(r.observed_at, r.created_at) DESC, r.revision_id DESC
@@ -245,7 +326,7 @@ pub(crate) fn current_summary(
     connection
         .query_row(
             "
-            SELECT s.summary_revision_id, s.target_revision_id, s.content,
+            SELECT s.summary_page_id, s.summary_revision_id, s.target_revision_id, s.content,
                    s.actor_type, s.actor_id, s.created_at, s.tool_or_model,
                    s.provenance_json
             FROM pcp_summary_heads h
@@ -271,19 +352,21 @@ fn validate_summary(request: &WriteSummaryRequest) -> Result<()> {
     Ok(())
 }
 
-fn current_summary_revision(
+fn current_summary_identity(
     transaction: &Transaction<'_>,
     target_revision_id: &str,
-) -> Result<Option<String>> {
+) -> Result<Option<(String, String)>> {
     transaction
         .query_row(
             "
-            SELECT current_summary_revision_id
-            FROM pcp_summary_heads
-            WHERE target_revision_id = ?1
+            SELECT h.current_summary_revision_id, s.summary_page_id
+            FROM pcp_summary_heads h
+            JOIN pcp_summaries s
+              ON s.summary_revision_id = h.current_summary_revision_id
+            WHERE h.target_revision_id = ?1
             ",
             [target_revision_id],
-            |row| row.get(0),
+            |row| Ok((row.get(0)?, row.get(1)?)),
         )
         .optional()
         .context("read current PCP Summary Revision")
@@ -300,15 +383,18 @@ fn lookup_idempotency(
     transaction
         .query_row(
             "
-            SELECT target_revision_id, result_summary_revision_id
-            FROM pcp_summary_idempotency
-            WHERE actor_id = ?1 AND idempotency_key = ?2
+            SELECT i.target_revision_id, s.summary_page_id, i.result_summary_revision_id
+            FROM pcp_summary_idempotency i
+            JOIN pcp_summaries s
+              ON s.summary_revision_id = i.result_summary_revision_id
+            WHERE i.actor_id = ?1 AND i.idempotency_key = ?2
             ",
             params![actor_id, key],
             |row| {
                 Ok(WriteSummaryResult {
                     target_revision_id: row.get(0)?,
-                    summary_revision_id: row.get(1)?,
+                    summary_page_id: row.get(1)?,
+                    summary_revision_id: row.get(2)?,
                     created: false,
                 })
             },
@@ -378,24 +464,25 @@ fn ensure_provenance_access(
 }
 
 fn summary_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<PageSummary> {
-    let actor_type_text: String = row.get(3)?;
+    let actor_type_text: String = row.get(4)?;
     let actor_type = ActorType::parse(&actor_type_text).ok_or_else(|| {
-        rusqlite::Error::InvalidColumnType(3, "actor_type".to_owned(), rusqlite::types::Type::Text)
+        rusqlite::Error::InvalidColumnType(4, "actor_type".to_owned(), rusqlite::types::Type::Text)
     })?;
-    let provenance_json: String = row.get(7)?;
+    let provenance_json: String = row.get(8)?;
     let provenance = serde_json::from_str(&provenance_json).map_err(|error| {
-        rusqlite::Error::FromSqlConversionFailure(7, rusqlite::types::Type::Text, Box::new(error))
+        rusqlite::Error::FromSqlConversionFailure(8, rusqlite::types::Type::Text, Box::new(error))
     })?;
     Ok(PageSummary {
-        summary_revision_id: row.get(0)?,
-        target_revision_id: row.get(1)?,
-        content: row.get(2)?,
+        summary_page_id: row.get(0)?,
+        summary_revision_id: row.get(1)?,
+        target_revision_id: row.get(2)?,
+        content: row.get(3)?,
         created_by: pcp_core::Actor {
             actor_type,
-            actor_id: row.get(4)?,
+            actor_id: row.get(5)?,
         },
-        created_at: row.get(5)?,
-        tool_or_model: row.get(6)?,
+        created_at: row.get(6)?,
+        tool_or_model: row.get(7)?,
         provenance,
     })
 }

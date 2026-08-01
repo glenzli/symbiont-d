@@ -139,6 +139,7 @@ impl SymbiontContextStore {
                 query: kind.stable_key().to_owned(),
                 scopes: vec![kind.namespace(&self.continuity).to_owned()],
                 mode: SearchMode::Exact,
+                projections: vec![Projection::Facets],
                 filters: SearchFilters::default(),
                 limit: 1,
                 cursor: None,
