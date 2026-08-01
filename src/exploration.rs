@@ -1,4 +1,11 @@
-use std::{sync::Arc, time::Duration};
+mod intent;
+
+pub use intent::{
+    ExplorationIntent, ExplorationIntentOrigin, ExplorationIntentQueue, ExplorationIntentReceiver,
+    ExplorationIntentStatus, NewExplorationIntent,
+};
+
+use std::{collections::VecDeque, sync::Arc, time::Duration};
 
 use anyhow::{Context, Result};
 use chrono::{DateTime, Days, Local, LocalResult, NaiveDateTime, NaiveTime, TimeZone, Utc};
@@ -13,6 +20,7 @@ use crate::{
     codex::{CodexClient, RuntimeEvent},
     compute::ComputeStore,
     continuity::{ContinuityHost, MessageLinks},
+    conversation::ConversationCoordinator,
     curiosity::CuriosityStore,
     memory::{MemoryEntry, MemoryRole},
     profile::{ProfileStore, SetupStatus},
@@ -81,35 +89,35 @@ impl Default for ExplorationSnapshot {
     }
 }
 
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Debug)]
 enum ExplorationTrigger {
     Manual { bypass_token_limit: bool },
-    ConversationHunch,
     DeferredFollowUp,
+    Intent(ExplorationIntent),
 }
 
 impl ExplorationTrigger {
-    fn as_str(self) -> &'static str {
+    fn as_str(&self) -> &'static str {
         match self {
             Self::Manual { .. } => "manual",
-            Self::ConversationHunch => "conversation_hunch",
             Self::DeferredFollowUp => "deferred_follow_up",
+            Self::Intent(_) => "thought_intent",
         }
     }
 
-    fn preparation_label(self) -> &'static str {
+    fn preparation_label(&self) -> &'static str {
         match self {
             Self::Manual { .. } => "准备自主探索",
-            Self::ConversationHunch => "准备跟进刚才留下的问题",
             Self::DeferredFollowUp => "准备重新看看之前留下的话题",
+            Self::Intent(_) => "准备跟进一个刚产生的探索问题",
         }
     }
 
-    fn bypasses_quiet_hours(self) -> bool {
-        matches!(self, Self::Manual { .. } | Self::ConversationHunch)
+    fn bypasses_quiet_hours(&self) -> bool {
+        matches!(self, Self::Manual { .. })
     }
 
-    fn bypasses_token_limit(self) -> bool {
+    fn bypasses_token_limit(&self) -> bool {
         matches!(
             self,
             Self::Manual {
@@ -118,8 +126,15 @@ impl ExplorationTrigger {
         )
     }
 
-    fn bypasses_message_limit(self) -> bool {
+    fn bypasses_message_limit(&self) -> bool {
         matches!(self, Self::Manual { .. })
+    }
+
+    fn intent(&self) -> Option<&ExplorationIntent> {
+        match self {
+            Self::Intent(intent) => Some(intent),
+            _ => None,
+        }
     }
 }
 
@@ -127,6 +142,7 @@ impl ExplorationTrigger {
 pub struct ExplorationHandle {
     state: Arc<RwLock<ExplorationSnapshot>>,
     trigger: mpsc::Sender<ExplorationTrigger>,
+    intents: Arc<ExplorationIntentQueue>,
 }
 
 impl ExplorationHandle {
@@ -140,9 +156,40 @@ impl ExplorationHandle {
         curiosity: Arc<CuriosityStore>,
         reflection: Arc<ReflectionStore>,
         usage: Arc<UsageStore>,
+        conversation: ConversationCoordinator,
+        intents: Arc<ExplorationIntentQueue>,
+        mut intent_receiver: ExplorationIntentReceiver,
     ) -> Self {
         let state = Arc::new(RwLock::new(ExplorationSnapshot::default()));
-        let (trigger, trigger_rx) = mpsc::channel(4);
+        let (trigger, trigger_rx) = mpsc::channel(32);
+        let intent_trigger = trigger.clone();
+        let intent_store = Arc::clone(&intents);
+        tokio::spawn(async move {
+            while let Some(id) = intent_receiver.recv().await {
+                let trigger = intent_trigger.clone();
+                let store = Arc::clone(&intent_store);
+                tokio::spawn(async move {
+                    let Some(intent) = store.get(&id).await else {
+                        return;
+                    };
+                    if intent.status != ExplorationIntentStatus::Queued {
+                        return;
+                    }
+                    if let Ok(not_before) = DateTime::parse_from_rfc3339(&intent.not_before) {
+                        let wait = (not_before.with_timezone(&Utc) - Utc::now())
+                            .to_std()
+                            .unwrap_or(Duration::ZERO);
+                        sleep(wait).await;
+                    }
+                    let Some(intent) = store.get(&id).await else {
+                        return;
+                    };
+                    if intent.status == ExplorationIntentStatus::Queued {
+                        let _ = trigger.send(ExplorationTrigger::Intent(intent)).await;
+                    }
+                });
+            }
+        });
         tokio::spawn(run_scheduler(
             Arc::clone(&state),
             autonomy,
@@ -154,9 +201,15 @@ impl ExplorationHandle {
             curiosity,
             reflection,
             usage,
+            conversation,
+            Arc::clone(&intents),
             trigger_rx,
         ));
-        Self { state, trigger }
+        Self {
+            state,
+            trigger,
+            intents,
+        }
     }
 
     pub async fn snapshot(&self) -> ExplorationSnapshot {
@@ -169,16 +222,18 @@ impl ExplorationHandle {
             .is_ok()
     }
 
-    pub fn trigger_conversation_hunch(&self) -> bool {
-        self.trigger
-            .try_send(ExplorationTrigger::ConversationHunch)
-            .is_ok()
-    }
-
     pub fn trigger_follow_up(&self) -> bool {
         self.trigger
             .try_send(ExplorationTrigger::DeferredFollowUp)
             .is_ok()
+    }
+
+    pub async fn recent_intents(&self, limit: usize) -> Vec<ExplorationIntent> {
+        self.intents.recent(limit).await
+    }
+
+    pub async fn supersede_intents(&self, ids: &[String], reason: &str) -> Result<()> {
+        self.intents.supersede(ids, reason).await
     }
 }
 
@@ -194,6 +249,8 @@ async fn run_scheduler(
     curiosity: Arc<CuriosityStore>,
     reflection: Arc<ReflectionStore>,
     usage: Arc<UsageStore>,
+    conversation: ConversationCoordinator,
+    intents: Arc<ExplorationIntentQueue>,
     mut trigger_rx: mpsc::Receiver<ExplorationTrigger>,
 ) {
     let mut config_updates = autonomy.subscribe();
@@ -205,7 +262,7 @@ async fn run_scheduler(
         .flatten()
         .and_then(|value| DateTime::parse_from_rfc3339(&value).ok())
         .map(|value| value.with_timezone(&Utc));
-    let mut pending_trigger = None;
+    let mut pending_triggers = VecDeque::new();
 
     loop {
         let config = autonomy.snapshot().await;
@@ -224,13 +281,21 @@ async fn run_scheduler(
             .unwrap_or_else(|| {
                 started_at + chrono::Duration::minutes(config.interval_minutes as i64)
             });
+        let conversation_busy =
+            !pending_triggers.is_empty() && conversation.snapshot().await.active;
+        let effective_scheduled_at = if conversation_busy {
+            now + chrono::Duration::seconds(2)
+        } else {
+            scheduled_at
+        };
+        let pending_trigger = pending_triggers.front();
         let gate = evaluate_gate(
             &config,
             profile_snapshot.status == SetupStatus::Ready,
             &headline,
             now,
-            scheduled_at,
-            pending_trigger.is_some(),
+            effective_scheduled_at,
+            pending_trigger.is_some() && !conversation_busy,
             pending_trigger.is_some_and(ExplorationTrigger::bypasses_quiet_hours),
             pending_trigger.is_some_and(ExplorationTrigger::bypasses_token_limit),
             pending_trigger.is_some_and(ExplorationTrigger::bypasses_message_limit),
@@ -238,8 +303,22 @@ async fn run_scheduler(
 
         match gate {
             Gate::Run => {
-                let trigger = pending_trigger.take();
-                if let Err(error) = run_once(
+                let mut trigger = pending_triggers.pop_front();
+                if let Some(ExplorationTrigger::Intent(intent)) = trigger.as_ref() {
+                    match intents.claim(&intent.id).await {
+                        Ok(Some(claimed)) => trigger = Some(ExplorationTrigger::Intent(claimed)),
+                        Ok(None) => continue,
+                        Err(error) => {
+                            set_error(&state, error.to_string()).await;
+                            continue;
+                        }
+                    }
+                }
+                let intent_id = trigger
+                    .as_ref()
+                    .and_then(ExplorationTrigger::intent)
+                    .map(|intent| intent.id.clone());
+                let result = run_once(
                     Arc::clone(&state),
                     Arc::clone(&codex),
                     Arc::clone(&compute),
@@ -251,9 +330,35 @@ async fn run_scheduler(
                     Arc::clone(&usage),
                     trigger,
                 )
-                .await
-                {
-                    set_error(&state, error.to_string()).await;
+                .await;
+                match result {
+                    Ok(completion) => {
+                        if let Some(id) = intent_id {
+                            let _ = intents
+                                .complete(
+                                    &id,
+                                    completion.status,
+                                    completion.trace_id,
+                                    completion.result_revision_id,
+                                    None,
+                                )
+                                .await;
+                        }
+                    }
+                    Err(error) => {
+                        if let Some(id) = intent_id {
+                            let _ = intents
+                                .complete(
+                                    &id,
+                                    ExplorationIntentStatus::Failed,
+                                    None,
+                                    None,
+                                    Some(error.to_string()),
+                                )
+                                .await;
+                        }
+                        set_error(&state, error.to_string()).await;
+                    }
                 }
                 last_run_at = Some(Utc::now());
                 continue;
@@ -279,7 +384,11 @@ async fn run_scheduler(
                         let Some(trigger) = trigger else {
                             break;
                         };
-                        pending_trigger = Some(trigger);
+                        if matches!(trigger, ExplorationTrigger::Manual { .. }) {
+                            pending_triggers.push_front(trigger);
+                        } else {
+                            pending_triggers.push_back(trigger);
+                        }
                     }
                 }
             }
@@ -377,7 +486,7 @@ async fn run_once(
     reflection: Arc<ReflectionStore>,
     usage: Arc<UsageStore>,
     trigger: Option<ExplorationTrigger>,
-) -> Result<()> {
+) -> Result<ExplorationRunCompletion> {
     {
         let mut snapshot = state.write().await;
         snapshot.phase = ExplorationPhase::Exploring;
@@ -385,6 +494,7 @@ async fn run_once(
         snapshot.last_error = None;
         snapshot.current_activity = Some(ExplorationActivity {
             label: trigger
+                .as_ref()
                 .map(ExplorationTrigger::preparation_label)
                 .unwrap_or("准备定时探索")
                 .to_owned(),
@@ -395,6 +505,7 @@ async fn run_once(
         });
         snapshot.current_trigger = Some(
             trigger
+                .as_ref()
                 .map(ExplorationTrigger::as_str)
                 .unwrap_or("scheduled")
                 .to_owned(),
@@ -411,7 +522,12 @@ async fn run_once(
         context.prompt().await?,
         curiosity.prompt().await?,
         reflection.prompt().await?,
-        exploration_working_context(&recent_messages, &recent_explorations, trigger, Utc::now(),)
+        exploration_working_context(
+            &recent_messages,
+            &recent_explorations,
+            trigger.as_ref(),
+            Utc::now(),
+        )
     );
     let (runtime_tx, mut runtime_rx) = mpsc::channel(64);
     let activity_state = Arc::clone(&state);
@@ -454,9 +570,22 @@ async fn run_once(
         .context("join exploration activity relay")?;
     let outcome = outcome?;
     usage.record_all(&outcome.invocations).await?;
+    let trace_id = outcome.metadata.trace_id.clone().or_else(|| {
+        outcome
+            .invocations
+            .first()
+            .map(|invocation| invocation.id.clone())
+    });
+    let superseded = outcome.superseded;
+    let intent_sources = trigger
+        .as_ref()
+        .and_then(ExplorationTrigger::intent)
+        .map(|intent| intent.source_revision_ids.clone())
+        .unwrap_or_default();
 
     let published = if let Some(text) = outcome.message {
         let mut input_revision_ids = outcome.context_revision_ids;
+        input_revision_ids.extend(intent_sources);
         let surfaced_hunch_revision_ids = outcome
             .hunch_revisions
             .iter()
@@ -512,40 +641,60 @@ async fn run_once(
 
     let mut snapshot = state.write().await;
     snapshot.last_run_at = Some(timestamp(Utc::now()));
-    snapshot.last_outcome = Some(if published.is_some() {
-        "messaged".to_owned()
+    let status = if superseded {
+        ExplorationIntentStatus::Superseded
+    } else if published.is_some() {
+        ExplorationIntentStatus::Messaged
     } else {
-        "silent".to_owned()
-    });
+        ExplorationIntentStatus::Silent
+    };
+    snapshot.last_outcome = Some(
+        match status {
+            ExplorationIntentStatus::Messaged => "messaged",
+            ExplorationIntentStatus::Superseded => "superseded",
+            _ => "silent",
+        }
+        .to_owned(),
+    );
     snapshot.last_error = None;
     snapshot.current_activity = None;
     snapshot.current_trigger = None;
     snapshot.last_trigger = Some(
         trigger
+            .as_ref()
             .map(ExplorationTrigger::as_str)
             .unwrap_or("scheduled")
             .to_owned(),
     );
+    let result_revision_id = published
+        .as_ref()
+        .and_then(|message| message.revision_id.clone());
     if let Some(message) = published {
         snapshot.latest_message = Some(message);
     }
-    Ok(())
+    Ok(ExplorationRunCompletion {
+        status,
+        trace_id,
+        result_revision_id,
+    })
+}
+
+struct ExplorationRunCompletion {
+    status: ExplorationIntentStatus,
+    trace_id: Option<String>,
+    result_revision_id: Option<String>,
 }
 
 fn exploration_working_context(
     messages: &[MemoryEntry],
     runs: &[crate::usage::ExplorationRunSummary],
-    trigger: Option<ExplorationTrigger>,
+    trigger: Option<&ExplorationTrigger>,
     now: DateTime<Utc>,
 ) -> String {
     let mut lines = vec![
         "Autonomous working context. Use this to continue the relationship and avoid thematic repetition; it is bounded operational memory, not a relevance score."
             .to_owned(),
         match trigger {
-            Some(ExplorationTrigger::ConversationHunch) => {
-                "Wake reason: the preceding conversation opened a new Hunch. Decide whether following it now can produce new evidence or a better question. This is an opportunity, not a requirement to search or message."
-                    .to_owned()
-            }
             Some(ExplorationTrigger::Manual { .. }) => {
                 "Wake reason: the user explicitly requested an exploration cycle.".to_owned()
             }
@@ -553,6 +702,14 @@ fn exploration_working_context(
                 "Wake reason: a deferred conversational continuation has reached its earliest useful time. Reconsider it against everything said since it was scheduled. Continue only if it is still live and can enter the present conversation naturally; otherwise remain silent."
                     .to_owned()
             }
+            Some(ExplorationTrigger::Intent(intent)) => format!(
+                "Wake reason: the model explicitly requested an evidence-seeking exploration from recent thought. Re-evaluate it against the latest conversation before searching.\n<exploration-intent id=\"{}\" origin=\"{}\">\nquestion: {}\nwhy-now: {}\nsource-revisions: {}\n</exploration-intent>",
+                intent.id,
+                intent.origin.as_str(),
+                intent.question,
+                intent.why_now,
+                intent.source_revision_ids.join(", ")
+            ),
             None => "Wake reason: scheduled exploration cycle.".to_owned(),
         },
         conversation_edge(messages, now),
@@ -789,8 +946,9 @@ mod tests {
     use chrono::{DateTime, TimeZone, Utc};
 
     use super::{
-        ExplorationPhase, Gate, bounded_message_excerpt, conversation_edge, evaluate_gate,
-        quiet_end, today_started_at,
+        ExplorationIntent, ExplorationIntentOrigin, ExplorationIntentStatus, ExplorationPhase,
+        ExplorationTrigger, Gate, bounded_message_excerpt, conversation_edge, evaluate_gate,
+        exploration_working_context, quiet_end, today_started_at,
     };
     use crate::{
         autonomy::{AutonomyConfig, QuietHours},
@@ -915,6 +1073,38 @@ mod tests {
         assert!(excerpt.starts_with("begin-"));
         assert!(excerpt.ends_with("-end"));
         assert!(excerpt.contains("middle omitted"));
+    }
+
+    #[test]
+    fn thought_trigger_carries_the_exact_question_into_latest_working_context() {
+        let trigger = ExplorationTrigger::Intent(ExplorationIntent {
+            id: "intent_test".to_owned(),
+            question: "Which runtime evidence would change this design?".to_owned(),
+            why_now: "The latest exchange exposed a concrete implementation uncertainty."
+                .to_owned(),
+            source_revision_ids: vec!["rev_source".to_owned()],
+            origin: ExplorationIntentOrigin::Interactive,
+            status: ExplorationIntentStatus::Exploring,
+            requested_at: "2026-08-01T00:00:00Z".to_owned(),
+            not_before: "2026-08-01T00:00:12Z".to_owned(),
+            started_at: Some("2026-08-01T00:00:12Z".to_owned()),
+            completed_at: None,
+            trace_id: None,
+            result_revision_id: None,
+            error: None,
+        });
+
+        let context = exploration_working_context(
+            &[],
+            &[],
+            Some(&trigger),
+            Utc.with_ymd_and_hms(2026, 8, 1, 0, 0, 12).unwrap(),
+        );
+
+        assert!(context.contains("<exploration-intent id=\"intent_test\" origin=\"interactive\">"));
+        assert!(context.contains("Which runtime evidence would change this design?"));
+        assert!(context.contains("rev_source"));
+        assert!(context.contains("Re-evaluate it against the latest conversation"));
     }
 
     fn message(role: MemoryRole, at: &str, content: &str, origin: Option<&str>) -> MemoryEntry {

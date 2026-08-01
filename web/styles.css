@@ -2000,6 +2000,58 @@ input:focus-visible {
   color: var(--danger-text);
 }
 
+.exploration-intent-log {
+  padding: 10px 0;
+  border-bottom: 1px solid var(--border);
+}
+
+.exploration-intent-log > summary {
+  color: var(--text-soft);
+  cursor: pointer;
+  font-size: 10px;
+}
+
+.exploration-intent-log ol {
+  margin: 8px 0 0;
+  padding: 0;
+  list-style: none;
+}
+
+.exploration-intent-log li {
+  padding: 8px 0;
+  border-top: 1px solid var(--border);
+}
+
+.exploration-intent-log li > header {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.exploration-intent-log li > header strong {
+  font-size: 9px;
+}
+
+.exploration-intent-log li > header time {
+  color: var(--text-faint);
+  font-size: 9px;
+}
+
+.exploration-intent-log li > header .trace-button {
+  margin-left: auto;
+}
+
+.exploration-intent-log li > p {
+  margin: 5px 0 0;
+  font-size: 10px;
+  overflow-wrap: anywhere;
+}
+
+.exploration-intent-log li > p:last-child {
+  color: var(--text-soft);
+  font-size: 9px;
+}
+
 .exploration-run {
   padding: 12px 0;
   border-bottom: 1px solid var(--border);

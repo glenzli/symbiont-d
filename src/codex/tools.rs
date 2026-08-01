@@ -16,6 +16,7 @@ use crate::{
         CuriosityStore, HunchAttention, HunchOrigin, HunchPatch, HunchState, NewHunch,
         feedback_cooldown_at,
     },
+    exploration::{ExplorationIntentOrigin, ExplorationIntentQueue, NewExplorationIntent},
     profile::ProfileStore,
     reflection::{
         EpisodeInput, EpisodeState, FollowUpInput, HypothesisHorizon, HypothesisInput,
@@ -37,6 +38,7 @@ pub(super) struct SymbiontTools {
     web_fetcher: Option<Arc<WebFetcher>>,
     task_execution: Arc<TaskExecutionQueue>,
     continuations: Arc<ContinuationQueue>,
+    exploration_intents: Arc<ExplorationIntentQueue>,
 }
 
 pub(super) struct ToolExecution {
@@ -63,6 +65,7 @@ impl SymbiontTools {
         web_fetcher: Option<Arc<WebFetcher>>,
         task_execution: Arc<TaskExecutionQueue>,
         continuations: Arc<ContinuationQueue>,
+        exploration_intents: Arc<ExplorationIntentQueue>,
     ) -> Self {
         Self {
             continuity,
@@ -74,6 +77,7 @@ impl SymbiontTools {
             web_fetcher,
             task_execution,
             continuations,
+            exploration_intents,
         }
     }
 
@@ -442,6 +446,36 @@ impl SymbiontTools {
                                 }
                             },
                             "required": ["message", "reason", "source_revision_ids"],
+                            "additionalProperties": false
+                        }
+                    },
+                    {
+                        "type": "function",
+                        "name": "request_exploration",
+                        "description": "Request one evidence-seeking exploration prompted by the current conversation or background Reflection. Use only for a concrete question whose answer requires information beyond the current response and could materially change the shared work. This is a queued candidate: the Host applies timing, budget, repetition, and publication gates, and may remain silent.",
+                        "inputSchema": {
+                            "type": "object",
+                            "properties": {
+                                "question": {
+                                    "type": "string",
+                                    "description": "The concrete uncertainty to investigate, not a topic label or message to send."
+                                },
+                                "why_now": {
+                                    "type": "string",
+                                    "description": "Why this interaction created a useful evidence gap now, including what new evidence could change."
+                                },
+                                "source_revision_ids": {
+                                    "type": "array",
+                                    "items": {"type": "string"},
+                                    "minItems": 1,
+                                    "maxItems": 50
+                                },
+                                "not_before": {
+                                    "type": "string",
+                                    "description": "Optional RFC 3339 earliest useful time within 30 days. The Host always leaves a short settling window."
+                                }
+                            },
+                            "required": ["question", "why_now", "source_revision_ids"],
                             "additionalProperties": false
                         }
                     },
@@ -1260,6 +1294,32 @@ impl SymbiontTools {
                     })
                     .await?;
                 Ok((serde_json::to_string(&follow_up)?, None))
+            }
+            "request_exploration" => {
+                require_reflection_or_interactive_origin(run_origin, tool)?;
+                let source_revision_ids = string_array(arguments, "source_revision_ids")?;
+                self.ensure_reflection_sources(&source_revision_ids).await?;
+                let origin = ExplorationIntentOrigin::parse(run_origin)
+                    .context("exploration requests require an interactive or Reflection origin")?;
+                let receipt = self
+                    .exploration_intents
+                    .enqueue(NewExplorationIntent {
+                        question: required_text(arguments, "question")?.to_owned(),
+                        why_now: required_text(arguments, "why_now")?.to_owned(),
+                        source_revision_ids,
+                        origin,
+                        not_before: optional_text(arguments, "not_before").map(str::to_owned),
+                    })
+                    .await?;
+                Ok((
+                    serde_json::to_string(&json!({
+                        "id": receipt.id,
+                        "accepted": true,
+                        "deduplicated": receipt.deduplicated,
+                        "intent": receipt.intent
+                    }))?,
+                    None,
+                ))
             }
             "propose_proactive_message" => {
                 require_reflection_origin(run_origin, tool)?;

@@ -46,6 +46,7 @@ export function initExplorationUi(state) {
       error.textContent = `最近异常：${payload.exploration.lastError}`;
       history.append(error);
     }
+    if (payload.intents?.length) history.append(renderIntentLog(payload.intents));
     if (!payload.runs.length) {
       const empty = document.createElement("p");
       empty.className = "exploration-empty";
@@ -243,6 +244,64 @@ function renderRun(run) {
   return article;
 }
 
+function renderIntentLog(intents) {
+  const details = document.createElement("details");
+  details.className = "exploration-intent-log";
+  const summary = document.createElement("summary");
+  const active = intents.filter((intent) =>
+    ["queued", "exploring"].includes(intent.status),
+  ).length;
+  summary.textContent = `思考触发 · ${intents.length}${active ? ` · ${active} 个待处理` : ""}`;
+  const list = document.createElement("ol");
+  for (const intent of intents) {
+    const item = document.createElement("li");
+    item.dataset.status = intent.status;
+    const header = document.createElement("header");
+    const status = document.createElement("strong");
+    const time = document.createElement("time");
+    status.textContent = intentStatusLabel(intent.status);
+    time.dateTime = intent.completedAt || intent.requestedAt;
+    time.textContent = new Date(time.dateTime).toLocaleString([], {
+      month: "numeric",
+      day: "numeric",
+      hour: "2-digit",
+      minute: "2-digit",
+    });
+    header.append(status, time);
+    if (intent.traceId) {
+      const trace = document.createElement("button");
+      trace.type = "button";
+      trace.className = "trace-button";
+      trace.title = "查看这次探索的完整执行轨迹";
+      trace.setAttribute("aria-label", "查看这次探索的完整执行轨迹");
+      trace.dataset.traceId = intent.traceId;
+      trace.textContent = "⎇";
+      header.append(trace);
+    }
+    const question = document.createElement("p");
+    question.textContent = intent.question;
+    const rationale = document.createElement("p");
+    rationale.textContent = intent.whyNow;
+    item.append(header, question, rationale);
+    list.append(item);
+  }
+  details.append(summary, list);
+  return details;
+}
+
+function intentStatusLabel(status) {
+  return (
+    {
+      queued: "等待探索",
+      exploring: "正在探索",
+      silent: "完成，保持安静",
+      messaged: "完成，已发消息",
+      superseded: "后续对话已使它失效",
+      failed: "探索失败",
+    }[status] || status
+  );
+}
+
 function currentStatus(exploration) {
   if (!exploration) return "状态未知";
   if (exploration.phase === "exploring") {
@@ -265,7 +324,7 @@ function triggerLabel(trigger) {
     {
       scheduled: "定时",
       manual: "手动",
-      conversation_hunch: "对话触发",
+      thought_intent: "思考触发",
       deferred_follow_up: "延迟续话",
     }[trigger] || ""
   );

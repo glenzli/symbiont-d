@@ -38,6 +38,7 @@ use crate::{
     continuity::ContinuityHost,
     curiosity::CuriosityStore,
     diagnostics::{ContextSnapshot, ExecutionTraceEvent, NativeThreadSnapshot, TraceEventKind},
+    exploration::ExplorationIntentQueue,
     memory::{MessageMetadata, MessageRunMetadata},
     permission::PermissionBroker,
     profile::{ProfileSnapshot, ProfileStore},
@@ -51,6 +52,7 @@ use crate::{
 };
 
 const AUTONOMOUS_SILENT_MARKER: &str = "<symbiont-silent/>";
+const AUTONOMOUS_SUPERSEDED_MARKER: &str = "<symbiont-superseded/>";
 const MAINTENANCE_COMPLETE_MARKER: &str = "<symbiont-maintained/>";
 const CONTEXT_MAINTENANCE_COMPLETE_MARKER: &str = "<symbiont-context-maintained/>";
 const PROFILE_REVIEW_COMPLETE_MARKER: &str = "<symbiont-profile-reviewed/>";
@@ -99,9 +101,9 @@ pub struct ChatOutcome {
     pub metadata: MessageMetadata,
     pub invocations: Vec<InvocationRecord>,
     pub context_revision_ids: Vec<String>,
-    pub hunch_touched: bool,
     pub scheduled_follow_up_ids: Vec<String>,
     pub reserved_continuation_ids: Vec<String>,
+    pub requested_exploration_ids: Vec<String>,
     pub interrupted: bool,
 }
 
@@ -118,6 +120,7 @@ pub struct ExplorationOutcome {
     pub invocations: Vec<InvocationRecord>,
     pub context_revision_ids: Vec<String>,
     pub hunch_revisions: Vec<HunchRevisionRef>,
+    pub superseded: bool,
 }
 
 #[derive(Clone, Debug)]
@@ -233,6 +236,7 @@ impl CodexClient {
         web_fetcher: Arc<WebFetcher>,
         task_execution: Arc<TaskExecutionQueue>,
         continuations: Arc<ContinuationQueue>,
+        exploration_intents: Arc<ExplorationIntentQueue>,
     ) -> Result<Self> {
         let mut last_error = None;
         for attempt in 1..=3 {
@@ -250,6 +254,7 @@ impl CodexClient {
                     Arc::clone(&web_fetcher),
                     Arc::clone(&task_execution),
                     Arc::clone(&continuations),
+                    Arc::clone(&exploration_intents),
                 ),
             )
             .await
@@ -283,6 +288,7 @@ impl CodexClient {
         web_fetcher: Arc<WebFetcher>,
         task_execution: Arc<TaskExecutionQueue>,
         continuations: Arc<ContinuationQueue>,
+        exploration_intents: Arc<ExplorationIntentQueue>,
     ) -> Result<Self> {
         let mut child = Command::new(&config.binary)
             .arg("app-server")
@@ -324,6 +330,7 @@ impl CodexClient {
                 Some(web_fetcher),
                 task_execution,
                 continuations,
+                exploration_intents,
             ),
             models: Vec::new(),
             thread_usage: HashMap::new(),
@@ -480,9 +487,9 @@ impl CodexClient {
             metadata: metadata_for(&invocations, "codex_task"),
             invocations,
             context_revision_ids: Vec::new(),
-            hunch_touched: false,
             scheduled_follow_up_ids: Vec::new(),
             reserved_continuation_ids: Vec::new(),
+            requested_exploration_ids: Vec::new(),
             interrupted: false,
         })
     }
@@ -645,7 +652,8 @@ impl CodexClient {
         continuity_context: &str,
         events: mpsc::Sender<RuntimeEvent>,
     ) -> Result<ExplorationOutcome> {
-        let prompt = autonomous_exploration_prompt(AUTONOMOUS_SILENT_MARKER);
+        let prompt =
+            autonomous_exploration_prompt(AUTONOMOUS_SILENT_MARKER, AUTONOMOUS_SUPERSEDED_MARKER);
         let thread_id = self.autonomous_thread_id.clone();
         let outcome = self
             .run_request(
@@ -666,7 +674,8 @@ impl CodexClient {
         self.renew_background_thread(&thread_id, BackgroundThread::Autonomous)
             .await;
         let mut outcome = outcome?;
-        let message = if is_silent_autonomous_response(&outcome.text) {
+        let superseded = is_superseded_autonomous_response(&outcome.text);
+        let message = if is_silent_autonomous_response(&outcome.text) || superseded {
             if let Some(last) = outcome.invocations.last_mut() {
                 last.produced_message = false;
             }
@@ -682,6 +691,7 @@ impl CodexClient {
             invocations: outcome.invocations,
             context_revision_ids: outcome.context_revision_ids,
             hunch_revisions,
+            superseded,
         })
     }
 
@@ -893,6 +903,7 @@ impl CodexClient {
                         "upsert_episode"
                             | "upsert_interaction_hypothesis"
                             | "schedule_follow_up"
+                            | "request_exploration"
                             | "propose_proactive_message"
                             | "update_current_map"
                             | "update_open_loops"
@@ -1081,20 +1092,21 @@ impl CodexClient {
 
         let metadata = metadata_for(&invocations, origin);
         let context_revision_ids = context_revision_ids(&invocations);
-        let hunch_touched = hunch_was_touched(&invocations);
         let scheduled_follow_up_ids =
             successful_tool_result_ids(&invocations, "symbiont", "schedule_follow_up", "id");
         let reserved_continuation_ids =
             successful_tool_result_ids(&invocations, "symbiont", "reserve_continuation", "id");
+        let requested_exploration_ids =
+            successful_tool_result_ids(&invocations, "symbiont", "request_exploration", "id");
         Ok(ChatOutcome {
             text: final_text,
             generated_images,
             metadata,
             invocations,
             context_revision_ids,
-            hunch_touched,
             scheduled_follow_up_ids,
             reserved_continuation_ids,
+            requested_exploration_ids,
             interrupted: false,
         })
     }
@@ -2053,6 +2065,10 @@ fn is_silent_autonomous_response(text: &str) -> bool {
     text.trim() == AUTONOMOUS_SILENT_MARKER
 }
 
+fn is_superseded_autonomous_response(text: &str) -> bool {
+    text.trim() == AUTONOMOUS_SUPERSEDED_MARKER
+}
+
 fn activity_label(item: Option<&Value>) -> Option<String> {
     let item = item?;
     match item.get("type").and_then(Value::as_str)? {
@@ -2095,6 +2111,7 @@ fn activity_label(item: Option<&Value>) -> Option<String> {
                     "revise_hunch" => "正在修订探索中的问题",
                     "retire_hunch" => "正在结束一个探索问题",
                     "acknowledge_hunch_feedback" => "正在吸收对探索问题的反馈",
+                    "request_exploration" => "正在留下一个待查证的问题",
                     "escalate" => "正在判断是否需要深入处理",
                     _ => "正在调用 symbiont 工具",
                 }
@@ -2188,7 +2205,6 @@ fn interrupted_chat_outcome(invocations: Vec<InvocationRecord>, origin: &str) ->
         generated_images: Vec::new(),
         metadata: metadata_for(&invocations, origin),
         context_revision_ids: context_revision_ids(&invocations),
-        hunch_touched: hunch_was_touched(&invocations),
         scheduled_follow_up_ids: successful_tool_result_ids(
             &invocations,
             "symbiont",
@@ -2199,6 +2215,12 @@ fn interrupted_chat_outcome(invocations: Vec<InvocationRecord>, origin: &str) ->
             &invocations,
             "symbiont",
             "reserve_continuation",
+            "id",
+        ),
+        requested_exploration_ids: successful_tool_result_ids(
+            &invocations,
+            "symbiont",
+            "request_exploration",
             "id",
         ),
         invocations,
@@ -2235,13 +2257,6 @@ pub(super) fn remember_generated_image(
         return;
     }
     generated_images.push(image);
-}
-
-fn hunch_was_touched(invocations: &[InvocationRecord]) -> bool {
-    invocations
-        .iter()
-        .flat_map(|invocation| &invocation.trace_steps)
-        .any(|step| step.succeeded && step.namespace == "symbiont" && step.tool == "open_hunch")
 }
 
 fn successful_hunch_revisions(invocations: &[InvocationRecord]) -> Vec<HunchRevisionRef> {
@@ -2428,4 +2443,9 @@ pub(super) fn extract_completed_response_text(params: &Value, streamed_text: &st
 #[cfg(test)]
 pub(super) fn autonomous_response_is_silent(text: &str) -> bool {
     is_silent_autonomous_response(text)
+}
+
+#[cfg(test)]
+pub(super) fn autonomous_response_is_superseded(text: &str) -> bool {
+    is_superseded_autonomous_response(text)
 }

@@ -94,6 +94,8 @@ Curiosity Map contains symbiont-d's Hunches, never user preferences. Open one on
 
 Conversation is not strict turn-taking. Treat a message burst as one evolving thought. Rarely use `symbiont.reserve_continuation` when a short pause may justify exactly one distinct second move; finish the useful answer now, never split or restate it. Use `symbiont.schedule_follow_up` only for reconsideration after at least a minute.
 
+Call `symbiont.request_exploration` only for a concrete question needing outside evidence that could change the shared work. Answer now; never use it routinely.
+
 Use `symbiont.escalate` only when deeper reasoning can materially change the result, never for ordinary conversation, recall, summaries, or lookup. After accepted escalation, let the Host continue instead of answering in that run.
 
 The workspace is read-only by default; discussion and PCP memory operations remain available. Request narrow extra access through Codex. Claim denial only after a Host denial; otherwise report the actual failure.
@@ -123,12 +125,12 @@ pub(super) fn interaction_reflection_prompt(
          `symbiont.upsert_interaction_hypothesis`; revise existing IDs instead of duplicating them, \
          and mark contradicted or superseded interpretations explicitly. A stable_candidate is only \
          a proposal for later critical review.\n\n\
-         Refresh Current Map and Open Loops when the new evidence changes them. A delayed follow-up \
-         may be scheduled only when a distinct future moment could change the value of the \
-         conversation; do not use it as a generic reminder or notification. The later autonomous \
+         Refresh Current Map and Open Loops when new evidence changes them. Schedule a delayed \
+         follow-up only when waiting could change conversation value, never as a reminder. The later autonomous \
          publication gate will still decide whether to speak.\n\n\
-         At most once, call `symbiont.propose_proactive_message` with an unsolicited conversational \
-         thought. Make why here and why now natural; never a reply, report, recap, or feed item.\n\n\
+         At most one proactive act: `symbiont.request_exploration` for a question needing evidence, \
+         or `symbiont.propose_proactive_message` for a ready thought. Keep why here and why now \
+         natural; never a reply, report, recap, or feed item.\n\n\
          When new evidence materially corrects, limits, disputes, replaces, or retracts a durable \
          earlier Page, find and read the exact candidate, then call `pcp.assess_validity`. Assess \
          only consequential claims or state, not ordinary messages. Anchor the judgment to exact \
@@ -149,7 +151,10 @@ pub(super) fn interaction_reflection_prompt(
     )
 }
 
-pub(super) fn autonomous_exploration_prompt(silent_marker: &str) -> String {
+pub(super) fn autonomous_exploration_prompt(
+    silent_marker: &str,
+    superseded_marker: &str,
+) -> String {
     format!(
         "Privately run one autonomous information exploration cycle. This is an unsolicited \
          conversational initiation: no user message is waiting for an answer. Begin from the supplied \
@@ -179,6 +184,10 @@ pub(super) fn autonomous_exploration_prompt(silent_marker: &str) -> String {
          results are raw material, not the shape of the message. If several findings support one \
          idea, synthesize them; if they are unrelated, choose only the strongest. Never send a \
          roundup, digest, list of findings, exploration status, or half of a report.\n\n\
+         If the working context contains an explicit exploration intent, first re-evaluate it \
+         against the latest conversation. If it is already answered, invalidated, or no longer \
+         represents a live uncertainty, return exactly `{superseded_marker}` without searching. \
+         A scheduled run without such an intent must never use that marker.\n\n\
          Before drafting, privately choose one entry mode: `continue` the visible edge, `reopen` an \
          older shared thread, `pivot` through a real connection, or remain `silent`. Do not name \
          the mode. For `continue`, begin with the thought itself. For `reopen` or `pivot`, the \

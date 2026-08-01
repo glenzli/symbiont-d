@@ -43,7 +43,7 @@ use continuation::ContinuationQueue;
 use continuity::ContinuityHost;
 use conversation::ConversationCoordinator;
 use curiosity::CuriosityStore;
-use exploration::ExplorationHandle;
+use exploration::{ExplorationHandle, ExplorationIntentQueue};
 use memory::MemoryStore;
 use pcp_sqlite::SqlitePcpStore;
 use permission::PermissionBroker;
@@ -150,6 +150,14 @@ async fn main() -> Result<()> {
     let task_execution = Arc::new(task_execution);
     let (continuations, continuation_receiver) = ContinuationQueue::new();
     let continuations = Arc::new(continuations);
+    let (exploration_intents, exploration_intent_receiver) =
+        ExplorationIntentQueue::open(resolve_data_path(
+            &workspace,
+            "SYMBIONT_EXPLORATION_INTENTS_PATH",
+            "exploration-intents.json",
+        ))
+        .await?;
+    let exploration_intents = Arc::new(exploration_intents);
 
     let codex = CodexClient::start(
         CodexConfig {
@@ -166,6 +174,7 @@ async fn main() -> Result<()> {
         Arc::clone(&web_fetcher),
         Arc::clone(&task_execution),
         Arc::clone(&continuations),
+        Arc::clone(&exploration_intents),
     )
     .await
     .context("start the Codex app-server session")?;
@@ -205,6 +214,7 @@ async fn main() -> Result<()> {
         )
         .await?,
     );
+    let conversation = ConversationCoordinator::new();
     let exploration = ExplorationHandle::start(
         Arc::clone(&autonomy),
         Arc::clone(&profile),
@@ -215,8 +225,10 @@ async fn main() -> Result<()> {
         Arc::clone(&curiosity),
         Arc::clone(&reflection_store),
         Arc::clone(&usage),
+        conversation.clone(),
+        Arc::clone(&exploration_intents),
+        exploration_intent_receiver,
     );
-    let conversation = ConversationCoordinator::new();
     let reflection = ReflectionHandle::start(
         Arc::clone(&reflection_store),
         Arc::clone(&autonomy),

@@ -231,6 +231,7 @@ struct BridgeContextQuery {
 struct ExplorationHistoryResponse {
     exploration: ExplorationSnapshot,
     runs: Vec<ExplorationRunSummary>,
+    intents: Vec<crate::exploration::ExplorationIntent>,
 }
 
 #[derive(Serialize)]
@@ -1116,6 +1117,7 @@ async fn recent_explorations(
     Ok(Json(ExplorationHistoryResponse {
         exploration: state.exploration.snapshot().await,
         runs,
+        intents: state.exploration.recent_intents(20).await,
     }))
 }
 
@@ -1750,6 +1752,13 @@ async fn run_chat(
                 .continuations
                 .cancel(&outcome.reserved_continuation_ids)
                 .await;
+            state
+                .exploration
+                .supersede_intents(
+                    &outcome.requested_exploration_ids,
+                    "superseded_by_continuing_user_burst",
+                )
+                .await?;
             for invocation in &mut outcome.invocations {
                 invocation.produced_message = false;
             }
@@ -1832,9 +1841,6 @@ async fn run_chat(
         .autonomy
         .permitted(profile.status == SetupStatus::Ready)
         .await;
-    if outcome.hunch_touched && autonomy_permitted {
-        state.exploration.trigger_conversation_hunch();
-    }
     let usage = state.usage.headline(&today_started_at()).await?;
     let exploration = state.exploration.snapshot().await;
     let _ = wire_tx

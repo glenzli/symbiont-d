@@ -9,6 +9,7 @@
 /data/reflection.toml
 /data/codex-bridge.toml
 /data/task-runs.json
+/data/exploration-intents.json
 /data/*.sqlite3
 /data/*.sqlite3-shm
 /data/*.sqlite3-wal

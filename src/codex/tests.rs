@@ -1,13 +1,14 @@
 use std::{
+    path::Path,
     sync::Arc,
     time::{SystemTime, UNIX_EPOCH},
 };
 
 use super::{
     client::{
-        autonomous_response_is_silent, context_revision_ids, extract_completed_response_text,
-        extract_final_agent_message, generated_image_output, remember_generated_image,
-        text_and_image_input_items,
+        autonomous_response_is_silent, autonomous_response_is_superseded, context_revision_ids,
+        extract_completed_response_text, extract_final_agent_message, generated_image_output,
+        remember_generated_image, text_and_image_input_items,
     },
     prompts::{
         autonomous_exploration_prompt, developer_instructions, interaction_reflection_prompt,
@@ -20,6 +21,7 @@ use crate::{
     compute_policy::ComputePolicyStore,
     continuity::{ContinuityHost, MessageLinks},
     curiosity::CuriosityStore,
+    exploration::{ExplorationIntentQueue, ExplorationIntentReceiver},
     memory::MemoryRole,
     profile::{CalibrationMode, ProfileStore, SetupStatus},
     reflection::ReflectionStore,
@@ -36,6 +38,13 @@ fn dynamic_tools_expose_host_and_pcp_namespaces() {
     assert_eq!(specs[0]["type"], "namespace");
     assert_eq!(specs[0]["name"], "symbiont");
     assert_eq!(specs[0]["tools"][0]["name"], "complete_orientation");
+    assert!(
+        specs[0]["tools"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|tool| { tool["name"] == "request_exploration" })
+    );
     assert!(
         specs[0]["tools"]
             .as_array()
@@ -201,8 +210,11 @@ fn autonomous_exploration_is_silent_or_starts_one_conversation() {
     assert!(!autonomous_response_is_silent(
         "This is worth discussing: <symbiont-silent/>"
     ));
+    assert!(autonomous_response_is_superseded(
+        " <symbiont-superseded/>\n"
+    ));
 
-    let prompt = autonomous_exploration_prompt("<symbiont-silent/>");
+    let prompt = autonomous_exploration_prompt("<symbiont-silent/>", "<symbiont-superseded/>");
     assert!(prompt.contains("Search results are raw material"));
     assert!(prompt.contains("one conversational move"));
     assert!(prompt.contains("Never send a roundup"));
@@ -213,6 +225,7 @@ fn autonomous_exploration_is_silent_or_starts_one_conversation() {
     assert!(prompt.contains("answers only why now"));
     assert!(prompt.contains("pending attention"));
     assert!(prompt.contains("No process narration"));
+    assert!(prompt.contains("already answered, invalidated"));
 }
 
 #[test]
@@ -340,6 +353,7 @@ async fn orientation_tool_requires_active_calibration() {
         .await
         .expect("open Reflection store"),
     );
+    let (exploration_intents, _exploration_intent_receiver) = test_exploration_intents(&root).await;
     let tools = SymbiontTools::new(
         continuity,
         Arc::clone(&profile),
@@ -359,6 +373,7 @@ async fn orientation_tool_requires_active_calibration() {
                 .0,
         ),
         Arc::new(crate::continuation::ContinuationQueue::new().0),
+        exploration_intents,
     );
     let call = json!({
         "namespace": "symbiont",
@@ -414,6 +429,7 @@ async fn pcp_tools_write_search_and_read_through_the_dynamic_bridge() {
         .await
         .expect("open Reflection store"),
     );
+    let (exploration_intents, _exploration_intent_receiver) = test_exploration_intents(&root).await;
     let tools = SymbiontTools::new(
         continuity,
         profile,
@@ -433,6 +449,7 @@ async fn pcp_tools_write_search_and_read_through_the_dynamic_bridge() {
                 .0,
         ),
         Arc::new(crate::continuation::ContinuationQueue::new().0),
+        exploration_intents,
     );
 
     let written = tools
@@ -680,6 +697,7 @@ async fn reflection_tools_accept_recalled_conversation_revisions_outside_the_eve
         .await
         .expect("open Reflection store"),
     );
+    let (exploration_intents, _exploration_intent_receiver) = test_exploration_intents(&root).await;
     let tools = SymbiontTools::new(
         continuity,
         profile,
@@ -699,6 +717,7 @@ async fn reflection_tools_accept_recalled_conversation_revisions_outside_the_eve
                 .0,
         ),
         Arc::new(crate::continuation::ContinuationQueue::new().0),
+        Arc::clone(&exploration_intents),
     );
 
     let result = tools
@@ -727,7 +746,7 @@ async fn reflection_tools_accept_recalled_conversation_revisions_outside_the_eve
                 "arguments": {
                     "reason": "Reconsider this as a distinct continuation after the current exchange has settled.",
                     "not_before": (chrono::Utc::now() + chrono::Duration::minutes(2)).to_rfc3339(),
-                    "source_revision_ids": [recalled.page.revision_id]
+                    "source_revision_ids": [recalled.page.revision_id.clone()]
                 }
             }),
             Some("test-model"),
@@ -736,6 +755,26 @@ async fn reflection_tools_accept_recalled_conversation_revisions_outside_the_eve
         .await;
     assert_eq!(follow_up.response["success"], true);
     assert_eq!(reflection.follow_ups(10).await.unwrap().len(), 1);
+
+    let exploration = tools
+        .execute_for_model(
+            &json!({
+                "namespace": "symbiont",
+                "tool": "request_exploration",
+                "arguments": {
+                    "question": "Does this older design constraint still hold in the current runtime?",
+                    "why_now": "The recalled Revision changes what evidence the next implementation decision needs.",
+                    "source_revision_ids": [recalled.page.revision_id]
+                }
+            }),
+            Some("test-model"),
+            "interactive",
+        )
+        .await;
+    assert_eq!(exploration.response["success"], true);
+    let exploration_json = tool_content_json(&exploration.response);
+    assert_eq!(exploration_json["accepted"], true);
+    assert_eq!(exploration_intents.recent(10).await.len(), 1);
 
     let _ = tokio::fs::remove_dir_all(root).await;
 }
@@ -782,6 +821,7 @@ async fn hunch_tools_preserve_model_owned_state_and_record_autonomous_exploratio
         .await
         .expect("open Reflection store"),
     );
+    let (exploration_intents, _exploration_intent_receiver) = test_exploration_intents(&root).await;
     let tools = SymbiontTools::new(
         continuity,
         profile,
@@ -801,6 +841,7 @@ async fn hunch_tools_preserve_model_owned_state_and_record_autonomous_exploratio
                 .0,
         ),
         Arc::new(crate::continuation::ContinuationQueue::new().0),
+        exploration_intents,
     );
 
     let opened = tools
@@ -852,4 +893,13 @@ fn tool_content_json(response: &serde_json::Value) -> serde_json::Value {
             .expect("tool text"),
     )
     .expect("tool JSON")
+}
+
+async fn test_exploration_intents(
+    root: &Path,
+) -> (Arc<ExplorationIntentQueue>, ExplorationIntentReceiver) {
+    let (queue, receiver) = ExplorationIntentQueue::open(root.join("exploration-intents.json"))
+        .await
+        .expect("open exploration intent queue");
+    (Arc::new(queue), receiver)
 }
