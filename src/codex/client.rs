@@ -20,10 +20,11 @@ use tracing::{debug, warn};
 
 use super::{
     approvals::{approval_response, automatic_server_request_response, permission_request},
+    autonomous::{finding_from_invocations, review_prompt, scout_prompt},
     prompts::{
-        additional_context_value, autonomous_exploration_prompt, context_fragments,
-        context_maintenance_prompt, developer_instructions, interaction_reflection_prompt,
-        memory_reconciliation_prompt, profile_review_prompt, summary_maintenance_prompt,
+        additional_context_value, context_fragments, context_maintenance_prompt,
+        developer_instructions, interaction_reflection_prompt, memory_reconciliation_prompt,
+        profile_review_prompt, summary_maintenance_prompt,
     },
     task_bridge::{CodexTaskDetail, CodexTaskSummary, parse_task_detail, parse_task_list},
     tool_dedup::{ToolCallPlan, TurnToolDeduplicator},
@@ -221,8 +222,15 @@ struct TurnOverrides {
 
 #[derive(Clone, Copy)]
 enum BackgroundThread {
-    Autonomous,
+    AutonomousScout,
+    AutonomousReview,
     Maintenance,
+}
+
+#[derive(Clone, Copy)]
+enum ToolSurface {
+    Full,
+    AutonomousScout,
 }
 
 pub struct CodexClient {
@@ -231,7 +239,8 @@ pub struct CodexClient {
     stdout: Lines<BufReader<ChildStdout>>,
     next_id: u64,
     interactive_thread_id: String,
-    autonomous_thread_id: String,
+    autonomous_scout_thread_id: String,
+    autonomous_review_thread_id: String,
     maintenance_thread_id: String,
     workspace: PathBuf,
     continuity: Arc<ContinuityHost>,
@@ -244,6 +253,7 @@ pub struct CodexClient {
     thread_context_pressure: HashMap<String, ThreadContextPressure>,
     rate_limits: Arc<RwLock<Option<RateLimitInfo>>>,
     permissions: Arc<PermissionBroker>,
+    compute_policies: Arc<crate::compute_policy::ComputePolicyStore>,
 }
 
 impl CodexClient {
@@ -338,7 +348,8 @@ impl CodexClient {
             stdout: BufReader::new(stdout).lines(),
             next_id: 1,
             interactive_thread_id: String::new(),
-            autonomous_thread_id: String::new(),
+            autonomous_scout_thread_id: String::new(),
+            autonomous_review_thread_id: String::new(),
             maintenance_thread_id: String::new(),
             workspace: config.workspace.clone(),
             continuity: Arc::clone(&continuity),
@@ -349,7 +360,7 @@ impl CodexClient {
                 context,
                 curiosity,
                 reflection,
-                compute_policies,
+                Arc::clone(&compute_policies),
                 Some(web_fetcher),
                 task_execution,
                 continuations,
@@ -362,13 +373,23 @@ impl CodexClient {
             thread_context_pressure: HashMap::new(),
             rate_limits: Arc::new(RwLock::new(None)),
             permissions,
+            compute_policies,
         };
         client.initialize().await?;
         client.models = client.load_models().await?;
         client.refresh_rate_limits().await;
-        client.interactive_thread_id = client.start_thread(&config.workspace).await?;
-        client.autonomous_thread_id = client.start_thread(&config.workspace).await?;
-        client.maintenance_thread_id = client.start_thread(&config.workspace).await?;
+        client.interactive_thread_id = client
+            .start_thread(&config.workspace, ToolSurface::Full)
+            .await?;
+        client.autonomous_scout_thread_id = client
+            .start_thread(&config.workspace, ToolSurface::AutonomousScout)
+            .await?;
+        client.autonomous_review_thread_id = client
+            .start_thread(&config.workspace, ToolSurface::Full)
+            .await?;
+        client.maintenance_thread_id = client
+            .start_thread(&config.workspace, ToolSurface::Full)
+            .await?;
         Ok(client)
     }
 
@@ -570,7 +591,7 @@ impl CodexClient {
         }
         if let Some(rollover) = rollover {
             let workspace = self.workspace.clone();
-            match self.start_thread(&workspace).await {
+            match self.start_thread(&workspace, ToolSurface::Full).await {
                 Ok(next_thread_id) => {
                     self.interactive_thread_id = next_thread_id.clone();
                     self.interactive_cursor.rotate();
@@ -659,7 +680,7 @@ impl CodexClient {
         let previous = self.interactive_thread_id.clone();
         let workspace = self.workspace.clone();
         let next = self
-            .start_thread(&workspace)
+            .start_thread(&workspace, ToolSurface::Full)
             .await
             .context("start a fresh interactive Codex thread after message retraction")?;
         self.interactive_thread_id = next;
@@ -676,52 +697,96 @@ impl CodexClient {
         input_events: watch::Receiver<u64>,
         events: mpsc::Sender<RuntimeEvent>,
     ) -> Result<ExplorationOutcome> {
-        let prompt =
-            autonomous_exploration_prompt(AUTONOMOUS_SILENT_MARKER, AUTONOMOUS_SUPERSEDED_MARKER);
-        let thread_id = self.autonomous_thread_id.clone();
-        let outcome = self
+        let prompt = scout_prompt(AUTONOMOUS_SILENT_MARKER, AUTONOMOUS_SUPERSEDED_MARKER);
+        let scout_thread_id = self.autonomous_scout_thread_id.clone();
+        let scout = self
             .run_request(
-                thread_id.clone(),
+                scout_thread_id.clone(),
                 text_input_items(&prompt),
                 ComputeLane::Observe,
-                "autonomous",
+                "autonomous_scout",
                 compute,
                 profile,
                 continuity_context,
                 None,
                 None,
-                true,
-                Some(input_events),
+                false,
+                Some(input_events.clone()),
                 &events,
             )
-            .await;
-        let mut outcome = outcome?;
-        if !outcome.interrupted {
-            self.renew_background_thread(&thread_id, BackgroundThread::Autonomous)
+            .await?;
+        if !scout.interrupted {
+            self.renew_background_thread(&scout_thread_id, BackgroundThread::AutonomousScout)
                 .await;
         }
-        let superseded = is_superseded_autonomous_response(&outcome.text);
-        let interrupted = outcome.interrupted;
-        let candidate = (!interrupted && !superseded)
-            .then(|| proactive_message_candidate(&outcome.invocations))
+        let superseded = is_superseded_autonomous_response(&scout.text);
+        let finding = (!scout.interrupted && !superseded)
+            .then(|| finding_from_invocations(&scout.invocations))
+            .transpose()?
             .flatten();
-        let message = candidate
-            .as_ref()
-            .map(|candidate| candidate.message.clone());
-        let message_source_revision_ids = candidate
-            .map(|candidate| candidate.source_revision_ids)
-            .unwrap_or_default();
-        for invocation in &mut outcome.invocations {
+        let root_id = scout.invocations.first().map(|run| run.id.clone());
+        let mut invocations = scout.invocations;
+        for invocation in &mut invocations {
             invocation.produced_message = false;
         }
-        outcome.metadata = metadata_for(&outcome.invocations, "autonomous");
-        let hunch_revisions = successful_hunch_revisions(&outcome.invocations);
+
+        let mut interrupted = scout.interrupted;
+        let mut message = None;
+        let mut message_source_revision_ids = Vec::new();
+        let mut hunch_revisions = Vec::new();
+        if let Some(finding) = finding {
+            let review_lane = self
+                .compute_policies
+                .match_texts(finding.routing_texts())
+                .await
+                .map(|matched| matched.policy.minimum_lane)
+                .unwrap_or(ComputeLane::Conversation);
+            let prompt = review_prompt(&finding, AUTONOMOUS_SILENT_MARKER)?;
+            let review_thread_id = self.autonomous_review_thread_id.clone();
+            let mut review = self
+                .run_request(
+                    review_thread_id.clone(),
+                    text_input_items(&prompt),
+                    review_lane,
+                    "autonomous",
+                    compute,
+                    profile,
+                    continuity_context,
+                    None,
+                    None,
+                    true,
+                    Some(input_events),
+                    &events,
+                )
+                .await?;
+            if !review.interrupted {
+                self.renew_background_thread(&review_thread_id, BackgroundThread::AutonomousReview)
+                    .await;
+            }
+            interrupted = review.interrupted;
+            let candidate = (!review.interrupted)
+                .then(|| proactive_message_candidate(&review.invocations))
+                .flatten();
+            if let Some(candidate) = candidate {
+                message = Some(candidate.message);
+                message_source_revision_ids = candidate.source_revision_ids;
+            }
+            hunch_revisions = successful_hunch_revisions(&review.invocations);
+            for invocation in &mut review.invocations {
+                invocation.parent_id.clone_from(&root_id);
+                invocation.produced_message = false;
+            }
+            invocations.extend(review.invocations);
+        }
+
+        let metadata = metadata_for(&invocations, "autonomous");
+        let context_revision_ids = context_revision_ids(&invocations);
         Ok(ExplorationOutcome {
             message,
             message_source_revision_ids,
-            metadata: outcome.metadata,
-            invocations: outcome.invocations,
-            context_revision_ids: outcome.context_revision_ids,
+            metadata,
+            invocations,
+            context_revision_ids,
             hunch_revisions,
             superseded,
             interrupted,
@@ -1101,10 +1166,15 @@ impl CodexClient {
 
     async fn renew_background_thread(&mut self, previous: &str, slot: BackgroundThread) {
         let workspace = self.workspace.clone();
-        match self.start_thread(&workspace).await {
+        let tool_surface = match slot {
+            BackgroundThread::AutonomousScout => ToolSurface::AutonomousScout,
+            BackgroundThread::AutonomousReview | BackgroundThread::Maintenance => ToolSurface::Full,
+        };
+        match self.start_thread(&workspace, tool_surface).await {
             Ok(next) => {
                 match slot {
-                    BackgroundThread::Autonomous => self.autonomous_thread_id = next,
+                    BackgroundThread::AutonomousScout => self.autonomous_scout_thread_id = next,
+                    BackgroundThread::AutonomousReview => self.autonomous_review_thread_id = next,
                     BackgroundThread::Maintenance => self.maintenance_thread_id = next,
                 }
                 self.clear_thread_state(previous);
@@ -1704,8 +1774,16 @@ impl CodexClient {
         });
     }
 
-    async fn start_thread(&mut self, workspace: &PathBuf) -> Result<String> {
+    async fn start_thread(
+        &mut self,
+        workspace: &PathBuf,
+        tool_surface: ToolSurface,
+    ) -> Result<String> {
         let instructions = developer_instructions();
+        let dynamic_tools = match tool_surface {
+            ToolSurface::Full => SymbiontTools::specifications(),
+            ToolSurface::AutonomousScout => SymbiontTools::scout_specifications(),
+        };
         let result = self
             .request(
                 "thread/start",
@@ -1719,7 +1797,7 @@ impl CodexClient {
                     "config": {
                         "web_search": "live"
                     },
-                    "dynamicTools": SymbiontTools::specifications()
+                    "dynamicTools": dynamic_tools
                 }),
             )
             .await

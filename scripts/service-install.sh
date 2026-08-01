@@ -60,7 +60,15 @@ mv "$TEMP_PLIST" "$PLIST_PATH"
 trap - EXIT
 
 launchctl bootout "$DOMAIN/$LABEL" >/dev/null 2>&1 || true
-launchctl bootstrap "$DOMAIN" "$PLIST_PATH"
+bootstrap_attempt=0
+while ! launchctl bootstrap "$DOMAIN" "$PLIST_PATH"; do
+  bootstrap_attempt=$((bootstrap_attempt + 1))
+  if [ "$bootstrap_attempt" -ge 5 ]; then
+    echo "Could not load $LABEL after 5 attempts" >&2
+    exit 1
+  fi
+  sleep 1
+done
 launchctl enable "$DOMAIN/$LABEL"
 launchctl kickstart -k "$DOMAIN/$LABEL"
 

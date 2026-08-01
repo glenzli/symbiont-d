@@ -153,68 +153,6 @@ pub(super) fn interaction_reflection_prompt(
     )
 }
 
-pub(super) fn autonomous_exploration_prompt(
-    silent_marker: &str,
-    superseded_marker: &str,
-) -> String {
-    format!(
-        "Privately run one autonomous information exploration cycle. This is an unsolicited \
-         conversational initiation: no user message is waiting for an answer. Begin from the supplied \
-         Current Map, Open Loops, Curiosity Map, recent conversation, and exploration journal. \
-         A fresh Hunch or deferred conversational continuation may have woken this run; treat that \
-         as an opportunity, not a command. Selectively \
-         consult PCP for older Detail and use live web search when freshness matters. Follow \
-         adjacent or unexpected signals, avoid numeric scoring, and verify consequential claims.\n\n\
-         If an active Hunch materially guides the run, call `symbiont.revise_hunch` with its exact \
-         Page and Revision even when only recording that it was explored. Revise its rationale or \
-         test when evidence changes; call `symbiont.retire_hunch` when resolved or no longer worth \
-         watching. Open a new Hunch only for a distinct durable question. Hunches are symbiont \
-         working state, never user interests.\n\n\
-         Respect Hunch attention state. Never select `feedback_pending`; Reflection has not yet \
-         incorporated the user's reply. Avoid repeating an `awaiting_user` or `cooldown` Hunch \
-         before its eligible time merely because the user was silent. Materially new or urgent \
-         external evidence may justify an exception.\n\n\
-         Before interrupting, compare the candidate with recent exploration themes and messages. \
-         New examples of the same thesis are repetition unless they materially change the \
-         conclusion, timing, uncertainty, decision, or possible action. Prefer a neglected open \
-         question or a genuine shift over another highly related article. If the useful move is \
-         to challenge, connect, or ask a question about the ongoing discussion, do that instead \
-         of reporting information.\n\n\
-         Decide whether there is one conversational move genuinely worth making now. It may \
-         continue the latest exchange, return to an older open thread, or introduce an adjacent \
-         question that changes how the current work looks. Search \
-         results are raw material, not the shape of the message. If several findings support one \
-         idea, synthesize them; if they are unrelated, choose only the strongest. Never send a \
-         roundup, digest, list of findings, exploration status, or half of a report.\n\n\
-         If the working context contains an explicit exploration intent, first re-evaluate it \
-         against the latest conversation. If it is already answered, invalidated, or no longer \
-         represents a live uncertainty, return exactly `{superseded_marker}` without searching. \
-         A scheduled run without such an intent must never use that marker.\n\n\
-         Before drafting, privately choose one entry mode: `continue` the visible edge, `reopen` an \
-         older shared thread, `pivot` through a real connection, or remain `silent`. Do not name \
-         the mode. For `continue`, begin with the thought itself. For `reopen` or `pivot`, the \
-         shortest natural bridge must establish both why it belongs in this conversation and why \
-         it is worth raising now. A date, deadline, or freshness cue answers only why now. If you \
-         cannot state why here without forcing a connection, remain silent. Treat unanswered prior \
-         initiations in the Conversation Edge as pending attention, not rejection; raise the bar \
-         before adding another unrelated topic.\n\n\
-         If nothing merits interruption, do not propose a message. Otherwise call \
-         `symbiont.propose_proactive_message` exactly once with the candidate message, the private \
-         reason it merits interruption now, and exact recent conversation Revisions that anchor it. \
-         The Host rechecks timing and decides whether it is actually published. The candidate must \
-         be in the user's language and start a conversation; do not sound \
-         as if answering a request, summarizing a task, reporting a run, or handing over findings. \
-         Join the actual conversation; do not drop an abstract thesis into the transcript. \
-         Do not say \
-         that you searched, explored, scanned, found a signal, or found a number of items. Avoid \
-         formulaic report openings such as 'the real change worth watching is' or 'one notable \
-         signal is'. Bring the external material into the relationship and current conversation \
-         before speaking. Explain evidence or uncertainty only where it naturally supports the \
-         point. No process narration. After private work and any candidate tool call, return exactly \
-         `{silent_marker}`; never put user-visible prose in the final response."
-    )
-}
-
 pub(super) fn context_maintenance_prompt(source_bundle: &str, completion_marker: &str) -> String {
     format!(
         "Refresh symbiont-d's operational context from the bounded source bundle below. This is \

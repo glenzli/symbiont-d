@@ -231,8 +231,16 @@ function renderRun(run) {
   }
 
   const footer = document.createElement("footer");
+  const stageLabels = {
+    scout: "侦察",
+    review: "复核",
+    explore: "探索",
+  };
   const modelText = run.modelRuns
-    .map((model) => `${model.displayName || model.model} · ${model.effort}`)
+    .map(
+      (model) =>
+        `${stageLabels[model.stage] || "探索"} ${model.displayName || model.model} · ${model.effort}`,
+    )
     .join(" → ");
   const pcp = run.pcpRecallCalls
     ? ` · PCP 召回 ${run.pcpRecallCalls}`

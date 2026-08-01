@@ -143,6 +143,7 @@ async fn background_budget_includes_memory_maintenance_without_counting_a_messag
     let mut invocation = autonomous_invocation(
         "maintenance-1",
         None,
+        "autonomous",
         &timestamp,
         &timestamp,
         42,
@@ -172,6 +173,7 @@ async fn reconciliation_counts_toward_both_background_budgets() {
     let mut invocation = autonomous_invocation(
         "reconciliation-preview",
         None,
+        "autonomous",
         &timestamp,
         &timestamp,
         42,
@@ -202,6 +204,7 @@ async fn reflection_outreach_counts_as_an_attention_interruption_not_exploration
     let mut invocation = autonomous_invocation(
         "reflection-outreach",
         None,
+        "autonomous",
         &timestamp,
         &timestamp,
         42,
@@ -297,6 +300,7 @@ async fn groups_recent_autonomous_runs_into_exploration_cycles() {
             autonomous_invocation(
                 "explore-root",
                 None,
+                "autonomous_scout",
                 &root_started,
                 &child_started,
                 120,
@@ -332,17 +336,32 @@ async fn groups_recent_autonomous_runs_into_exploration_cycles() {
             autonomous_invocation(
                 "explore-child",
                 Some("explore-root"),
+                "autonomous",
                 &child_started,
                 &completed,
                 80,
                 true,
-                Vec::new(),
+                vec![ToolTraceStep {
+                    sequence: 0,
+                    namespace: "symbiont".to_owned(),
+                    tool: "propose_proactive_message".to_owned(),
+                    started_at: child_started.clone(),
+                    completed_at: completed.clone(),
+                    duration_ms: 1_000,
+                    succeeded: true,
+                    arguments: json!({
+                        "message": "A signal worth surfacing.",
+                        "reason": "It changes the current decision.",
+                        "source_revision_ids": ["rev_0123456789abcdef0123456789abcdef"]
+                    }),
+                    result: json!({"success": true}),
+                }],
                 vec![ExecutionTraceEvent {
                     sequence: 0,
                     kind: TraceEventKind::AgentMessage,
                     occurred_at: completed.clone(),
                     title: "Final assistant message".to_owned(),
-                    details: json!({"text": "A signal worth surfacing."}),
+                    details: json!({"text": "<symbiont-silent/>"}),
                 }],
             ),
         ])
@@ -353,6 +372,8 @@ async fn groups_recent_autonomous_runs_into_exploration_cycles() {
     assert_eq!(runs.len(), 1);
     assert_eq!(runs[0].trace_id, "explore-root");
     assert_eq!(runs[0].model_runs.len(), 2);
+    assert_eq!(runs[0].model_runs[0].stage, "scout");
+    assert_eq!(runs[0].model_runs[1].stage, "review");
     assert_eq!(runs[0].total_tokens, 200);
     assert_eq!(runs[0].pcp_recall_calls, 1);
     assert_eq!(runs[0].web_searches, 1);
@@ -362,6 +383,9 @@ async fn groups_recent_autonomous_runs_into_exploration_cycles() {
         runs[0].message.as_deref(),
         Some("A signal worth surfacing.")
     );
+    let headline = store.headline("2025-12-31T16:00:00Z").await.unwrap();
+    assert_eq!(headline.autonomous_tokens_today, 200);
+    assert_eq!(headline.autonomous_messages_today, 1);
 
     std::fs::remove_file(path).unwrap();
 }
@@ -370,6 +394,7 @@ async fn groups_recent_autonomous_runs_into_exploration_cycles() {
 fn autonomous_invocation(
     id: &str,
     parent_id: Option<&str>,
+    origin: &str,
     started_at: &str,
     completed_at: &str,
     total_tokens: u64,
@@ -382,7 +407,7 @@ fn autonomous_invocation(
         parent_id: parent_id.map(str::to_owned),
         thread_id: "autonomous-thread".to_owned(),
         turn_id: id.to_owned(),
-        origin: "autonomous".to_owned(),
+        origin: origin.to_owned(),
         lane: "observe".to_owned(),
         requested_model: "gpt-test".to_owned(),
         effective_model: "gpt-test".to_owned(),

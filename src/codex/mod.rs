@@ -1,4 +1,5 @@
 mod approvals;
+mod autonomous;
 mod client;
 mod images;
 mod prompts;

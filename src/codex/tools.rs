@@ -424,6 +424,69 @@ impl SymbiontTools {
                     },
                     {
                         "type": "function",
+                        "name": "submit_exploration_finding",
+                        "description": "During autonomous reconnaissance only, hand one compact evidence packet to the stronger conversational reviewer. This is private, read-only work: it is not a draft message, interruption decision, Hunch mutation, or durable memory write.",
+                        "inputSchema": {
+                            "type": "object",
+                            "properties": {
+                                "topic": {
+                                    "type": "string",
+                                    "maxLength": 240,
+                                    "description": "A discriminating subject, not a broad category."
+                                },
+                                "claim": {
+                                    "type": "string",
+                                    "maxLength": 1800,
+                                    "description": "The consequential external claim or change supported by the evidence."
+                                },
+                                "evidence": {
+                                    "type": "array",
+                                    "minItems": 1,
+                                    "maxItems": 6,
+                                    "items": {
+                                        "type": "object",
+                                        "properties": {
+                                            "source": {"type": "string", "maxLength": 600},
+                                            "finding": {"type": "string", "maxLength": 1200}
+                                        },
+                                        "required": ["source", "finding"],
+                                        "additionalProperties": false
+                                    }
+                                },
+                                "connection_hypothesis": {
+                                    "type": "string",
+                                    "maxLength": 1200,
+                                    "description": "A tentative account of why this may matter in the shared conversation."
+                                },
+                                "strongest_counterpoint": {
+                                    "type": "string",
+                                    "maxLength": 1200,
+                                    "description": "The strongest reason the connection, interpretation, or timing may be wrong."
+                                },
+                                "source_revision_ids": {
+                                    "type": "array",
+                                    "items": {"type": "string"},
+                                    "minItems": 1,
+                                    "maxItems": 50,
+                                    "description": "Exact conversation Revisions that make this candidate timely."
+                                },
+                                "related_hunch_revision_ids": {
+                                    "type": "array",
+                                    "items": {"type": "string"},
+                                    "maxItems": 8,
+                                    "description": "Exact current Hunch Revisions materially tested by the evidence."
+                                }
+                            },
+                            "required": [
+                                "topic", "claim", "evidence", "connection_hypothesis",
+                                "strongest_counterpoint", "source_revision_ids",
+                                "related_hunch_revision_ids"
+                            ],
+                            "additionalProperties": false
+                        }
+                    },
+                    {
+                        "type": "function",
                         "name": "propose_proactive_message",
                         "description": "During background Reflection or autonomous exploration, propose at most one exact user-visible message when private work reveals a distinct thought worth initiating now. This is a candidate, not guaranteed delivery. The message must begin a natural conversation, never report internal work, summarize maintenance, or presume an unanswered user prompt.",
                         "inputSchema": {
@@ -957,6 +1020,28 @@ impl SymbiontTools {
         ])
     }
 
+    pub(super) fn scout_specifications() -> Value {
+        let mut specifications = Self::specifications();
+        let Some(namespaces) = specifications.as_array_mut() else {
+            return specifications;
+        };
+        for namespace in namespaces {
+            let allowed = match namespace.get("name").and_then(Value::as_str) {
+                Some("symbiont") => &["fetch_url", "submit_exploration_finding"][..],
+                Some("pcp") => &["describe", "list_scopes", "search_pages", "read_pages"][..],
+                _ => &[][..],
+            };
+            if let Some(tools) = namespace.get_mut("tools").and_then(Value::as_array_mut) {
+                tools.retain(|tool| {
+                    tool.get("name")
+                        .and_then(Value::as_str)
+                        .is_some_and(|name| allowed.contains(&name))
+                });
+            }
+        }
+        specifications
+    }
+
     #[cfg(test)]
     pub(super) async fn execute(&self, params: &Value) -> ToolExecution {
         self.execute_for_model(params, None, "interactive").await
@@ -1027,6 +1112,11 @@ impl SymbiontTools {
     ) -> Result<(String, Option<EscalationRequest>)> {
         if run_origin.starts_with("reconciliation_") && tool != "complete_reconciliation" {
             anyhow::bail!("{tool} is outside the dedicated durable-memory reconciliation boundary");
+        }
+        if run_origin == "autonomous_scout"
+            && !matches!(tool, "submit_exploration_finding" | "fetch_url")
+        {
+            anyhow::bail!("{tool} is outside the read-only autonomous reconnaissance boundary");
         }
         match tool {
             "complete_orientation" => {
@@ -1372,6 +1462,51 @@ impl SymbiontTools {
                     None,
                 ))
             }
+            "submit_exploration_finding" => {
+                require_scout_origin(run_origin, tool)?;
+                let source_revision_ids = string_array(arguments, "source_revision_ids")?;
+                if source_revision_ids.is_empty() {
+                    anyhow::bail!("an exploration finding requires conversation Revisions");
+                }
+                self.ensure_reflection_sources(&source_revision_ids).await?;
+                let related_hunch_revision_ids =
+                    string_array(arguments, "related_hunch_revision_ids")?;
+                if related_hunch_revision_ids.len() > 8 {
+                    anyhow::bail!("an exploration finding may reference at most eight Hunches");
+                }
+                let evidence = arguments
+                    .get("evidence")
+                    .and_then(Value::as_array)
+                    .context("submit_exploration_finding requires evidence")?;
+                if evidence.is_empty() || evidence.len() > 6 {
+                    anyhow::bail!("an exploration finding requires one to six evidence items");
+                }
+                for (field, limit) in [
+                    ("topic", 240),
+                    ("claim", 1_800),
+                    ("connection_hypothesis", 1_200),
+                    ("strongest_counterpoint", 1_200),
+                ] {
+                    if required_text(arguments, field)?.chars().count() > limit {
+                        anyhow::bail!("exploration finding {field} exceeds {limit} characters");
+                    }
+                }
+                for item in evidence {
+                    if required_text(item, "source")?.chars().count() > 600
+                        || required_text(item, "finding")?.chars().count() > 1_200
+                    {
+                        anyhow::bail!("exploration evidence exceeds its compact handoff limit");
+                    }
+                }
+                Ok((
+                    serde_json::to_string(&json!({
+                        "accepted": true,
+                        "sourceRevisionIds": source_revision_ids,
+                        "relatedHunchRevisionIds": related_hunch_revision_ids
+                    }))?,
+                    None,
+                ))
+            }
             "propose_proactive_message" => {
                 require_proactive_origin(run_origin, tool)?;
                 let source_revision_ids = string_array(arguments, "source_revision_ids")?;
@@ -1542,13 +1677,13 @@ impl SymbiontTools {
         tool_or_model: Option<&str>,
         run_origin: &str,
     ) -> Result<(String, Option<EscalationRequest>)> {
-        if run_origin == "reconciliation_preview"
+        if matches!(run_origin, "reconciliation_preview" | "autonomous_scout")
             && matches!(
                 tool,
                 "assess_validity" | "write_summary" | "write_page" | "revise_page" | "link_pages"
             )
         {
-            anyhow::bail!("the reconciliation preview is host-enforced read-only");
+            anyhow::bail!("this model stage is host-enforced read-only");
         }
         let result = match tool {
             "describe" => serde_json::to_value(self.continuity.store().capabilities())?,
@@ -1760,6 +1895,13 @@ fn require_proactive_origin(run_origin: &str, tool: &str) -> Result<()> {
         anyhow::bail!(
             "{tool} is available only to autonomous exploration or background Reflection"
         );
+    }
+    Ok(())
+}
+
+fn require_scout_origin(run_origin: &str, tool: &str) -> Result<()> {
+    if run_origin != "autonomous_scout" {
+        anyhow::bail!("{tool} is available only to autonomous reconnaissance");
     }
     Ok(())
 }

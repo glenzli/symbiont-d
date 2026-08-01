@@ -32,6 +32,7 @@ pub struct ExplorationModelRun {
     pub model: String,
     pub display_name: String,
     pub effort: String,
+    pub stage: String,
 }
 
 pub(super) fn read_recent(
@@ -43,7 +44,7 @@ pub(super) fn read_recent(
             "
             SELECT id
             FROM invocations
-            WHERE origin = 'autonomous' AND parent_id IS NULL
+            WHERE origin IN ('autonomous_scout', 'autonomous') AND parent_id IS NULL
             ORDER BY started_at DESC
             LIMIT ?1
             ",
@@ -68,11 +69,26 @@ pub(super) fn read_recent(
 fn summarize(bundle: TraceBundle) -> ExplorationRunSummary {
     let surfaced = bundle.runs.iter().any(|run| run.produced_message);
     let mut message = None;
+    let mut agent_message = None;
     let mut reasoning_summaries = Vec::new();
     let mut search_queries = Vec::new();
     let mut web_searches = 0_u64;
 
     for run in &bundle.runs {
+        for step in &run.steps {
+            if step.succeeded
+                && step.namespace == "symbiont"
+                && step.tool == "propose_proactive_message"
+            {
+                message = step
+                    .arguments
+                    .get("message")
+                    .and_then(serde_json::Value::as_str)
+                    .map(str::trim)
+                    .filter(|text| !text.is_empty())
+                    .map(str::to_owned);
+            }
+        }
         for event in &run.events {
             match &event.kind {
                 TraceEventKind::ReasoningSummary => {
@@ -102,7 +118,7 @@ fn summarize(bundle: TraceBundle) -> ExplorationRunSummary {
                 }
                 TraceEventKind::AgentMessage => {
                     if let Some(text) = event.details.get("text").and_then(|value| value.as_str()) {
-                        message = Some(text.to_owned());
+                        agent_message = Some(text.to_owned());
                     }
                 }
                 _ => {}
@@ -136,8 +152,16 @@ fn summarize(bundle: TraceBundle) -> ExplorationRunSummary {
             model: run.model.clone(),
             display_name: run.display_name.clone(),
             effort: run.effort.clone(),
+            stage: match (run.origin.as_str(), run.parent_id.is_some()) {
+                ("autonomous_scout", _) => "scout",
+                ("autonomous", true) => "review",
+                _ => "explore",
+            }
+            .to_owned(),
         })
         .collect();
+
+    let message = message.or(agent_message);
 
     reasoning_summaries.truncate(24);
     search_queries.truncate(12);

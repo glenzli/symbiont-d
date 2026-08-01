@@ -1290,13 +1290,31 @@ struct ExplorationRedelivery {
 }
 
 fn exploration_redelivery(trace: &TraceBundle) -> Option<ExplorationRedelivery> {
-    if trace.runs.first()?.origin != "autonomous"
-        || trace.runs.last()?.status != "completed"
+    if !matches!(
+        trace.runs.first()?.origin.as_str(),
+        "autonomous_scout" | "autonomous"
+    ) || trace.runs.last()?.status != "completed"
         || !trace.runs.iter().any(|run| run.produced_message)
     {
         return None;
     }
-    let message = trace
+    let proposed_message = trace
+        .runs
+        .iter()
+        .flat_map(|run| &run.steps)
+        .filter(|step| {
+            step.succeeded
+                && step.namespace == "symbiont"
+                && step.tool == "propose_proactive_message"
+        })
+        .filter_map(|step| {
+            step.arguments
+                .get("message")
+                .and_then(serde_json::Value::as_str)
+        })
+        .map(str::trim)
+        .rfind(|text| !text.is_empty());
+    let agent_message = trace
         .runs
         .iter()
         .flat_map(|run| &run.events)
@@ -1308,8 +1326,8 @@ fn exploration_redelivery(trace: &TraceBundle) -> Option<ExplorationRedelivery> 
                 .and_then(serde_json::Value::as_str)
         })
         .map(str::trim)
-        .rfind(|text| !text.is_empty())?
-        .to_owned();
+        .rfind(|text| !text.is_empty());
+    let message = proposed_message.or(agent_message)?.to_owned();
     let metadata = MessageMetadata {
         runs: trace
             .runs

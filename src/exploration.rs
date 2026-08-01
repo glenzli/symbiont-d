@@ -256,7 +256,7 @@ async fn run_scheduler(
     let mut config_updates = autonomy.subscribe();
     let started_at = Utc::now();
     let mut last_run_at = usage
-        .latest_completed_at("autonomous")
+        .latest_exploration_completed_at()
         .await
         .ok()
         .flatten()

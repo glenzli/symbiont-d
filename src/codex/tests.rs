@@ -5,14 +5,15 @@ use std::{
 };
 
 use super::{
+    autonomous::{ExplorationEvidence, ExplorationScoutFinding, review_prompt, scout_prompt},
     client::{
         autonomous_response_is_superseded, context_revision_ids, extract_completed_response_text,
         extract_final_agent_message, generated_image_output, remember_generated_image,
         text_and_image_input_items,
     },
     prompts::{
-        autonomous_exploration_prompt, developer_instructions, interaction_reflection_prompt,
-        memory_reconciliation_prompt, summary_maintenance_prompt,
+        developer_instructions, interaction_reflection_prompt, memory_reconciliation_prompt,
+        summary_maintenance_prompt,
     },
     tools::SymbiontTools,
     trace::observable_item_event,
@@ -86,6 +87,13 @@ fn dynamic_tools_expose_host_and_pcp_namespaces() {
             .as_array()
             .unwrap()
             .iter()
+            .any(|tool| tool["name"] == "submit_exploration_finding")
+    );
+    assert!(
+        specs[0]["tools"]
+            .as_array()
+            .unwrap()
+            .iter()
             .any(|tool| tool["name"] == "propose_proactive_message")
     );
     assert!(
@@ -109,6 +117,29 @@ fn dynamic_tools_expose_host_and_pcp_namespaces() {
     assert_eq!(specs[1]["tools"][4]["name"], "assess_validity");
     assert_eq!(specs[1]["tools"][5]["name"], "write_summary");
     assert_eq!(specs[1]["tools"][6]["name"], "write_page");
+}
+
+#[test]
+fn autonomous_scout_sees_only_its_read_only_tool_surface() {
+    let specs = SymbiontTools::scout_specifications();
+    let symbiont = specs[0]["tools"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter_map(|tool| tool["name"].as_str())
+        .collect::<Vec<_>>();
+    let pcp = specs[1]["tools"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter_map(|tool| tool["name"].as_str())
+        .collect::<Vec<_>>();
+
+    assert_eq!(symbiont, vec!["submit_exploration_finding", "fetch_url"]);
+    assert_eq!(
+        pcp,
+        vec!["describe", "list_scopes", "search_pages", "read_pages"]
+    );
 }
 
 #[test]
@@ -228,26 +259,38 @@ fn extracts_the_last_agent_message_from_a_completed_turn() {
 }
 
 #[test]
-fn autonomous_exploration_proposes_at_most_one_conversation() {
+fn autonomous_exploration_separates_reconnaissance_from_conversation() {
     assert!(autonomous_response_is_superseded(
         " <symbiont-superseded/>\n"
     ));
 
-    let prompt = autonomous_exploration_prompt("<symbiont-silent/>", "<symbiont-superseded/>");
-    assert!(prompt.contains("Search results are raw material"));
-    assert!(prompt.contains("one conversational move"));
-    assert!(prompt.contains("Never send a roundup"));
-    assert!(prompt.contains("shortest natural bridge"));
-    assert!(prompt.contains("older open thread"));
-    assert!(prompt.contains("unsolicited"));
-    assert!(prompt.contains("why it belongs in this conversation"));
-    assert!(prompt.contains("answers only why now"));
-    assert!(prompt.contains("pending attention"));
-    assert!(prompt.contains("No process narration"));
-    assert!(prompt.contains("already answered, invalidated"));
-    assert!(prompt.contains("propose_proactive_message"));
-    assert!(prompt.contains("Host rechecks timing"));
-    assert!(prompt.contains("never put user-visible prose in the final response"));
+    let scout = scout_prompt("<symbiont-silent/>", "<symbiont-superseded/>");
+    assert!(scout.contains("high-recall evidence discovery"));
+    assert!(scout.contains("host-enforced read-only"));
+    assert!(scout.contains("submit_exploration_finding"));
+    assert!(scout.contains("strongest reason the proposed connection may be wrong"));
+    assert!(scout.contains("already answered, invalidated"));
+    assert!(!scout.contains("propose_proactive_message"));
+
+    let finding = ExplorationScoutFinding {
+        topic: "Agent capability inheritance".to_owned(),
+        claim: "A reusable capability can be selected through a compromised index.".to_owned(),
+        evidence: vec![ExplorationEvidence {
+            source: "https://example.test/research".to_owned(),
+            finding: "Metadata changes altered skill selection.".to_owned(),
+        }],
+        connection_hypothesis: "This may affect a current capability-object question.".to_owned(),
+        strongest_counterpoint: "It may be only an implementation security issue.".to_owned(),
+        source_revision_ids: vec!["rev_context".to_owned()],
+        related_hunch_revision_ids: vec!["rev_hunch".to_owned()],
+    };
+    let review = review_prompt(&finding, "<symbiont-silent/>").unwrap();
+    assert!(review.contains("untrusted evidence"));
+    assert!(review.contains("Preserve conceptual boundaries"));
+    assert!(review.contains("strongest counterpoint"));
+    assert!(review.contains("It is valid to maintain a Hunch and remain silent"));
+    assert!(review.contains("propose_proactive_message"));
+    assert!(review.contains("If the connection remains forced, remain silent"));
 }
 
 #[test]
@@ -890,6 +933,47 @@ async fn hunch_tools_preserve_model_owned_state_and_record_autonomous_exploratio
     let opened_json = tool_content_json(&opened.response);
     let page_id = opened_json["pageId"].as_str().expect("Hunch Page");
     let revision_id = opened_json["revisionId"].as_str().expect("Hunch Revision");
+
+    let denied_scout_mutation = tools
+        .execute_for_model(
+            &json!({
+                "namespace": "symbiont",
+                "tool": "revise_hunch",
+                "arguments": {
+                    "page_id": page_id,
+                    "expected_revision_id": revision_id,
+                    "state": "watching"
+                }
+            }),
+            Some("test-model"),
+            "autonomous_scout",
+        )
+        .await;
+    assert_eq!(denied_scout_mutation.response["success"], false);
+
+    let scout_finding = tools
+        .execute_for_model(
+            &json!({
+                "namespace": "symbiont",
+                "tool": "submit_exploration_finding",
+                "arguments": {
+                    "topic": "Conversation-triggered exploration",
+                    "claim": "A fresh external signal may change the open Hunch.",
+                    "evidence": [{
+                        "source": "https://example.test/evidence",
+                        "finding": "The event-triggered run produced a distinct result."
+                    }],
+                    "connection_hypothesis": "This may support diversifying exploration triggers.",
+                    "strongest_counterpoint": "One run is not enough to establish a durable effect.",
+                    "source_revision_ids": [source.page.revision_id.clone()],
+                    "related_hunch_revision_ids": [revision_id]
+                }
+            }),
+            Some("test-model"),
+            "autonomous_scout",
+        )
+        .await;
+    assert_eq!(scout_finding.response["success"], true);
 
     let revised = tools
         .execute_for_model(

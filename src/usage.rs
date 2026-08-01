@@ -431,7 +431,7 @@ impl UsageStore {
                         COALESCE(SUM(
                             CASE
                                 WHEN origin IN (
-                                    'autonomous', 'maintenance',
+                                    'autonomous', 'autonomous_scout', 'maintenance',
                                     'reconciliation_preview', 'reconciliation_apply'
                                 )
                                      AND completed_at >= ?1
@@ -441,7 +441,7 @@ impl UsageStore {
                         COALESCE(SUM(
                             CASE
                                 WHEN origin IN (
-                                    'autonomous', 'maintenance', 'reflection',
+                                    'autonomous', 'autonomous_scout', 'maintenance', 'reflection',
                                     'reconciliation_preview', 'reconciliation_apply'
                                 )
                                      AND completed_at >= ?1
@@ -477,22 +477,26 @@ impl UsageStore {
         .context("join usage headline read")?
     }
 
-    pub async fn latest_completed_at(&self, origin: &str) -> Result<Option<String>> {
+    pub async fn latest_exploration_completed_at(&self) -> Result<Option<String>> {
         let path = self.path.clone();
-        let origin = origin.to_owned();
         task::spawn_blocking(move || -> Result<Option<String>> {
             let connection = Connection::open(&path)
                 .with_context(|| format!("open usage database {}", path.display()))?;
             connection
                 .query_row(
-                    "SELECT MAX(completed_at) FROM invocations WHERE origin = ?1",
-                    params![origin],
+                    "
+                    SELECT MAX(completed_at)
+                    FROM invocations
+                    WHERE origin IN ('autonomous_scout', 'autonomous')
+                      AND parent_id IS NULL
+                    ",
+                    [],
                     |row| row.get(0),
                 )
-                .context("read latest invocation completion")
+                .context("read latest autonomous exploration completion")
         })
         .await
-        .context("join latest invocation read")?
+        .context("join latest autonomous exploration read")?
     }
 
     pub async fn trace(&self, trace_id: &str) -> Result<Option<TraceBundle>> {
