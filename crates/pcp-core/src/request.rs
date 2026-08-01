@@ -2,8 +2,8 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use crate::{
-    Actor, LifecycleStatus, PagePayload, Projection, ProvenanceEvent, SearchMode, SourceRef,
-    ValidityStanding,
+    Actor, LifecycleStatus, PagePayload, Projection, ProvenanceEvent, SearchMode, SearchTermMatch,
+    SourceRef, ValidityStanding,
 };
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -78,6 +78,8 @@ pub struct RevisePageRequest {
     pub facets: Option<Value>,
     #[serde(default)]
     pub provenance: Vec<ProvenanceEvent>,
+    #[serde(default)]
+    pub initial_relations: Vec<InitialRelation>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub idempotency_key: Option<String>,
 }
@@ -101,6 +103,8 @@ pub struct SearchPagesRequest {
     pub query: String,
     pub scopes: Vec<String>,
     pub mode: SearchMode,
+    #[serde(default)]
+    pub term_match: SearchTermMatch,
     #[serde(default = "default_search_projections")]
     pub projections: Vec<Projection>,
     #[serde(default)]

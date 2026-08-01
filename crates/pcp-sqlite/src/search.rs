@@ -3,7 +3,7 @@ use std::collections::HashSet;
 use anyhow::{Context, Result};
 use pcp_core::{
     LifecycleStatus, PageValidity, PageValidityHint, Projection, SearchHit, SearchMode,
-    SearchPagesRequest, SearchResult,
+    SearchPagesRequest, SearchResult, SearchTermMatch,
 };
 use rusqlite::{Connection, params_from_iter, types::Value as SqlValue};
 use serde_json::{Map, Value};
@@ -64,6 +64,132 @@ impl SqlitePcpStore {
         })
         .await
     }
+
+    pub async fn browse_index(
+        &self,
+        scopes: Vec<String>,
+        limit: u32,
+        cursor: Option<String>,
+        max_chars: u32,
+    ) -> Result<SearchResult> {
+        if scopes.is_empty() {
+            anyhow::bail!("PCP index browse requires at least one authorized scope");
+        }
+        let limit = limit.clamp(1, crate::store::MAX_SEARCH_RESULTS) as usize;
+        let offset = parse_cursor(cursor.as_deref())?;
+        let max_chars = max_chars.clamp(1_000, 32_000) as usize;
+        self.run("summary index browse", move |connection| {
+            browse_index_once(&connection, &scopes, offset, limit, max_chars)
+        })
+        .await
+    }
+}
+
+fn browse_index_once(
+    connection: &Connection,
+    scopes: &[String],
+    offset: usize,
+    limit: usize,
+    max_chars: usize,
+) -> Result<SearchResult> {
+    let mut values = scopes
+        .iter()
+        .cloned()
+        .map(SqlValue::Text)
+        .collect::<Vec<_>>();
+    let mut sql = format!(
+        "SELECT {REVISION_COLUMNS},
+                substr(COALESCE(summary.content, r.payload_content, ''), 1, 700),
+                CASE WHEN summary.summary_revision_id IS NULL THEN 'payload' ELSE 'summary' END,
+                summary.summary_revision_id IS NOT NULL
+         FROM pcp_pages p
+         JOIN pcp_revisions r ON r.revision_id = p.current_revision_id
+         LEFT JOIN pcp_summary_heads summary_head
+           ON summary_head.target_revision_id = r.revision_id
+         LEFT JOIN pcp_summaries summary
+           ON summary.summary_revision_id = summary_head.current_summary_revision_id
+         WHERE r.namespace IN ("
+    );
+    push_placeholders(&mut sql, scopes.len());
+    sql.push_str(
+        ")
+         AND r.lifecycle_status = 'active'
+         AND COALESCE(json_extract(r.facets_json, '$.kind'), '') NOT IN (
+             'conversation_event', 'summary_projection', 'symbiont_current_map',
+             'symbiont_open_loops', 'symbiont_profile_review', 'symbiont_hunch',
+             'user_orientation', 'conversation_checkpoint', 'image_asset', 'tombstone'
+         )
+         AND (
+             summary.summary_revision_id IS NOT NULL
+             OR r.actor_type IN ('model', 'system')
+         )
+         ORDER BY
+             CASE WHEN COALESCE(json_extract(r.facets_json, '$.indexRole'), '') = 'aggregate'
+                  THEN 0 ELSE 1 END,
+             COALESCE(r.observed_at, r.created_at) DESC,
+             r.revision_id DESC
+         LIMIT ? OFFSET ?",
+    );
+    values.push(SqlValue::Integer((limit + 1) as i64));
+    values.push(SqlValue::Integer(offset as i64));
+
+    let mut statement = connection
+        .prepare(&sql)
+        .context("prepare PCP Summary index browse")?;
+    let mut rows = statement
+        .query(params_from_iter(values.iter()))
+        .context("browse PCP Summary index")?;
+    let mut hits = Vec::new();
+    let mut used_chars = 0_usize;
+    let mut has_more = false;
+    while let Some(row) = rows.next().context("read PCP Summary index row")? {
+        if hits.len() >= limit {
+            has_more = true;
+            break;
+        }
+        let revision = revision_from_row(row, false, true, false, false)?;
+        let snippet: String = row.get(17)?;
+        let matched_projection: String = row.get(18)?;
+        let has_summary: bool = row.get(19)?;
+        let entry_chars = snippet.chars().count().saturating_add(240);
+        if !hits.is_empty() && used_chars.saturating_add(entry_chars) > max_chars {
+            has_more = true;
+            break;
+        }
+        used_chars = used_chars.saturating_add(entry_chars);
+        let validity =
+            current_validity(connection, &revision.revision_id)?.map(compact_validity_hint);
+        let mut available_projections = vec![
+            Projection::Manifest,
+            Projection::Payload,
+            Projection::Relations,
+            Projection::Facets,
+        ];
+        if has_summary {
+            available_projections.insert(1, Projection::Summary);
+        }
+        if validity.is_some() {
+            available_projections.insert(usize::from(has_summary) + 1, Projection::Validity);
+        }
+        hits.push(SearchHit {
+            page_id: revision.page_id,
+            revision_id: revision.revision_id,
+            namespace: revision.namespace,
+            lifecycle_status: revision.lifecycle_status,
+            created_at: revision.created_at,
+            observed_at: revision.observed_at,
+            snippet,
+            matched_by: "index_browse".to_owned(),
+            matched_projection,
+            facets: compact_search_facets(revision.facets),
+            validity,
+            available_projections,
+        });
+    }
+    Ok(SearchResult {
+        next_cursor: has_more.then(|| (offset + hits.len()).to_string()),
+        hits,
+    })
 }
 
 fn search_once(
@@ -169,7 +295,7 @@ fn search_revision_surface(
 
     match mode {
         SearchMode::Text => {
-            let fts = fts_query(&request.query)
+            let fts = fts_query(&request.query, &request.term_match)
                 .context("text search requires at least one searchable term")?;
             sql.push_str(if surface == "payload" {
                 " AND pcp_revision_fts.payload_content MATCH ?"
@@ -230,7 +356,7 @@ fn search_summaries(
     limit: usize,
 ) -> Result<SearchResult> {
     let fts = (mode == SearchMode::Text)
-        .then(|| fts_query(&request.query))
+        .then(|| fts_query(&request.query, &request.term_match))
         .flatten();
     if mode == SearchMode::Text && fts.is_none() {
         anyhow::bail!("text search requires at least one searchable term");
@@ -607,7 +733,7 @@ fn push_placeholders(sql: &mut String, count: usize) {
     }
 }
 
-fn fts_query(query: &str) -> Option<String> {
+fn fts_query(query: &str, term_match: &SearchTermMatch) -> Option<String> {
     let terms = query
         .split_whitespace()
         .map(|term| {
@@ -618,7 +744,11 @@ fn fts_query(query: &str) -> Option<String> {
         .filter(|term| !term.is_empty())
         .map(|term| format!("\"{}\"", term.replace('"', "\"\"")))
         .collect::<Vec<_>>();
-    (!terms.is_empty()).then(|| terms.join(" AND "))
+    let operator = match term_match {
+        SearchTermMatch::All => " AND ",
+        SearchTermMatch::Any => " OR ",
+    };
+    (!terms.is_empty()).then(|| terms.join(operator))
 }
 
 fn parse_cursor(cursor: Option<&str>) -> Result<usize> {

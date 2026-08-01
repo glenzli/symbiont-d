@@ -112,11 +112,12 @@ fn dynamic_tools_expose_host_and_pcp_namespaces() {
     );
     assert_eq!(specs[1]["name"], "pcp");
     assert_eq!(specs[1]["tools"][0]["name"], "describe");
-    assert_eq!(specs[1]["tools"][2]["name"], "search_pages");
-    assert_eq!(specs[1]["tools"][3]["name"], "read_pages");
-    assert_eq!(specs[1]["tools"][4]["name"], "assess_validity");
-    assert_eq!(specs[1]["tools"][5]["name"], "write_summary");
-    assert_eq!(specs[1]["tools"][6]["name"], "write_page");
+    assert_eq!(specs[1]["tools"][2]["name"], "browse_index");
+    assert_eq!(specs[1]["tools"][3]["name"], "search_pages");
+    assert_eq!(specs[1]["tools"][4]["name"], "read_pages");
+    assert_eq!(specs[1]["tools"][5]["name"], "assess_validity");
+    assert_eq!(specs[1]["tools"][6]["name"], "write_summary");
+    assert_eq!(specs[1]["tools"][7]["name"], "write_page");
 }
 
 #[test]
@@ -138,7 +139,13 @@ fn autonomous_scout_sees_only_its_read_only_tool_surface() {
     assert_eq!(symbiont, vec!["submit_exploration_finding", "fetch_url"]);
     assert_eq!(
         pcp,
-        vec!["describe", "list_scopes", "search_pages", "read_pages"]
+        vec![
+            "describe",
+            "list_scopes",
+            "browse_index",
+            "search_pages",
+            "read_pages"
+        ]
     );
 }
 

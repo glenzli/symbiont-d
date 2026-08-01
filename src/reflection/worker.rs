@@ -21,6 +21,7 @@ use crate::{
     curiosity::CuriosityStore,
     exploration::{ExplorationHandle, quiet_end, today_started_at},
     memory::{MemoryEntry, MemoryRole, MessageMetadata},
+    pcp_index::PcpIndex,
     profile::{ProfileStore, SetupStatus},
     symbiont_context::SymbiontContextStore,
     usage::UsageStore,
@@ -58,6 +59,7 @@ impl ReflectionHandle {
     #[allow(clippy::too_many_arguments)]
     pub fn start(
         store: Arc<ReflectionStore>,
+        pcp_index: Arc<PcpIndex>,
         autonomy: Arc<AutonomyStore>,
         profile: Arc<ProfileStore>,
         codex: Arc<Mutex<CodexClient>>,
@@ -74,6 +76,7 @@ impl ReflectionHandle {
         tokio::spawn(run(
             Arc::clone(&store),
             Arc::clone(&runtime),
+            pcp_index,
             autonomy,
             profile,
             codex,
@@ -202,6 +205,7 @@ impl ReflectionHandle {
 async fn run(
     store: Arc<ReflectionStore>,
     runtime: Arc<RwLock<ReflectionRuntime>>,
+    pcp_index: Arc<PcpIndex>,
     autonomy: Arc<AutonomyStore>,
     profile: Arc<ProfileStore>,
     codex: Arc<Mutex<CodexClient>>,
@@ -263,6 +267,7 @@ async fn run(
         match reflect_once(
             &store,
             &runtime,
+            &pcp_index,
             &autonomy,
             &profile,
             &codex,
@@ -311,6 +316,7 @@ enum ReflectState {
 async fn reflect_once(
     store: &ReflectionStore,
     runtime: &Arc<RwLock<ReflectionRuntime>>,
+    pcp_index: &PcpIndex,
     autonomy: &AutonomyStore,
     profile: &ProfileStore,
     codex: &Mutex<CodexClient>,
@@ -494,6 +500,9 @@ async fn reflect_once(
             batch.to_event_id,
         )
         .await?;
+    if let Err(error) = pcp_index.sync_all().await {
+        warn!(%error, "could not refresh the PCP model-written index after Reflection");
+    }
     store.prune().await?;
     {
         let mut current = runtime.write().await;

@@ -90,6 +90,23 @@ impl SearchMode {
     }
 }
 
+#[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SearchTermMatch {
+    #[default]
+    All,
+    Any,
+}
+
+impl SearchTermMatch {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::All => "all",
+            Self::Any => "any",
+        }
+    }
+}
+
 #[derive(Clone, Debug, Deserialize, Eq, Hash, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Projection {

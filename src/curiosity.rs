@@ -186,6 +186,7 @@ impl CuriosityStore {
                 query: HUNCH_KIND.to_owned(),
                 scopes: vec![self.continuity.project_scope().to_owned()],
                 mode: SearchMode::Exact,
+                term_match: pcp_core::SearchTermMatch::All,
                 projections: vec![Projection::Facets],
                 filters: SearchFilters {
                     lifecycle_status: vec![LifecycleStatus::Active, LifecycleStatus::Archived],

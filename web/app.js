@@ -32,6 +32,7 @@ const appState = {
   exploration: null,
   reflection: null,
   reconciliation: null,
+  memoryIndex: null,
   conversation: null,
   bridge: {
     codexTaskAccess: false,
@@ -312,6 +313,7 @@ function applyRuntime(payload) {
       ? { ...appState.reconciliation, runtime: payload.reconciliation }
       : payload.reconciliation;
   }
+  appState.memoryIndex = payload.memoryIndex || appState.memoryIndex;
   appState.conversation = payload.conversation || appState.conversation;
   appState.computePolicies =
     payload.computePolicies || appState.computePolicies;

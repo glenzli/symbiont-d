@@ -3,7 +3,7 @@ use std::sync::Arc;
 use anyhow::{Context, Result};
 use pcp_core::{
     InitialRelation, LifecycleStatus, Projection, ReadPagesRequest, SearchFilters, SearchMode,
-    SearchPagesRequest, SourceRef, ValidityStanding,
+    SearchPagesRequest, SearchTermMatch, SourceRef, ValidityStanding,
 };
 use serde_json::{Value, json};
 
@@ -773,8 +773,27 @@ impl SymbiontTools {
                     },
                     {
                         "type": "function",
+                        "name": "browse_index",
+                        "description": "Browse a bounded model-written memory index without guessing keywords. Returns compact routing text from current Summary Projections and aggregate Derived Pages; semantically compare these candidates yourself, then read only selected Detail. This is the preferred broad recall path when the older topic is uncertain.",
+                        "inputSchema": {
+                            "type": "object",
+                            "properties": {
+                                "scopes": {
+                                    "type": "array",
+                                    "items": {"type": "string"},
+                                    "description": "Authorized namespaces. Omit to browse all scopes available to this symbiont session."
+                                },
+                                "limit": {"type": "integer", "minimum": 1, "maximum": 50},
+                                "cursor": {"type": "string"},
+                                "max_chars": {"type": "integer", "minimum": 1000, "maximum": 32000}
+                            },
+                            "additionalProperties": false
+                        }
+                    },
+                    {
+                        "type": "function",
                         "name": "search_pages",
-                        "description": "Find candidate Page Revisions. mode controls matching: text is lexical, exact is literal, temporal browses recent Revisions, and graph follows one-hop Relations and provenance. projections independently choose compact Summary index, Payload Detail, and/or Facets; prefer Summary for broad recall, then read selected Detail. Omit scopes unless intentionally narrowing. Results are candidates, not universal relevance scores.",
+                        "description": "Find candidate Page Revisions from explicit anchors. mode controls matching: text is lexical, exact is literal, temporal browses recent Revisions, and graph follows one-hop Relations and provenance. For text, term_match=all requires every whitespace-delimited anchor; any broadens candidate generation for the model to judge. Do not submit a natural-language sentence with all. Use browse_index instead when no reliable anchors are known. Results are candidates, not universal relevance scores.",
                         "inputSchema": {
                             "type": "object",
                             "properties": {
@@ -787,6 +806,11 @@ impl SymbiontTools {
                                 "mode": {
                                     "type": "string",
                                     "enum": ["auto", "exact", "text", "graph", "temporal"]
+                                },
+                                "term_match": {
+                                    "type": "string",
+                                    "enum": ["all", "any"],
+                                    "description": "Lexical text-query operator. Defaults to all; any is a broad candidate generator whose results require model comparison."
                                 },
                                 "projections": {
                                     "type": "array",
@@ -923,7 +947,7 @@ impl SymbiontTools {
                     {
                         "type": "function",
                         "name": "write_page",
-                        "description": "Create a durable model-maintained Page, including an aggregate synthesis over related Revisions. Use source revision ids for exact PCP inputs, summarizes Relations for semantic coverage, and source refs for retrievable evidence outside PCP.",
+                        "description": "Create a durable model-maintained Page, including an aggregate synthesis over related Revisions. Use source revision ids for exact PCP inputs, aggregates Relations for covered members, derived_from for inferential inputs, and source refs for retrievable evidence outside PCP. summarizes is reserved for write_summary.",
                         "inputSchema": {
                             "type": "object",
                             "properties": {
@@ -1028,7 +1052,13 @@ impl SymbiontTools {
         for namespace in namespaces {
             let allowed = match namespace.get("name").and_then(Value::as_str) {
                 Some("symbiont") => &["fetch_url", "submit_exploration_finding"][..],
-                Some("pcp") => &["describe", "list_scopes", "search_pages", "read_pages"][..],
+                Some("pcp") => &[
+                    "describe",
+                    "list_scopes",
+                    "browse_index",
+                    "search_pages",
+                    "read_pages",
+                ][..],
                 _ => &[][..],
             };
             if let Some(tools) = namespace.get_mut("tools").and_then(Value::as_array_mut) {
@@ -1698,6 +1728,16 @@ impl SymbiontTools {
                     .await?;
                 json!({"scopes": scopes, "nextCursor": next_cursor})
             }
+            "browse_index" => serde_json::to_value(
+                self.continuity
+                    .browse_index(
+                        &string_array(arguments, "scopes")?,
+                        integer(arguments, "limit", 24).clamp(1, 50) as u32,
+                        optional_text(arguments, "cursor").map(str::to_owned),
+                        integer(arguments, "max_chars", 16_000).clamp(1_000, 32_000) as u32,
+                    )
+                    .await?,
+            )?,
             "search_pages" => {
                 let query = arguments
                     .get("query")
@@ -1712,6 +1752,12 @@ impl SymbiontTools {
                             .get("mode")
                             .and_then(Value::as_str)
                             .unwrap_or("auto"),
+                    )?,
+                    term_match: parse_search_term_match(
+                        arguments
+                            .get("term_match")
+                            .and_then(Value::as_str)
+                            .unwrap_or("all"),
                     )?,
                     projections: parse_search_projections(arguments.get("projections"))?,
                     filters: parse_search_filters(arguments.get("filters"))?,
@@ -1962,6 +2008,14 @@ fn parse_search_mode(value: &str) -> Result<SearchMode> {
         "graph" => Ok(SearchMode::Graph),
         "temporal" => Ok(SearchMode::Temporal),
         other => anyhow::bail!("unknown PCP search mode: {other}"),
+    }
+}
+
+fn parse_search_term_match(value: &str) -> Result<SearchTermMatch> {
+    match value {
+        "all" => Ok(SearchTermMatch::All),
+        "any" => Ok(SearchTermMatch::Any),
+        other => anyhow::bail!("unknown PCP text term match: {other}"),
     }
 }
 

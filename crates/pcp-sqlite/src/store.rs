@@ -70,6 +70,7 @@ impl SqlitePcpStore {
             supports_provenance_graph: true,
             relation_types: vec![
                 "contains",
+                "aggregates",
                 "derived_from",
                 "summarizes",
                 "follows",

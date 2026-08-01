@@ -2288,6 +2288,7 @@ fn activity_label(item: Option<&Value>) -> Option<String> {
                 match tool {
                     "describe" => "正在确认长期上下文能力",
                     "list_scopes" => "正在查看上下文范围",
+                    "browse_index" => "正在浏览长期上下文索引",
                     "search_pages" => "正在搜索长期上下文",
                     "read_pages" => "正在读取长期上下文",
                     "write_summary" => "正在建立上下文索引",

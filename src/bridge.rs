@@ -356,6 +356,7 @@ impl CodexBridge {
                     query: query.to_owned(),
                     scopes: Vec::new(),
                     mode: SearchMode::Text,
+                    term_match: pcp_core::SearchTermMatch::Any,
                     projections: vec![Projection::Summary, Projection::Payload],
                     filters: SearchFilters::default(),
                     limit: MAX_RECALLS,

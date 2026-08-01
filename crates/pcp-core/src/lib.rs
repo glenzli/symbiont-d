@@ -4,7 +4,7 @@ mod request;
 pub use model::{
     Actor, ActorType, Capabilities, LifecycleStatus, PagePayload, PageRevision, PageSummary,
     PageValidity, PageValidityHint, Projection, ProvenanceEvent, ReadPage, Relation, Scope,
-    SearchHit, SearchMode, SearchResult, SourceRef, ValidityStanding, WriteResult,
+    SearchHit, SearchMode, SearchResult, SearchTermMatch, SourceRef, ValidityStanding, WriteResult,
     WriteSummaryResult, WriteValidityResult,
 };
 pub use request::{

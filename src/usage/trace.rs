@@ -153,7 +153,11 @@ pub(super) fn read(connection: &Connection, trace_id: &str) -> Result<Option<Tra
 }
 
 fn is_pcp_recall(step: &ToolTraceStep) -> bool {
-    step.namespace == "pcp" && matches!(step.tool.as_str(), "search_pages" | "read_pages")
+    step.namespace == "pcp"
+        && matches!(
+            step.tool.as_str(),
+            "browse_index" | "search_pages" | "read_pages"
+        )
 }
 
 fn is_pcp_write(step: &ToolTraceStep) -> bool {

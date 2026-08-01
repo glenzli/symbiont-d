@@ -50,7 +50,7 @@ impl TurnToolDeduplicator {
 }
 
 fn is_cacheable_read(tool: &str) -> bool {
-    matches!(tool, "search_pages" | "read_pages")
+    matches!(tool, "browse_index" | "search_pages" | "read_pages")
 }
 
 fn is_pcp_mutation(tool: &str) -> bool {

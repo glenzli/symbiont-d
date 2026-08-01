@@ -283,7 +283,7 @@ function countPcpSteps(trace, predicate) {
 function isPcpRecall(step) {
   return (
     step.namespace === "pcp" &&
-    (step.tool === "search_pages" || step.tool === "read_pages")
+    ["browse_index", "search_pages", "read_pages"].includes(step.tool)
   );
 }
 

@@ -173,6 +173,10 @@ impl SqlitePcpStore {
                 return Ok(existing);
             }
 
+            for relation in &request.initial_relations {
+                ensure_revision_access(&transaction, &relation.to_revision_id, &allowed_scopes)?;
+            }
+
             let (owner_id, namespace, visibility, current_revision_id): (
                 String,
                 String,
@@ -229,6 +233,16 @@ impl SqlitePcpStore {
                 request.facets.as_ref(),
                 &provenance,
             )?;
+            for relation in request.initial_relations {
+                insert_relation(
+                    &transaction,
+                    &revision_id,
+                    &relation.relation_type,
+                    &relation.to_revision_id,
+                    &request.created_by,
+                    &timestamp,
+                )?;
+            }
             transaction
                 .execute(
                     "
@@ -554,7 +568,7 @@ fn ensure_acyclic_derivation_relation(
     relation_type: &str,
     to_revision_id: &str,
 ) -> Result<()> {
-    if !matches!(relation_type, "contains" | "derived_from" | "summarizes") {
+    if !matches!(relation_type, "aggregates" | "derived_from" | "summarizes") {
         return Ok(());
     }
     if from_revision_id == to_revision_id {
@@ -566,7 +580,7 @@ fn ensure_acyclic_derivation_relation(
             WITH RECURSIVE derivation_edges (from_revision_id, to_revision_id) AS (
                 SELECT from_revision_id, to_revision_id
                 FROM pcp_relations
-                WHERE relation_type IN ('contains', 'derived_from', 'summarizes')
+                WHERE relation_type IN ('aggregates', 'derived_from', 'summarizes')
                 UNION
                 SELECT derived_revision_id, input_revision_id
                 FROM pcp_provenance_inputs

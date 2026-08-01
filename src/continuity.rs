@@ -215,6 +215,7 @@ impl ContinuityHost {
             query: "conversation_checkpoint".to_owned(),
             scopes: vec![self.scopes.conversation.clone()],
             mode: SearchMode::Exact,
+            term_match: pcp_core::SearchTermMatch::All,
             projections: vec![Projection::Facets],
             filters: SearchFilters::default(),
             limit: 1,
@@ -413,6 +414,7 @@ impl ContinuityHost {
                         input_revision_ids: vec![previous_revision],
                         tool_or_model: Some("symbiont profile editor".to_owned()),
                     }],
+                    initial_relations: Vec::new(),
                     idempotency_key: None,
                 },
                 self.allowed_scopes(),
@@ -428,6 +430,7 @@ impl ContinuityHost {
                 query: "conversation_event".to_owned(),
                 scopes: vec![self.scopes.conversation.clone()],
                 mode: SearchMode::Exact,
+                term_match: pcp_core::SearchTermMatch::All,
                 projections: vec![Projection::Facets],
                 filters: SearchFilters::default(),
                 limit: limit.min(50),
@@ -679,6 +682,7 @@ impl ContinuityHost {
                 query: "image_asset".to_owned(),
                 scopes: vec![self.scopes.conversation.clone()],
                 mode: SearchMode::Exact,
+                term_match: pcp_core::SearchTermMatch::All,
                 projections: vec![Projection::Facets],
                 filters: SearchFilters::default(),
                 limit: limit.min(20) as u32,
@@ -867,6 +871,7 @@ impl ContinuityHost {
                     query: "conversation_event".to_owned(),
                     scopes: vec![self.scopes.conversation.clone()],
                     mode: SearchMode::Exact,
+                    term_match: pcp_core::SearchTermMatch::All,
                     projections: vec![Projection::Facets],
                     filters: SearchFilters::default(),
                     limit: remaining.min(50) as u32,
@@ -1066,6 +1071,23 @@ impl ContinuityHost {
     pub async fn search(&self, mut request: SearchPagesRequest) -> Result<SearchResult> {
         request.scopes = self.resolve_scopes(&request.scopes)?;
         self.store.search_pages(request).await
+    }
+
+    pub async fn browse_index(
+        &self,
+        requested_scopes: &[String],
+        limit: u32,
+        cursor: Option<String>,
+        max_chars: u32,
+    ) -> Result<SearchResult> {
+        self.store
+            .browse_index(
+                self.resolve_scopes(requested_scopes)?,
+                limit,
+                cursor,
+                max_chars,
+            )
+            .await
     }
 
     pub async fn read(&self, request: ReadPagesRequest) -> Result<Vec<ReadPage>> {
@@ -1292,6 +1314,7 @@ impl ContinuityHost {
                         input_revision_ids: provenance_inputs,
                         tool_or_model: Some("Codex".to_owned()),
                     }],
+                    initial_relations: Vec::new(),
                     idempotency_key,
                 },
                 self.allowed_scopes(),

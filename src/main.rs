@@ -15,6 +15,7 @@ mod diagnostics;
 mod exploration;
 mod maintenance;
 mod memory;
+mod pcp_index;
 mod permission;
 mod profile;
 mod reconciliation;
@@ -48,6 +49,7 @@ use conversation::ConversationCoordinator;
 use curiosity::CuriosityStore;
 use exploration::{ExplorationHandle, ExplorationIntentQueue};
 use memory::MemoryStore;
+use pcp_index::PcpIndex;
 use pcp_sqlite::SqlitePcpStore;
 use permission::PermissionBroker;
 use profile::ProfileStore;
@@ -135,6 +137,21 @@ async fn main() -> Result<()> {
         .backfill_messages(&continuity.recent_messages(100).await?)
         .await
         .context("backfill recent conversation into Reflection")?;
+    let pcp_index = Arc::new(PcpIndex::new(
+        Arc::clone(&continuity),
+        Arc::clone(&reflection_store),
+    ));
+    let index_calibration = pcp_index
+        .sync_all()
+        .await
+        .context("calibrate the PCP model-written index")?;
+    info!(
+        episode_pages = index_calibration.episode_pages,
+        created_pages = index_calibration.created_pages,
+        revised_pages = index_calibration.revised_pages,
+        unchanged_pages = index_calibration.unchanged_pages,
+        "PCP model-written index is calibrated"
+    );
     let compute_policies = Arc::new(
         ComputePolicyStore::open(resolve_data_path(
             &workspace,
@@ -243,6 +260,7 @@ async fn main() -> Result<()> {
     );
     let reflection = ReflectionHandle::start(
         Arc::clone(&reflection_store),
+        Arc::clone(&pcp_index),
         Arc::clone(&autonomy),
         Arc::clone(&profile),
         Arc::clone(&codex),
@@ -329,6 +347,7 @@ async fn main() -> Result<()> {
         exploration,
         reflection,
         reconciliation,
+        pcp_index,
         conversation,
         bridge,
         permissions,

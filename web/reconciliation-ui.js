@@ -9,6 +9,8 @@ export function initReconciliationUi(state) {
     "#reconciliation-candidate-count",
   );
   const lastRun = document.querySelector("#reconciliation-last-run");
+  const indexCount = document.querySelector("#memory-index-count");
+  const indexLastSync = document.querySelector("#memory-index-last-sync");
   const previewButton = document.querySelector("#preview-reconciliation");
   const applyButton = document.querySelector("#apply-reconciliation");
   const content = document.querySelector("#reconciliation-content");
@@ -111,6 +113,13 @@ export function initReconciliationUi(state) {
     candidateCount.textContent = `${runtime.candidateCount || 0} 页`;
     lastRun.textContent = runtime.lastRunAt
       ? formatDate(runtime.lastRunAt)
+      : "尚未运行";
+    const memoryIndex = state.memoryIndex;
+    indexCount.textContent = `${memoryIndex?.episodePages || 0} 页`;
+    indexLastSync.textContent = memoryIndex?.lastSyncAt
+      ? memoryIndex.phase === "error"
+        ? "校准异常"
+        : formatDate(memoryIndex.lastSyncAt)
       : "尚未运行";
     const running = ["previewing", "applying"].includes(runtime.phase);
     previewButton.disabled = running;

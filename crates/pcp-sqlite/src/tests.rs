@@ -3,8 +3,8 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use pcp_core::{
     Actor, ActorType, AssessPageValidityRequest, CreateScopeRequest, LifecycleStatus,
     LinkPagesRequest, PagePayload, Projection, ProvenanceEvent, ReadPagesRequest,
-    RevisePageRequest, SearchFilters, SearchMode, SearchPagesRequest, SourceRef, ValidityStanding,
-    WritePageRequest, WriteSummaryRequest,
+    RevisePageRequest, SearchFilters, SearchMode, SearchPagesRequest, SearchTermMatch, SourceRef,
+    ValidityStanding, WritePageRequest, WriteSummaryRequest,
 };
 use serde_json::json;
 
@@ -74,6 +74,7 @@ async fn stores_searches_revises_and_links_pages() {
             query: "compactness products".to_owned(),
             scopes: vec![namespace.clone()],
             mode: SearchMode::Text,
+            term_match: SearchTermMatch::All,
             projections: pcp_core::default_search_projections(),
             filters: SearchFilters::default(),
             limit: 10,
@@ -83,6 +84,36 @@ async fn stores_searches_revises_and_links_pages() {
         .expect("search page");
     assert_eq!(search.hits.len(), 1);
     assert_eq!(search.hits[0].revision_id, first.revision_id);
+
+    let strict = store
+        .search_pages(SearchPagesRequest {
+            query: "compactness impossible".to_owned(),
+            scopes: vec![namespace.clone()],
+            mode: SearchMode::Text,
+            term_match: SearchTermMatch::All,
+            projections: vec![Projection::Payload],
+            filters: SearchFilters::default(),
+            limit: 10,
+            cursor: None,
+        })
+        .await
+        .expect("strict lexical search");
+    assert!(strict.hits.is_empty());
+    let broad = store
+        .search_pages(SearchPagesRequest {
+            query: "compactness impossible".to_owned(),
+            scopes: vec![namespace.clone()],
+            mode: SearchMode::Text,
+            term_match: SearchTermMatch::Any,
+            projections: vec![Projection::Payload],
+            filters: SearchFilters::default(),
+            limit: 10,
+            cursor: None,
+        })
+        .await
+        .expect("broad lexical candidate search");
+    assert_eq!(broad.hits.len(), 1);
+    assert_eq!(broad.hits[0].revision_id, first.revision_id);
 
     let revised = store
         .revise_page(
@@ -112,6 +143,7 @@ async fn stores_searches_revises_and_links_pages() {
                     input_revision_ids: vec![first.revision_id.clone(), first.revision_id.clone()],
                     tool_or_model: Some("test".to_owned()),
                 }],
+                initial_relations: Vec::new(),
                 idempotency_key: Some("revision:first".to_owned()),
             },
             vec![namespace.clone()],
@@ -125,6 +157,7 @@ async fn stores_searches_revises_and_links_pages() {
             query: first.revision_id.clone(),
             scopes: vec![namespace.clone()],
             mode: SearchMode::Graph,
+            term_match: SearchTermMatch::All,
             projections: pcp_core::default_search_projections(),
             filters: SearchFilters {
                 relation_types: vec!["derived_from".to_owned()],
@@ -143,6 +176,7 @@ async fn stores_searches_revises_and_links_pages() {
             query: revised.revision_id.clone(),
             scopes: vec![namespace.clone()],
             mode: SearchMode::Graph,
+            term_match: SearchTermMatch::All,
             projections: pcp_core::default_search_projections(),
             filters: SearchFilters {
                 relation_types: vec!["derived_from".to_owned()],
@@ -188,6 +222,7 @@ async fn stores_searches_revises_and_links_pages() {
             query: second.revision_id,
             scopes: vec![namespace.clone()],
             mode: SearchMode::Graph,
+            term_match: SearchTermMatch::All,
             projections: pcp_core::default_search_projections(),
             filters: SearchFilters::default(),
             limit: 10,
@@ -341,6 +376,7 @@ async fn backfills_the_provenance_graph_index() {
             query: source.revision_id,
             scopes: vec![namespace],
             mode: SearchMode::Graph,
+            term_match: SearchTermMatch::All,
             projections: pcp_core::default_search_projections(),
             filters: SearchFilters {
                 relation_types: vec!["derived_from".to_owned()],
@@ -462,6 +498,7 @@ async fn writes_searches_reads_and_revises_sparse_summaries() {
             query: "resource pool cancellation".to_owned(),
             scopes: vec![namespace.clone()],
             mode: SearchMode::Text,
+            term_match: SearchTermMatch::All,
             projections: vec![Projection::Summary],
             filters: SearchFilters::default(),
             limit: 10,
@@ -482,6 +519,7 @@ async fn writes_searches_reads_and_revises_sparse_summaries() {
             query: String::new(),
             scopes: vec![namespace.clone()],
             mode: SearchMode::Temporal,
+            term_match: SearchTermMatch::All,
             projections: vec![Projection::Summary],
             filters: SearchFilters::default(),
             limit: 10,
@@ -490,6 +528,17 @@ async fn writes_searches_reads_and_revises_sparse_summaries() {
         .await
         .expect("browse summary index");
     assert_eq!(browsed.hits[0].revision_id, page.revision_id);
+
+    let model_index = store
+        .browse_index(vec![namespace.clone()], 10, None, 8_000)
+        .await
+        .expect("browse model-written index");
+    let indexed = model_index
+        .hits
+        .iter()
+        .find(|hit| hit.revision_id == page.revision_id)
+        .expect("summarized unclassified Page remains browseable");
+    assert_eq!(indexed.matched_projection, "summary");
 
     let read = store
         .read_pages(
@@ -545,6 +594,7 @@ async fn writes_searches_reads_and_revises_sparse_summaries() {
             query: summary.summary_revision_id.clone(),
             scopes: vec![namespace.clone()],
             mode: SearchMode::Graph,
+            term_match: SearchTermMatch::All,
             projections: vec![Projection::Summary],
             filters: SearchFilters {
                 relation_types: vec!["summarizes".to_owned()],
@@ -562,6 +612,7 @@ async fn writes_searches_reads_and_revises_sparse_summaries() {
             query: "resource unrelated".to_owned(),
             scopes: vec![namespace.clone()],
             mode: SearchMode::Text,
+            term_match: SearchTermMatch::All,
             projections: vec![Projection::Summary],
             filters: SearchFilters::default(),
             limit: 10,
@@ -678,7 +729,7 @@ async fn rejects_cycles_in_the_derivation_subgraph() {
         .link_pages(
             LinkPagesRequest {
                 from_revision_id: second.revision_id.clone(),
-                relation_type: "summarizes".to_owned(),
+                relation_type: "aggregates".to_owned(),
                 to_revision_id: first.revision_id.clone(),
                 created_by: actor.clone(),
                 idempotency_key: Some("dag:forward".to_owned()),
@@ -785,6 +836,7 @@ async fn retracts_derived_pages_and_restores_preexisting_pages() {
                     input_revision_ids: vec![source.revision_id.clone()],
                     tool_or_model: None,
                 }],
+                initial_relations: Vec::new(),
                 idempotency_key: Some("retract:durable-revision".to_owned()),
             },
             vec![namespace.clone()],
@@ -864,6 +916,7 @@ async fn retracts_derived_pages_and_restores_preexisting_pages() {
             query: String::new(),
             scopes: vec![namespace.clone()],
             mode: SearchMode::Temporal,
+            term_match: SearchTermMatch::All,
             projections: pcp_core::default_search_projections(),
             filters: SearchFilters::default(),
             limit: 20,
@@ -968,6 +1021,7 @@ async fn validity_is_revisioned_and_routes_before_detail() {
             query: "runtime deferred intent".to_owned(),
             scopes: vec![namespace.clone()],
             mode: SearchMode::Text,
+            term_match: SearchTermMatch::All,
             projections: pcp_core::default_search_projections(),
             filters: SearchFilters::default(),
             limit: 10,

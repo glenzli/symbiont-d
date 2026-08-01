@@ -192,7 +192,8 @@ fn downstream_revision_ids(
                 JOIN downstream
                   ON relation.to_revision_id = downstream.revision_id
                 WHERE relation.relation_type IN (
-                    'contains', 'derived_from', 'summarizes', 'responds_to', 'continues',
+                    'contains', 'aggregates', 'derived_from', 'summarizes',
+                    'responds_to', 'continues',
                     'depends_on', 'uses', 'updates', 'supports'
                 )
             )
