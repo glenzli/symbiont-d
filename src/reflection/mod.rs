@@ -16,6 +16,8 @@ pub struct ReflectionConfig {
     pub follow_ups_enabled: bool,
     #[serde(default = "enabled_by_default")]
     pub continuations_enabled: bool,
+    #[serde(default = "enabled_by_default")]
+    pub proactive_messages_enabled: bool,
     pub daily_token_limit: u64,
 }
 
@@ -28,6 +30,7 @@ impl Default for ReflectionConfig {
             capture_read_state: true,
             follow_ups_enabled: true,
             continuations_enabled: true,
+            proactive_messages_enabled: true,
             daily_token_limit: 1_000_000,
         }
     }

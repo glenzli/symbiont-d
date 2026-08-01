@@ -25,6 +25,8 @@ const POLICY_REFRESH: Duration = Duration::from_secs(30);
 const EXPLORATION_CHAT_TAIL: usize = 14;
 const EXPLORATION_JOURNAL_RUNS: usize = 8;
 const EXPLORATION_CONTEXT_CHARS: usize = 16_000;
+const EXPLORATION_MESSAGE_EXCERPT_CHARS: usize = 700;
+const EXPLORATION_EDGE_EXCERPT_CHARS: usize = 900;
 
 #[derive(Clone, Copy, Debug, Serialize)]
 #[serde(rename_all = "snake_case")]
@@ -409,7 +411,7 @@ async fn run_once(
         context.prompt().await?,
         curiosity.prompt().await?,
         reflection.prompt().await?,
-        exploration_working_context(&recent_messages, &recent_explorations, trigger)
+        exploration_working_context(&recent_messages, &recent_explorations, trigger, Utc::now(),)
     );
     let (runtime_tx, mut runtime_rx) = mpsc::channel(64);
     let activity_state = Arc::clone(&state);
@@ -534,6 +536,7 @@ fn exploration_working_context(
     messages: &[MemoryEntry],
     runs: &[crate::usage::ExplorationRunSummary],
     trigger: Option<ExplorationTrigger>,
+    now: DateTime<Utc>,
 ) -> String {
     let mut lines = vec![
         "Autonomous working context. Use this to continue the relationship and avoid thematic repetition; it is bounded operational memory, not a relevance score."
@@ -552,6 +555,7 @@ fn exploration_working_context(
             }
             None => "Wake reason: scheduled exploration cycle.".to_owned(),
         },
+        conversation_edge(messages, now),
         "<recent-conversation>".to_owned(),
     ];
     for entry in messages {
@@ -565,7 +569,7 @@ fn exploration_working_context(
             .as_ref()
             .and_then(|metadata| metadata.origin.as_deref())
             .unwrap_or("conversation");
-        let content = entry.content.chars().take(900).collect::<String>();
+        let content = bounded_message_excerpt(&entry.content, EXPLORATION_MESSAGE_EXCERPT_CHARS);
         lines.push(format!(
             "<message role=\"{role}\" origin=\"{origin}\" at=\"{}\">{content}</message>",
             entry.at
@@ -609,6 +613,107 @@ fn exploration_working_context(
     truncated
 }
 
+fn conversation_edge(messages: &[MemoryEntry], now: DateTime<Utc>) -> String {
+    let Some((last_visible_index, last_visible)) = messages.iter().enumerate().next_back() else {
+        return "<conversation-edge state=\"empty\" />".to_owned();
+    };
+    let last_user = messages
+        .iter()
+        .enumerate()
+        .rfind(|(_, entry)| entry.role == MemoryRole::User);
+    let last_user_index = last_user.map(|(index, _)| index);
+    let last_direct_reply = last_user_index.and_then(|index| {
+        messages
+            .iter()
+            .enumerate()
+            .skip(index + 1)
+            .rfind(|(_, entry)| {
+                entry.role == MemoryRole::Assistant && message_origin(entry) == "interactive"
+            })
+    });
+    let unsolicited_since_last_user = last_user_index
+        .map(|index| {
+            messages
+                .iter()
+                .skip(index + 1)
+                .filter(|entry| is_unsolicited_assistant(entry))
+                .count()
+        })
+        .unwrap_or(0);
+    let seconds_since_last_user = last_user
+        .and_then(|(_, entry)| DateTime::parse_from_rfc3339(&entry.at).ok())
+        .map(|at| (now - at.with_timezone(&Utc)).num_seconds().max(0));
+
+    let mut lines = vec![format!(
+        "<conversation-edge unsolicited-since-last-user=\"{unsolicited_since_last_user}\"{}>",
+        seconds_since_last_user
+            .map(|seconds| format!(" seconds-since-last-user=\"{seconds}\""))
+            .unwrap_or_default()
+    )];
+    if let Some((_, entry)) = last_user {
+        lines.push(edge_message("last-user-message", entry));
+    }
+    if let Some((reply_index, entry)) = last_direct_reply
+        && reply_index != last_visible_index
+    {
+        lines.push(edge_message("last-direct-reply", entry));
+    }
+    lines.push(edge_message("last-visible-message", last_visible));
+    if unsolicited_since_last_user > 0 {
+        lines.push(
+            "<attention-state>The user has not spoken since these unsolicited messages. This is pending attention, not negative feedback. Another unrelated initiation may read as a feed; raise the interruption bar and prefer continuity or silence.</attention-state>"
+                .to_owned(),
+        );
+    }
+    lines.push("</conversation-edge>".to_owned());
+    lines.join("\n")
+}
+
+fn edge_message(label: &str, entry: &MemoryEntry) -> String {
+    let role = match entry.role {
+        MemoryRole::User => "user",
+        MemoryRole::Assistant => "assistant",
+        MemoryRole::Memory => "memory",
+    };
+    format!(
+        "<{label} role=\"{role}\" origin=\"{}\" at=\"{}\">{}</{label}>",
+        message_origin(entry),
+        entry.at,
+        bounded_message_excerpt(&entry.content, EXPLORATION_EDGE_EXCERPT_CHARS)
+    )
+}
+
+fn message_origin(entry: &MemoryEntry) -> &str {
+    entry
+        .metadata
+        .as_ref()
+        .and_then(|metadata| metadata.origin.as_deref())
+        .unwrap_or("conversation")
+}
+
+fn is_unsolicited_assistant(entry: &MemoryEntry) -> bool {
+    entry.role == MemoryRole::Assistant
+        && matches!(
+            message_origin(entry),
+            "autonomous" | "reflection" | "maintenance"
+        )
+}
+
+fn bounded_message_excerpt(content: &str, max_chars: usize) -> String {
+    let chars = content.chars().collect::<Vec<_>>();
+    if chars.len() <= max_chars {
+        return content.to_owned();
+    }
+    let head_chars = max_chars.saturating_mul(2) / 5;
+    let tail_chars = max_chars.saturating_sub(head_chars);
+    let head = chars.iter().take(head_chars).collect::<String>();
+    let tail = chars
+        .iter()
+        .skip(chars.len().saturating_sub(tail_chars))
+        .collect::<String>();
+    format!("{head}\n[… middle omitted …]\n{tail}")
+}
+
 async fn set_error(state: &RwLock<ExplorationSnapshot>, error: String) {
     let mut snapshot = state.write().await;
     snapshot.phase = ExplorationPhase::Error;
@@ -633,7 +738,7 @@ fn next_local_day_start(now: DateTime<Utc>) -> DateTime<Utc> {
     local_datetime_to_utc(date.and_time(NaiveTime::MIN))
 }
 
-fn quiet_end(now: DateTime<Utc>, quiet: &QuietHours) -> Option<DateTime<Utc>> {
+pub(crate) fn quiet_end(now: DateTime<Utc>, quiet: &QuietHours) -> Option<DateTime<Utc>> {
     if !quiet.enabled {
         return None;
     }
@@ -683,9 +788,13 @@ fn timestamp(value: DateTime<Utc>) -> String {
 mod tests {
     use chrono::{DateTime, TimeZone, Utc};
 
-    use super::{ExplorationPhase, Gate, evaluate_gate, quiet_end, today_started_at};
+    use super::{
+        ExplorationPhase, Gate, bounded_message_excerpt, conversation_edge, evaluate_gate,
+        quiet_end, today_started_at,
+    };
     use crate::{
         autonomy::{AutonomyConfig, QuietHours},
+        memory::{MemoryEntry, MemoryRole, MessageMetadata},
         usage::UsageHeadline,
     };
 
@@ -757,5 +866,74 @@ mod tests {
             ),
             Gate::Run
         ));
+    }
+
+    #[test]
+    fn conversation_edge_preserves_the_landing_and_unanswered_attention() {
+        let long_user_message = format!(
+            "opening context {} final user landing",
+            "middle ".repeat(180)
+        );
+        let messages = vec![
+            message(
+                MemoryRole::User,
+                "2026-07-31T15:52:48Z",
+                &long_user_message,
+                None,
+            ),
+            message(
+                MemoryRole::Assistant,
+                "2026-07-31T15:52:56Z",
+                "direct reply",
+                Some("interactive"),
+            ),
+            message(
+                MemoryRole::Assistant,
+                "2026-08-01T02:07:14Z",
+                "latest unsolicited thought",
+                Some("autonomous"),
+            ),
+        ];
+        let now = Utc.with_ymd_and_hms(2026, 8, 1, 2, 10, 0).unwrap();
+
+        let edge = conversation_edge(&messages, now);
+
+        assert!(edge.contains("unsolicited-since-last-user=\"1\""));
+        assert!(edge.contains("seconds-since-last-user=\"37032\""));
+        assert!(edge.contains("opening context"));
+        assert!(edge.contains("final user landing"));
+        assert!(edge.contains("<last-direct-reply"));
+        assert!(edge.contains("latest unsolicited thought"));
+        assert!(edge.contains("pending attention, not negative feedback"));
+    }
+
+    #[test]
+    fn bounded_message_excerpt_keeps_both_ends() {
+        let content = format!("begin-{}-end", "x".repeat(1_000));
+        let excerpt = bounded_message_excerpt(&content, 100);
+
+        assert!(excerpt.starts_with("begin-"));
+        assert!(excerpt.ends_with("-end"));
+        assert!(excerpt.contains("middle omitted"));
+    }
+
+    fn message(role: MemoryRole, at: &str, content: &str, origin: Option<&str>) -> MemoryEntry {
+        MemoryEntry {
+            role,
+            at: at.to_owned(),
+            content: content.to_owned(),
+            revision_id: None,
+            parts: Vec::new(),
+            metadata: origin.map(|origin| MessageMetadata {
+                runs: Vec::new(),
+                total_tokens: 0,
+                duration_ms: 0,
+                tool_calls: 0,
+                pcp_tool_calls: 0,
+                trace_id: None,
+                origin: Some(origin.to_owned()),
+            }),
+            delivery_state: None,
+        }
     }
 }

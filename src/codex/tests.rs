@@ -76,6 +76,13 @@ fn dynamic_tools_expose_host_and_pcp_namespaces() {
             .as_array()
             .unwrap()
             .iter()
+            .any(|tool| tool["name"] == "propose_proactive_message")
+    );
+    assert!(
+        specs[0]["tools"]
+            .as_array()
+            .unwrap()
+            .iter()
             .any(|tool| tool["name"] == "escalate")
     );
     assert_eq!(specs[1]["name"], "pcp");
@@ -201,6 +208,10 @@ fn autonomous_exploration_is_silent_or_starts_one_conversation() {
     assert!(prompt.contains("Never send a roundup"));
     assert!(prompt.contains("shortest natural bridge"));
     assert!(prompt.contains("older open thread"));
+    assert!(prompt.contains("unsolicited"));
+    assert!(prompt.contains("why it belongs in this conversation"));
+    assert!(prompt.contains("answers only why now"));
+    assert!(prompt.contains("pending attention"));
     assert!(prompt.contains("No process narration"));
 }
 
@@ -220,9 +231,16 @@ fn reflection_prompt_preserves_facts_uncertainty_and_profile_boundaries() {
     );
     assert!(prompt.contains("never promote temporary behavior directly"));
     assert!(prompt.contains("publication gate will still decide whether to speak"));
+    assert!(prompt.contains("propose_proactive_message"));
+    assert!(prompt.contains("why here and why now"));
+    assert!(prompt.contains("feed item"));
     assert!(prompt.contains("pcp.assess_validity"));
     assert!(prompt.contains("not ordinary messages"));
-    assert!(prompt.chars().count() < 3_200);
+    assert!(
+        prompt.chars().count() < 3_200,
+        "reflection prompt grew to {} characters",
+        prompt.chars().count()
+    );
 }
 
 #[test]

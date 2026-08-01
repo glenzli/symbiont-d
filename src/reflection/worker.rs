@@ -14,12 +14,13 @@ use super::{
 };
 use crate::{
     autonomy::AutonomyStore,
-    codex::{CodexClient, RuntimeEvent},
+    codex::{CodexClient, ReflectionOutreach, RuntimeEvent},
     compute::ComputeStore,
-    continuity::ContinuityHost,
+    continuity::{ContinuityHost, MessageLinks},
+    conversation::ConversationCoordinator,
     curiosity::CuriosityStore,
-    exploration::ExplorationHandle,
-    memory::MemoryEntry,
+    exploration::{ExplorationHandle, quiet_end, today_started_at},
+    memory::{MemoryEntry, MemoryRole, MessageMetadata},
     profile::{ProfileStore, SetupStatus},
     symbiont_context::SymbiontContextStore,
     usage::UsageStore,
@@ -65,6 +66,7 @@ impl ReflectionHandle {
         context: Arc<SymbiontContextStore>,
         curiosity: Arc<CuriosityStore>,
         usage: Arc<UsageStore>,
+        conversation: ConversationCoordinator,
         exploration: ExplorationHandle,
     ) -> Self {
         let runtime = Arc::new(RwLock::new(ReflectionRuntime::default()));
@@ -80,6 +82,7 @@ impl ReflectionHandle {
             context,
             curiosity,
             usage,
+            conversation,
             exploration,
             trigger_rx,
         ));
@@ -205,6 +208,7 @@ async fn run(
     context: Arc<SymbiontContextStore>,
     curiosity: Arc<CuriosityStore>,
     usage: Arc<UsageStore>,
+    conversation: ConversationCoordinator,
     exploration: ExplorationHandle,
     mut trigger_rx: mpsc::Receiver<ReflectionTrigger>,
 ) {
@@ -257,6 +261,7 @@ async fn run(
         match reflect_once(
             &store,
             &runtime,
+            &autonomy,
             &profile,
             &codex,
             &compute,
@@ -264,6 +269,7 @@ async fn run(
             &context,
             &curiosity,
             &usage,
+            &conversation,
             trigger,
         )
         .await
@@ -299,6 +305,7 @@ enum ReflectState {
 async fn reflect_once(
     store: &ReflectionStore,
     runtime: &Arc<RwLock<ReflectionRuntime>>,
+    autonomy: &AutonomyStore,
     profile: &ProfileStore,
     codex: &Mutex<CodexClient>,
     compute: &ComputeStore,
@@ -306,6 +313,7 @@ async fn reflect_once(
     context: &SymbiontContextStore,
     curiosity: &CuriosityStore,
     usage: &UsageStore,
+    conversation: &ConversationCoordinator,
     trigger: ReflectionTrigger,
 ) -> Result<ReflectState> {
     let config = store.config().await;
@@ -325,9 +333,7 @@ async fn reflect_once(
         runtime.write().await.phase = ReflectionPhase::NeedsSetup;
         return Ok(ReflectState::Idle);
     }
-    let headline = usage
-        .headline(&crate::exploration::today_started_at())
-        .await?;
+    let headline = usage.headline(&today_started_at()).await?;
     if config.daily_token_limit > 0 && headline.reflection_tokens_today >= config.daily_token_limit
     {
         runtime.write().await.phase = ReflectionPhase::TokenLimit;
@@ -337,6 +343,7 @@ async fn reflect_once(
         runtime.write().await.phase = ReflectionPhase::Waiting;
         return Ok(ReflectState::Idle);
     };
+    let input_epoch = conversation.current_input_epoch();
     let Ok(mut client) = codex.try_lock() else {
         runtime.write().await.current_activity = Some("等待当前模型调用完成".to_owned());
         return Ok(ReflectState::Busy);
@@ -377,14 +384,13 @@ async fn reflect_once(
     drop(client);
     event_drain.await.context("join Reflection event drain")?;
 
-    let outcome = match outcome {
+    let mut outcome = match outcome {
         Ok(outcome) => outcome,
         Err(error) => {
             store.fail_run(&run_id, &error.to_string()).await?;
             return Err(error);
         }
     };
-    usage.record_all(&outcome.invocations).await?;
     let feedback_page_ids = batch
         .events
         .iter()
@@ -406,6 +412,43 @@ async fn reflect_once(
         store.fail_run(&run_id, &message).await?;
         anyhow::bail!("{message}");
     }
+    let outreach_published = if let Some(outreach) = outcome.outreach.as_ref() {
+        match publish_outreach(
+            store,
+            autonomy,
+            usage,
+            continuity,
+            conversation,
+            input_epoch,
+            outreach,
+            &outcome.metadata,
+            &outcome.context_revision_ids,
+        )
+        .await
+        {
+            Ok(published) => published,
+            Err(error) => {
+                warn!(%error, "could not publish Reflection outreach");
+                false
+            }
+        }
+    } else {
+        false
+    };
+    if outreach_published && let Some(invocation) = outcome.invocations.last_mut() {
+        invocation.produced_message = true;
+    }
+    if outcome.outreach.is_some() {
+        outcome.actions.push(
+            if outreach_published {
+                "outreach.published"
+            } else {
+                "outreach.suppressed"
+            }
+            .to_owned(),
+        );
+    }
+    usage.record_all(&outcome.invocations).await?;
     let trace_id = outcome
         .invocations
         .last()
@@ -446,6 +489,64 @@ async fn reflect_once(
         "interaction Reflection completed"
     );
     Ok(ReflectState::Completed)
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn publish_outreach(
+    store: &ReflectionStore,
+    autonomy: &AutonomyStore,
+    usage: &UsageStore,
+    continuity: &ContinuityHost,
+    conversation: &ConversationCoordinator,
+    input_epoch: u64,
+    outreach: &ReflectionOutreach,
+    metadata: &MessageMetadata,
+    context_revision_ids: &[String],
+) -> Result<bool> {
+    let reflection_config = store.config().await;
+    if !reflection_config.proactive_messages_enabled || !autonomy.permitted(true).await {
+        return Ok(false);
+    }
+    let autonomy_config = autonomy.snapshot().await;
+    let headline = usage.headline(&today_started_at()).await?;
+    if headline.autonomous_messages_today >= autonomy_config.daily_interrupt_limit as u64
+        || quiet_end(Utc::now(), &autonomy_config.quiet_hours).is_some()
+        || !conversation
+            .wait_for_idle_input(input_epoch, Duration::ZERO)
+            .await
+    {
+        return Ok(false);
+    }
+
+    let mut input_revision_ids = outreach.source_revision_ids.clone();
+    input_revision_ids.extend_from_slice(context_revision_ids);
+    input_revision_ids.sort();
+    input_revision_ids.dedup();
+    let stored = continuity
+        .ingest_message(
+            MemoryRole::Assistant,
+            &outreach.message,
+            Vec::new(),
+            Some(metadata.clone()),
+            MessageLinks {
+                responds_to: None,
+                continues_from: None,
+                input_revision_ids,
+                surfaced_hunch_revision_ids: Vec::new(),
+                quotes: Vec::new(),
+                topic: None,
+            },
+        )
+        .await?;
+    store
+        .record_message(&stored.entry, None, false, &[])
+        .await?;
+    debug!(
+        reason = %outreach.reason,
+        revision_id = ?stored.entry.revision_id,
+        "published Reflection outreach"
+    );
+    Ok(true)
 }
 
 async fn check_deferred_follow_ups(

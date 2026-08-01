@@ -1,4 +1,4 @@
-use std::{convert::Infallible, sync::Arc};
+use std::{collections::HashSet, convert::Infallible, sync::Arc};
 
 use anyhow::Context;
 use axum::{
@@ -32,8 +32,12 @@ use crate::{
         ConversationCoordinator, ConversationLease, ConversationSnapshot, QueuedUserMessage,
     },
     curiosity::{CuriositySnapshot, CuriosityStore},
+    diagnostics::TraceEventKind,
     exploration::{ExplorationHandle, ExplorationSnapshot, today_started_at},
-    memory::{MemoryEntry, MemoryRole, MessageDeliveryState, MessageQuote, MessageQuoteDraft},
+    memory::{
+        MemoryEntry, MemoryRole, MessageDeliveryState, MessageMetadata, MessageQuote,
+        MessageQuoteDraft, MessageRunMetadata,
+    },
     permission::{PermissionBroker, PermissionDecision, PermissionRequestView},
     profile::{CalibrationMode, ProfileSnapshot, ProfileStore, SetupStatus},
     reflection::{
@@ -396,6 +400,10 @@ pub fn router(state: AppState) -> Router {
         .route("/api/autonomy", post(update_autonomy))
         .route("/api/exploration/run", post(trigger_exploration))
         .route("/api/exploration/recent", get(recent_explorations))
+        .route(
+            "/api/exploration/{trace_id}/redeliver",
+            post(redeliver_exploration),
+        )
         .route("/api/compute", post(update_compute))
         .route("/api/compute/policies", post(update_compute_policies))
         .route("/api/stats", get(stats))
@@ -1109,6 +1117,165 @@ async fn recent_explorations(
         exploration: state.exploration.snapshot().await,
         runs,
     }))
+}
+
+async fn redeliver_exploration(
+    State(state): State<AppState>,
+    AxumPath(trace_id): AxumPath<String>,
+) -> Result<Json<MemoryEntry>, ApiError> {
+    let trace = state
+        .usage
+        .trace(&trace_id)
+        .await
+        .map_err(ApiError::internal)?
+        .ok_or_else(|| ApiError::not_found("Exploration trace is not available."))?;
+    let delivery = exploration_redelivery(&trace).ok_or_else(|| {
+        ApiError::bad_request("Trace has no completed autonomous message to restore.")
+    })?;
+
+    if let Some(existing) = state
+        .continuity
+        .recent_messages(500)
+        .await
+        .map_err(ApiError::internal)?
+        .into_iter()
+        .find(|entry| {
+            entry
+                .metadata
+                .as_ref()
+                .and_then(|metadata| metadata.trace_id.as_deref())
+                == Some(trace.trace_id.as_str())
+        })
+    {
+        return Ok(Json(existing));
+    }
+
+    let stored = state
+        .continuity
+        .ingest_message(
+            MemoryRole::Assistant,
+            &delivery.message,
+            Vec::new(),
+            Some(delivery.metadata),
+            MessageLinks {
+                responds_to: None,
+                continues_from: None,
+                input_revision_ids: delivery.context_revision_ids,
+                surfaced_hunch_revision_ids: Vec::new(),
+                quotes: Vec::new(),
+                topic: None,
+            },
+        )
+        .await
+        .map_err(ApiError::internal)?;
+    state
+        .reflection
+        .record_message(&stored.entry, None, &[])
+        .await
+        .map_err(ApiError::internal)?;
+    Ok(Json(stored.entry))
+}
+
+struct ExplorationRedelivery {
+    message: String,
+    metadata: MessageMetadata,
+    context_revision_ids: Vec<String>,
+}
+
+fn exploration_redelivery(trace: &TraceBundle) -> Option<ExplorationRedelivery> {
+    if trace.runs.first()?.origin != "autonomous"
+        || trace.runs.last()?.status != "completed"
+        || !trace.runs.iter().any(|run| run.produced_message)
+    {
+        return None;
+    }
+    let message = trace
+        .runs
+        .iter()
+        .flat_map(|run| &run.events)
+        .filter(|event| matches!(event.kind, TraceEventKind::AgentMessage))
+        .filter_map(|event| {
+            event
+                .details
+                .get("text")
+                .and_then(serde_json::Value::as_str)
+        })
+        .map(str::trim)
+        .rfind(|text| !text.is_empty())?
+        .to_owned();
+    let metadata = MessageMetadata {
+        runs: trace
+            .runs
+            .iter()
+            .map(|run| MessageRunMetadata {
+                model: run.model.clone(),
+                display_name: run.display_name.clone(),
+                effort: run.effort.clone(),
+                lane: run.lane.clone(),
+                total_tokens: run.total_tokens,
+                duration_ms: run.duration_ms,
+            })
+            .collect(),
+        total_tokens: trace.runs.iter().map(|run| run.total_tokens).sum(),
+        duration_ms: trace.runs.iter().map(|run| run.duration_ms).sum(),
+        tool_calls: trace.runs.iter().map(|run| run.steps.len() as u64).sum(),
+        pcp_tool_calls: trace.pcp_tool_calls,
+        trace_id: Some(trace.trace_id.clone()),
+        origin: Some("autonomous".to_owned()),
+    };
+    Some(ExplorationRedelivery {
+        message,
+        metadata,
+        context_revision_ids: trace_context_revision_ids(trace),
+    })
+}
+
+fn trace_context_revision_ids(trace: &TraceBundle) -> Vec<String> {
+    let mut revisions = HashSet::new();
+    for step in trace
+        .runs
+        .iter()
+        .flat_map(|run| &run.steps)
+        .filter(|step| step.namespace == "pcp" && step.succeeded)
+    {
+        collect_canonical_revision_ids(&step.arguments, &mut revisions);
+        if let Some(text) = step
+            .result
+            .pointer("/contentItems/0/text")
+            .and_then(serde_json::Value::as_str)
+            && let Ok(value) = serde_json::from_str(text)
+        {
+            collect_canonical_revision_ids(&value, &mut revisions);
+        }
+    }
+    let mut revisions = revisions.into_iter().collect::<Vec<_>>();
+    revisions.sort();
+    revisions
+}
+
+fn collect_canonical_revision_ids(value: &serde_json::Value, revisions: &mut HashSet<String>) {
+    match value {
+        serde_json::Value::String(value) if is_canonical_revision_id(value) => {
+            revisions.insert(value.clone());
+        }
+        serde_json::Value::Array(values) => {
+            for value in values {
+                collect_canonical_revision_ids(value, revisions);
+            }
+        }
+        serde_json::Value::Object(values) => {
+            for value in values.values() {
+                collect_canonical_revision_ids(value, revisions);
+            }
+        }
+        _ => {}
+    }
+}
+
+fn is_canonical_revision_id(value: &str) -> bool {
+    value.strip_prefix("rev_").is_some_and(|suffix| {
+        suffix.len() == 32 && suffix.bytes().all(|byte| byte.is_ascii_hexdigit())
+    })
 }
 
 async fn trace_detail(
@@ -1905,6 +2072,28 @@ mod tests {
         assert_eq!(
             parse_leading_compute_directive("讨论 @critical 的语法"),
             ("讨论 @critical 的语法".to_owned(), None)
+        );
+    }
+
+    #[test]
+    fn redelivery_provenance_ignores_noncanonical_revision_values() {
+        let mut revisions = HashSet::new();
+        collect_canonical_revision_ids(
+            &serde_json::json!({
+                "valid": "rev_0123456789abcdef0123456789abcdef",
+                "invalid": "rev_89???",
+                "nested": ["rev_abcdefabcdefabcdefabcdefabcdefab"]
+            }),
+            &mut revisions,
+        );
+        let mut revisions = revisions.into_iter().collect::<Vec<_>>();
+        revisions.sort();
+        assert_eq!(
+            revisions,
+            vec![
+                "rev_0123456789abcdef0123456789abcdef".to_owned(),
+                "rev_abcdefabcdefabcdefabcdefabcdefab".to_owned(),
+            ]
         );
     }
 }

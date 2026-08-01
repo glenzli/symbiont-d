@@ -15,6 +15,9 @@ export function initReflectionUi(state) {
   const readState = document.querySelector("#reflection-read-state");
   const followUps = document.querySelector("#reflection-follow-ups");
   const continuations = document.querySelector("#reflection-continuations");
+  const proactiveMessages = document.querySelector(
+    "#reflection-proactive-messages",
+  );
   const availability = document.querySelector("#reflection-availability");
   const runtimeState = document.querySelector("#reflection-runtime-state");
   const saveState = document.querySelector("#reflection-save-state");
@@ -34,6 +37,7 @@ export function initReflectionUi(state) {
     readState.checked = config.captureReadState;
     followUps.checked = config.followUpsEnabled;
     continuations.checked = config.continuationsEnabled;
+    proactiveMessages.checked = config.proactiveMessagesEnabled;
     availability.textContent = config.enabled ? "已启用" : "已关闭";
   }
 
@@ -59,6 +63,7 @@ export function initReflectionUi(state) {
             captureReadState: readState.checked,
             followUpsEnabled: followUps.checked,
             continuationsEnabled: continuations.checked,
+            proactiveMessagesEnabled: proactiveMessages.checked,
             dailyTokenLimit: millionsToTokens(tokenLimit.value),
           }),
         }),

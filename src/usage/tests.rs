@@ -161,6 +161,36 @@ async fn background_budget_includes_memory_maintenance_without_counting_a_messag
 }
 
 #[tokio::test]
+async fn reflection_outreach_counts_as_an_attention_interruption_not_exploration_tokens() {
+    let nonce = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_nanos();
+    let path = std::env::temp_dir().join(format!("symbiont-reflection-usage-{nonce}.sqlite3"));
+    let store = UsageStore::open(path.clone()).await.unwrap();
+    let timestamp = Utc::now().to_rfc3339_opts(SecondsFormat::Millis, true);
+    let mut invocation = autonomous_invocation(
+        "reflection-outreach",
+        None,
+        &timestamp,
+        &timestamp,
+        42,
+        true,
+        Vec::new(),
+        Vec::new(),
+    );
+    invocation.origin = "reflection".to_owned();
+    store.record_all(&[invocation]).await.unwrap();
+
+    let headline = store.headline("2025-12-31T16:00:00Z").await.unwrap();
+    assert_eq!(headline.autonomous_tokens_today, 0);
+    assert_eq!(headline.autonomous_messages_today, 1);
+    assert_eq!(headline.reflection_tokens_today, 42);
+
+    std::fs::remove_file(path).unwrap();
+}
+
+#[tokio::test]
 async fn prunes_expired_details_without_losing_usage_history() {
     let nonce = SystemTime::now()
         .duration_since(UNIX_EPOCH)

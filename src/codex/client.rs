@@ -150,6 +150,16 @@ pub struct ReflectionOutcome {
     pub invocations: Vec<InvocationRecord>,
     pub summary: Option<String>,
     pub actions: Vec<String>,
+    pub metadata: MessageMetadata,
+    pub outreach: Option<ReflectionOutreach>,
+    pub context_revision_ids: Vec<String>,
+}
+
+#[derive(Clone, Debug)]
+pub struct ReflectionOutreach {
+    pub message: String,
+    pub reason: String,
+    pub source_revision_ids: Vec<String>,
 }
 
 pub struct ChatInput {
@@ -883,6 +893,7 @@ impl CodexClient {
                         "upsert_episode"
                             | "upsert_interaction_hypothesis"
                             | "schedule_follow_up"
+                            | "propose_proactive_message"
                             | "update_current_map"
                             | "update_open_loops"
                             | "complete_reflection"
@@ -905,6 +916,41 @@ impl CodexClient {
             .filter(|step| step.tool != "complete_reflection")
             .map(|step| format!("{}.{}", step.namespace, step.tool))
             .collect();
+        let outreach = reflection_steps
+            .iter()
+            .rev()
+            .find(|step| step.tool == "propose_proactive_message")
+            .and_then(|step| {
+                let message = step
+                    .arguments
+                    .get("message")
+                    .and_then(Value::as_str)
+                    .map(str::trim)
+                    .filter(|value| !value.is_empty())?
+                    .to_owned();
+                let reason = step
+                    .arguments
+                    .get("reason")
+                    .and_then(Value::as_str)
+                    .map(str::trim)
+                    .filter(|value| !value.is_empty())?
+                    .to_owned();
+                let source_revision_ids = step
+                    .arguments
+                    .get("source_revision_ids")
+                    .and_then(Value::as_array)?
+                    .iter()
+                    .filter_map(Value::as_str)
+                    .map(str::to_owned)
+                    .collect::<Vec<_>>();
+                (!source_revision_ids.is_empty()).then_some(ReflectionOutreach {
+                    message,
+                    reason,
+                    source_revision_ids,
+                })
+            });
+        let metadata = metadata_for(&outcome.invocations, "reflection");
+        let context_revision_ids = context_revision_ids(&outcome.invocations);
         for invocation in &mut outcome.invocations {
             invocation.produced_message = false;
         }
@@ -912,6 +958,9 @@ impl CodexClient {
             invocations: outcome.invocations,
             summary,
             actions,
+            metadata,
+            outreach,
+            context_revision_ids,
         })
     }
 

@@ -420,6 +420,33 @@ impl SymbiontTools {
                     },
                     {
                         "type": "function",
+                        "name": "propose_proactive_message",
+                        "description": "During background Reflection, propose at most one exact user-visible message when the private work reveals a distinct thought that is worth initiating now. This is a candidate, not guaranteed delivery. The message must begin a natural conversation, never report Reflection, summarize maintenance, or presume an unanswered user prompt.",
+                        "inputSchema": {
+                            "type": "object",
+                            "properties": {
+                                "message": {
+                                    "type": "string",
+                                    "description": "Exact concise message to the user, in the user's language. It must stand naturally as a proactive conversational move."
+                                },
+                                "reason": {
+                                    "type": "string",
+                                    "description": "Private explanation of why this merits an interruption now; never shown in the chat message."
+                                },
+                                "source_revision_ids": {
+                                    "type": "array",
+                                    "items": {"type": "string"},
+                                    "minItems": 1,
+                                    "maxItems": 50,
+                                    "description": "Exact recent conversation Revisions that make this message timely."
+                                }
+                            },
+                            "required": ["message", "reason", "source_revision_ids"],
+                            "additionalProperties": false
+                        }
+                    },
+                    {
+                        "type": "function",
                         "name": "schedule_follow_up",
                         "description": "Schedule one possible future conversational continuation from ordinary conversation or background Reflection. Use only when waiting, new evidence, or unfinished reasoning could support a distinct second move. This creates a candidate, not a guaranteed message, and does not replace the useful response now.",
                         "inputSchema": {
@@ -1233,6 +1260,26 @@ impl SymbiontTools {
                     })
                     .await?;
                 Ok((serde_json::to_string(&follow_up)?, None))
+            }
+            "propose_proactive_message" => {
+                require_reflection_origin(run_origin, tool)?;
+                let source_revision_ids = string_array(arguments, "source_revision_ids")?;
+                self.ensure_reflection_sources(&source_revision_ids).await?;
+                let message = required_text(arguments, "message")?;
+                if message.chars().count() > 4_000 {
+                    anyhow::bail!("proactive message cannot exceed 4000 characters");
+                }
+                let reason = required_text(arguments, "reason")?;
+                if reason.chars().count() > 1_200 {
+                    anyhow::bail!("proactive message reason cannot exceed 1200 characters");
+                }
+                Ok((
+                    serde_json::to_string(&json!({
+                        "accepted": true,
+                        "sourceRevisionIds": source_revision_ids
+                    }))?,
+                    None,
+                ))
             }
             "reserve_continuation" => {
                 require_interactive_origin(run_origin, tool)?;

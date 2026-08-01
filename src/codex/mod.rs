@@ -8,7 +8,8 @@ mod tools;
 mod trace;
 
 pub use client::{
-    ChatInput, CodexClient, CodexConfig, GeneratedImageOutput, RateLimitInfo, RuntimeEvent,
+    ChatInput, CodexClient, CodexConfig, GeneratedImageOutput, RateLimitInfo, ReflectionOutreach,
+    RuntimeEvent,
 };
 pub use images::import_generated_images;
 pub use task_bridge::{CodexTaskDetail, CodexTaskSummary};

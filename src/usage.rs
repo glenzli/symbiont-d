@@ -437,7 +437,7 @@ impl UsageStore {
                         ), 0),
                         COALESCE(SUM(
                             CASE
-                                WHEN origin IN ('autonomous', 'maintenance')
+                                WHEN origin IN ('autonomous', 'maintenance', 'reflection')
                                      AND completed_at >= ?1
                                      AND produced_message = 1
                                 THEN 1 ELSE 0

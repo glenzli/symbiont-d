@@ -216,6 +216,7 @@ async fn main() -> Result<()> {
         Arc::clone(&reflection_store),
         Arc::clone(&usage),
     );
+    let conversation = ConversationCoordinator::new();
     let reflection = ReflectionHandle::start(
         Arc::clone(&reflection_store),
         Arc::clone(&autonomy),
@@ -226,6 +227,7 @@ async fn main() -> Result<()> {
         Arc::clone(&context),
         Arc::clone(&curiosity),
         Arc::clone(&usage),
+        conversation.clone(),
         exploration.clone(),
     );
     task_execution::start_worker(
@@ -257,7 +259,6 @@ async fn main() -> Result<()> {
         Arc::clone(&reflection_store),
         Arc::clone(&usage),
     );
-    let conversation = ConversationCoordinator::new();
     continuation::start_worker(
         continuation_receiver,
         Arc::clone(&continuations),

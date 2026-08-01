@@ -127,6 +127,8 @@ pub(super) fn interaction_reflection_prompt(
          may be scheduled only when a distinct future moment could change the value of the \
          conversation; do not use it as a generic reminder or notification. The later autonomous \
          publication gate will still decide whether to speak.\n\n\
+         At most once, call `symbiont.propose_proactive_message` with an unsolicited conversational \
+         thought. Make why here and why now natural; never a reply, report, recap, or feed item.\n\n\
          When new evidence materially corrects, limits, disputes, replaces, or retracts a durable \
          earlier Page, find and read the exact candidate, then call `pcp.assess_validity`. Assess \
          only consequential claims or state, not ordinary messages. Anchor the judgment to exact \
@@ -149,7 +151,8 @@ pub(super) fn interaction_reflection_prompt(
 
 pub(super) fn autonomous_exploration_prompt(silent_marker: &str) -> String {
     format!(
-        "Privately run one autonomous information exploration cycle. Begin from the supplied \
+        "Privately run one autonomous information exploration cycle. This is an unsolicited \
+         conversational initiation: no user message is waiting for an answer. Begin from the supplied \
          Current Map, Open Loops, Curiosity Map, recent conversation, and exploration journal. \
          A fresh Hunch or deferred conversational continuation may have woken this run; treat that \
          as an opportunity, not a command. Selectively \
@@ -176,11 +179,18 @@ pub(super) fn autonomous_exploration_prompt(silent_marker: &str) -> String {
          results are raw material, not the shape of the message. If several findings support one \
          idea, synthesize them; if they are unrelated, choose only the strongest. Never send a \
          roundup, digest, list of findings, exploration status, or half of a report.\n\n\
+         Before drafting, privately choose one entry mode: `continue` the visible edge, `reopen` an \
+         older shared thread, `pivot` through a real connection, or remain `silent`. Do not name \
+         the mode. For `continue`, begin with the thought itself. For `reopen` or `pivot`, the \
+         shortest natural bridge must establish both why it belongs in this conversation and why \
+         it is worth raising now. A date, deadline, or freshness cue answers only why now. If you \
+         cannot state why here without forcing a connection, remain silent. Treat unanswered prior \
+         initiations in the Conversation Edge as pending attention, not rejection; raise the bar \
+         before adding another unrelated topic.\n\n\
          If nothing merits interruption, return exactly `{silent_marker}`. Otherwise return only \
-         the message the user should see, in the user's language. Join the actual conversation. \
-         For a direct continuation, begin with the thought itself. For an adjacent topic, older \
-         thread, or noticeable time gap, first add the shortest natural bridge that makes clear \
-         why this thought belongs here now; do not drop an abstract thesis into the transcript. \
+         the message the user should see, in the user's language. Start a conversation; do not sound \
+         as if answering a request, summarizing a task, reporting a run, or handing over findings. \
+         Join the actual conversation; do not drop an abstract thesis into the transcript. \
          Do not say \
          that you searched, explored, scanned, found a signal, or found a number of items. Avoid \
          formulaic report openings such as 'the real change worth watching is' or 'one notable \
