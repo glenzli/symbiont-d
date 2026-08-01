@@ -209,12 +209,8 @@ impl ReflectionStore {
         task::spawn_blocking(move || -> Result<u64> {
             let connection = open_connection(&path)?;
             let cursor = read_cursor(&connection)?;
-            let count = connection.query_row(
-                "SELECT COUNT(*) FROM conversation_events WHERE id > ?1",
-                params![cursor],
-                |row| row.get::<_, i64>(0),
-            )?;
-            Ok(count as u64)
+            let events = read_events_after(&connection, cursor, 100)?;
+            Ok(actionable_prefix(events, 100).len() as u64)
         })
         .await
         .context("join pending Reflection count")?
@@ -225,7 +221,10 @@ impl ReflectionStore {
         task::spawn_blocking(move || -> Result<Option<ReflectionBatch>> {
             let connection = open_connection(&path)?;
             let cursor = read_cursor(&connection)?;
-            let events = read_events_after(&connection, cursor, limit.clamp(1, 100))?;
+            let events = actionable_prefix(
+                read_events_after(&connection, cursor, 100)?,
+                limit.clamp(1, 100),
+            );
             let Some(first) = events.first() else {
                 return Ok(None);
             };
@@ -257,7 +256,16 @@ impl ReflectionStore {
             let source_revision_ids = dedup(input.source_revision_ids);
             let parent_episode_ids = dedup(input.parent_episode_ids);
             ensure_known_source_revisions(&connection, &source_revision_ids)?;
-            let id = input.id.unwrap_or_else(|| new_id("ep"));
+            let id = match input.id {
+                Some(id) => {
+                    ensure_episode_exists(&connection, &id)?;
+                    id
+                }
+                None => {
+                    ensure_episode_title_is_new(&connection, input.title.trim())?;
+                    new_id("ep")
+                }
+            };
             validate_episode_parents(&connection, &id, &parent_episode_ids)?;
             let existing_started_at = connection
                 .query_row(
@@ -328,7 +336,16 @@ impl ReflectionStore {
         task::spawn_blocking(move || -> Result<WorkingHypothesis> {
             let connection = open_connection(&path)?;
             ensure_known_source_revisions(&connection, &input.source_revision_ids)?;
-            let id = input.id.unwrap_or_else(|| new_id("hyp"));
+            let id = match input.id {
+                Some(id) => {
+                    ensure_hypothesis_exists(&connection, &id)?;
+                    id
+                }
+                None => {
+                    ensure_hypothesis_statement_is_new(&connection, input.statement.trim())?;
+                    new_id("hyp")
+                }
+            };
             connection.execute(
                 "
                 INSERT INTO hypotheses (
@@ -702,6 +719,26 @@ impl ReflectionStore {
         .context("join Reflection run failure")?
     }
 
+    pub async fn interrupt_run(&self, run_id: &str, reason: &str) -> Result<()> {
+        let path = self.path.clone();
+        let run_id = run_id.to_owned();
+        let reason = truncate(reason, 4_000);
+        task::spawn_blocking(move || -> Result<()> {
+            let connection = open_connection(&path)?;
+            connection.execute(
+                "
+                UPDATE reflection_runs SET
+                    status = 'interrupted', completed_at = ?2, error = ?3
+                WHERE id = ?1
+                ",
+                params![run_id, now(), reason],
+            )?;
+            Ok(())
+        })
+        .await
+        .context("join Reflection run interruption")?
+    }
+
     pub async fn due_follow_ups(&self) -> Result<Vec<DeferredFollowUp>> {
         let path = self.path.clone();
         task::spawn_blocking(move || -> Result<Vec<DeferredFollowUp>> {
@@ -959,6 +996,16 @@ fn initialize_database(path: &PathBuf) -> Result<()> {
         ",
         [],
     )?;
+    connection.execute(
+        "
+        UPDATE reflection_runs SET
+            status = 'interrupted',
+            completed_at = COALESCE(completed_at, ?1),
+            error = COALESCE(error, 'interrupted_by_service_restart')
+        WHERE status = 'running'
+        ",
+        params![now()],
+    )?;
     Ok(())
 }
 
@@ -1073,6 +1120,8 @@ fn read_events_after(
                role, content_chars, payload_json, retracted
         FROM conversation_events
         WHERE id > ?1
+          AND kind <> 'message_seen'
+          AND retracted = 0
         ORDER BY id
         LIMIT ?2
         ",
@@ -1081,6 +1130,36 @@ fn read_events_after(
         .query_map(params![cursor, limit as i64], event_from_row)?
         .collect::<rusqlite::Result<Vec<_>>>()
         .map_err(Into::into)
+}
+
+fn actionable_prefix(
+    mut events: Vec<InteractionEvent>,
+    preferred_limit: usize,
+) -> Vec<InteractionEvent> {
+    let mut saw_user = false;
+    let mut boundaries = Vec::new();
+    for (index, event) in events.iter().enumerate() {
+        match event.kind.as_str() {
+            "message_user" => saw_user = true,
+            "message_assistant" if saw_user => {
+                boundaries.push(index);
+                saw_user = false;
+            }
+            "message_retracted" => boundaries.push(index),
+            _ => {}
+        }
+    }
+    let Some(boundary) = boundaries
+        .iter()
+        .copied()
+        .take_while(|index| *index < preferred_limit)
+        .last()
+        .or_else(|| boundaries.first().copied())
+    else {
+        return Vec::new();
+    };
+    events.truncate(boundary + 1);
+    events
 }
 
 fn read_recent_events(connection: &Connection, limit: usize) -> Result<Vec<InteractionEvent>> {
@@ -1512,6 +1591,70 @@ fn ensure_known_source_revisions(connection: &Connection, sources: &[String]) ->
         if !is_known_source_revision(connection, revision_id)? {
             anyhow::bail!("unknown conversation Revision: {revision_id}");
         }
+    }
+    Ok(())
+}
+
+fn ensure_episode_exists(connection: &Connection, id: &str) -> Result<()> {
+    let exists = connection
+        .query_row("SELECT 1 FROM episodes WHERE id = ?1", params![id], |_| {
+            Ok(())
+        })
+        .optional()?
+        .is_some();
+    if !exists {
+        anyhow::bail!(
+            "unknown Episode ID `{id}`; use an exact ID from Reflection state or omit episode_id to create a genuinely new Episode"
+        );
+    }
+    Ok(())
+}
+
+fn ensure_episode_title_is_new(connection: &Connection, title: &str) -> Result<()> {
+    let existing = connection
+        .query_row(
+            "SELECT id FROM episodes WHERE lower(trim(title)) = lower(trim(?1)) LIMIT 1",
+            params![title],
+            |row| row.get::<_, String>(0),
+        )
+        .optional()?;
+    if let Some(id) = existing {
+        anyhow::bail!(
+            "Episode title already exists as `{id}`; revise that exact Episode instead of creating a duplicate"
+        );
+    }
+    Ok(())
+}
+
+fn ensure_hypothesis_exists(connection: &Connection, id: &str) -> Result<()> {
+    let exists = connection
+        .query_row(
+            "SELECT 1 FROM hypotheses WHERE id = ?1",
+            params![id],
+            |_| Ok(()),
+        )
+        .optional()?
+        .is_some();
+    if !exists {
+        anyhow::bail!(
+            "unknown hypothesis ID `{id}`; use an exact ID from Reflection state or omit hypothesis_id for a distinct interpretation"
+        );
+    }
+    Ok(())
+}
+
+fn ensure_hypothesis_statement_is_new(connection: &Connection, statement: &str) -> Result<()> {
+    let existing = connection
+        .query_row(
+            "SELECT id FROM hypotheses WHERE lower(trim(statement)) = lower(trim(?1)) LIMIT 1",
+            params![statement],
+            |row| row.get::<_, String>(0),
+        )
+        .optional()?;
+    if let Some(id) = existing {
+        anyhow::bail!(
+            "hypothesis statement already exists as `{id}`; revise that exact hypothesis instead of creating a duplicate"
+        );
     }
     Ok(())
 }

@@ -75,8 +75,30 @@ async fn records_interaction_facts_without_turning_them_into_scores() {
         )
         .await
         .unwrap();
+    assert_eq!(store.pending_count().await.unwrap(), 0);
+    assert!(store.pending_batch(20).await.unwrap().is_none());
+    store
+        .record_message(
+            &message(
+                MemoryRole::Assistant,
+                "rev_reply",
+                "Then response timing should remain weak evidence inside a complete exchange.",
+                &Utc::now().to_rfc3339(),
+            ),
+            Some("rev_user"),
+            false,
+            &[],
+        )
+        .await
+        .unwrap();
 
     let batch = store.pending_batch(20).await.unwrap().unwrap();
+    assert!(
+        batch
+            .events
+            .iter()
+            .all(|event| event.kind != "message_seen")
+    );
     let user = batch
         .events
         .iter()
@@ -159,6 +181,30 @@ async fn maintains_revisable_episode_and_hypothesis_projections() {
         .unwrap();
     assert_eq!(revised.id, episode.id);
     assert_eq!(revised.state, EpisodeState::Active);
+    let mistyped_episode = store
+        .upsert_episode(EpisodeInput {
+            id: Some(format!("{}f", episode.id)),
+            title: "Temporal conversation model".to_owned(),
+            summary: "A mistyped identity must not create a duplicate.".to_owned(),
+            state: EpisodeState::Active,
+            source_revision_ids: vec!["rev_source".to_owned()],
+            parent_episode_ids: Vec::new(),
+        })
+        .await
+        .unwrap_err();
+    assert!(format!("{mistyped_episode:#}").contains("unknown Episode ID"));
+    let duplicate_title = store
+        .upsert_episode(EpisodeInput {
+            id: None,
+            title: " temporal conversation model ".to_owned(),
+            summary: "The same title should point back to the existing Episode.".to_owned(),
+            state: EpisodeState::Active,
+            source_revision_ids: vec!["rev_source".to_owned()],
+            parent_episode_ids: Vec::new(),
+        })
+        .await
+        .unwrap_err();
+    assert!(format!("{duplicate_title:#}").contains(&episode.id));
     store
         .attach_episode_messages(&episode.id, &["rev_followup".to_owned()])
         .await
@@ -198,7 +244,7 @@ async fn maintains_revisable_episode_and_hypothesis_projections() {
         vec!["rev_source".to_owned()]
     );
 
-    store
+    let hypothesis = store
         .upsert_hypothesis(HypothesisInput {
             id: None,
             statement: "This may be a current design priority.".to_owned(),
@@ -211,6 +257,20 @@ async fn maintains_revisable_episode_and_hypothesis_projections() {
         })
         .await
         .unwrap();
+    let mistyped_hypothesis = store
+        .upsert_hypothesis(HypothesisInput {
+            id: Some(format!("{}f", hypothesis.id)),
+            statement: hypothesis.statement,
+            evidence: "A typo must not fork state.".to_owned(),
+            alternatives: "None.".to_owned(),
+            status: HypothesisStatus::Working,
+            horizon: HypothesisHorizon::Current,
+            revisit_after: None,
+            source_revision_ids: vec!["rev_source".to_owned()],
+        })
+        .await
+        .unwrap_err();
+    assert!(format!("{mistyped_hypothesis:#}").contains("unknown hypothesis ID"));
 
     let prompt = store.prompt().await.unwrap();
     assert!(prompt.contains("Temporal conversation model"));
@@ -270,6 +330,56 @@ async fn schedules_a_candidate_follow_up_without_publishing_it() {
         Some("superseded_by_continuing_user_burst")
     );
 
+    let _ = tokio::fs::remove_dir_all(root).await;
+}
+
+#[tokio::test]
+async fn marks_unfinished_reflection_runs_interrupted_after_restart() {
+    let root = temp_root("restart");
+    let database = root.join("reflection.sqlite3");
+    let config = root.join("reflection.toml");
+    let store = ReflectionStore::open(database.clone(), config.clone())
+        .await
+        .unwrap();
+    store
+        .record_message(
+            &message(
+                MemoryRole::User,
+                "rev_restart_user",
+                "This exchange should be recoverable after a restart.",
+                &Utc::now().to_rfc3339(),
+            ),
+            None,
+            false,
+            &[],
+        )
+        .await
+        .unwrap();
+    store
+        .record_message(
+            &message(
+                MemoryRole::Assistant,
+                "rev_restart_assistant",
+                "The unfinished analysis must not remain running forever.",
+                &Utc::now().to_rfc3339(),
+            ),
+            Some("rev_restart_user"),
+            false,
+            &[],
+        )
+        .await
+        .unwrap();
+    let batch = store.pending_batch(20).await.unwrap().unwrap();
+    store.start_run("conversation", &batch).await.unwrap();
+    drop(store);
+
+    let restored = ReflectionStore::open(database, config).await.unwrap();
+    let runs = restored.recent_runs(1).await.unwrap();
+    assert_eq!(runs[0].status, "interrupted");
+    assert_eq!(
+        runs[0].error.as_deref(),
+        Some("interrupted_by_service_restart")
+    );
     let _ = tokio::fs::remove_dir_all(root).await;
 }
 

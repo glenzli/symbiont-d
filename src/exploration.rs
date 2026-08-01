@@ -304,6 +304,7 @@ async fn run_scheduler(
         match gate {
             Gate::Run => {
                 let mut trigger = pending_triggers.pop_front();
+                let scheduled_run = trigger.is_none();
                 if let Some(ExplorationTrigger::Intent(intent)) = trigger.as_ref() {
                     match intents.claim(&intent.id).await {
                         Ok(Some(claimed)) => trigger = Some(ExplorationTrigger::Intent(claimed)),
@@ -328,6 +329,7 @@ async fn run_scheduler(
                     Arc::clone(&curiosity),
                     Arc::clone(&reflection),
                     Arc::clone(&usage),
+                    conversation.clone(),
                     trigger,
                 )
                 .await;
@@ -360,7 +362,9 @@ async fn run_scheduler(
                         set_error(&state, error.to_string()).await;
                     }
                 }
-                last_run_at = Some(Utc::now());
+                if scheduled_run {
+                    last_run_at = Some(Utc::now());
+                }
                 continue;
             }
             Gate::Wait { phase, until } => {
@@ -485,8 +489,11 @@ async fn run_once(
     curiosity: Arc<CuriosityStore>,
     reflection: Arc<ReflectionStore>,
     usage: Arc<UsageStore>,
+    conversation: ConversationCoordinator,
     trigger: Option<ExplorationTrigger>,
 ) -> Result<ExplorationRunCompletion> {
+    let completes_deferred_follow_up =
+        matches!(&trigger, Some(ExplorationTrigger::DeferredFollowUp));
     {
         let mut snapshot = state.write().await;
         snapshot.phase = ExplorationPhase::Exploring;
@@ -560,31 +567,41 @@ async fn run_once(
         }
     });
 
+    let input_epoch = conversation.current_input_epoch();
     let outcome = codex
         .lock()
         .await
-        .explore(&compute, &profile, &continuity_context, runtime_tx)
+        .explore(
+            &compute,
+            &profile,
+            &continuity_context,
+            conversation.subscribe_input(),
+            runtime_tx,
+        )
         .await;
     activity_task
         .await
         .context("join exploration activity relay")?;
-    let outcome = outcome?;
-    usage.record_all(&outcome.invocations).await?;
+    let mut outcome = outcome?;
     let trace_id = outcome.metadata.trace_id.clone().or_else(|| {
         outcome
             .invocations
             .first()
             .map(|invocation| invocation.id.clone())
     });
-    let superseded = outcome.superseded;
+    let superseded = outcome.superseded || outcome.interrupted;
     let intent_sources = trigger
         .as_ref()
         .and_then(ExplorationTrigger::intent)
         .map(|intent| intent.source_revision_ids.clone())
         .unwrap_or_default();
 
-    let published = if let Some(text) = outcome.message {
+    let can_publish = !outcome.interrupted
+        && conversation.current_input_epoch() == input_epoch
+        && !conversation.snapshot().await.active;
+    let published = if can_publish && let Some(text) = outcome.message {
         let mut input_revision_ids = outcome.context_revision_ids;
+        input_revision_ids.extend(outcome.message_source_revision_ids);
         input_revision_ids.extend(intent_sources);
         let surfaced_hunch_revision_ids = outcome
             .hunch_revisions
@@ -631,13 +648,22 @@ async fn run_once(
         None
     };
 
-    reflection
-        .complete_triggered_follow_ups(if published.is_some() {
-            "messaged"
-        } else {
-            "silent"
-        })
-        .await?;
+    if published.is_some()
+        && let Some(invocation) = outcome.invocations.last_mut()
+    {
+        invocation.produced_message = true;
+    }
+    usage.record_all(&outcome.invocations).await?;
+
+    if completes_deferred_follow_up && !outcome.interrupted {
+        reflection
+            .complete_triggered_follow_ups(if published.is_some() {
+                "messaged"
+            } else {
+                "silent"
+            })
+            .await?;
+    }
 
     let mut snapshot = state.write().await;
     snapshot.last_run_at = Some(timestamp(Utc::now()));
@@ -727,8 +753,9 @@ fn exploration_working_context(
             .and_then(|metadata| metadata.origin.as_deref())
             .unwrap_or("conversation");
         let content = bounded_message_excerpt(&entry.content, EXPLORATION_MESSAGE_EXCERPT_CHARS);
+        let revision = entry.revision_id.as_deref().unwrap_or("");
         lines.push(format!(
-            "<message role=\"{role}\" origin=\"{origin}\" at=\"{}\">{content}</message>",
+            "<message role=\"{role}\" origin=\"{origin}\" at=\"{}\" revision=\"{revision}\">{content}</message>",
             entry.at
         ));
     }

@@ -260,6 +260,7 @@ async fn main() -> Result<()> {
         Arc::clone(&compute),
         Arc::clone(&continuity),
         Arc::clone(&usage),
+        conversation.clone(),
     );
     context_maintenance::start(
         Arc::clone(&autonomy),
@@ -270,6 +271,12 @@ async fn main() -> Result<()> {
         Arc::clone(&context),
         Arc::clone(&reflection_store),
         Arc::clone(&usage),
+        conversation.clone(),
+        resolve_data_path(
+            &workspace,
+            "SYMBIONT_CONTEXT_MAINTENANCE_PATH",
+            "context-maintenance.json",
+        ),
     );
     continuation::start_worker(
         continuation_receiver,

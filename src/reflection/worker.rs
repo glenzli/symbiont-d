@@ -161,15 +161,17 @@ impl ReflectionHandle {
         self.store
             .record_message(entry, related_revision_id, false, hunch_feedback)
             .await?;
+        let should_trigger = self.store.pending_count().await? > 0;
         self.refresh_pending_runtime().await;
-        let _ = self.trigger.try_send(ReflectionTrigger::Conversation);
+        if should_trigger {
+            let _ = self.trigger.try_send(ReflectionTrigger::Conversation);
+        }
         Ok(())
     }
 
     pub async fn record_seen(&self, revision_ids: Vec<String>, occurred_at: String) -> Result<()> {
         self.store.record_seen(revision_ids, occurred_at).await?;
         self.refresh_pending_runtime().await;
-        let _ = self.trigger.try_send(ReflectionTrigger::Conversation);
         Ok(())
     }
 
@@ -283,6 +285,9 @@ async fn run(
                 sleep(BUSY_RETRY).await;
                 pending_trigger = Some(trigger);
             }
+            Ok(ReflectState::Interrupted) => {
+                pending_trigger = Some(ReflectionTrigger::Conversation);
+            }
             Ok(ReflectState::Idle) => {}
             Err(error) => {
                 warn!(%error, "interaction Reflection failed");
@@ -298,6 +303,7 @@ async fn run(
 enum ReflectState {
     Completed,
     Busy,
+    Interrupted,
     Idle,
 }
 
@@ -378,6 +384,7 @@ async fn reflect_once(
             &compute,
             &profile_snapshot,
             &continuity_context,
+            conversation.subscribe_input(),
             events_tx,
         )
         .await;
@@ -391,6 +398,20 @@ async fn reflect_once(
             return Err(error);
         }
     };
+    if outcome.interrupted {
+        usage.record_all(&outcome.invocations).await?;
+        store
+            .interrupt_run(&run_id, "superseded_by_user_input")
+            .await?;
+        let mut current = runtime.write().await;
+        current.phase = ReflectionPhase::Waiting;
+        current.last_run_at = Some(now());
+        current.last_summary = None;
+        current.last_error = None;
+        current.current_activity = None;
+        current.pending_events = store.pending_count().await?;
+        return Ok(ReflectState::Interrupted);
+    }
     let feedback_page_ids = batch
         .events
         .iter()

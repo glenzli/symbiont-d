@@ -6,9 +6,9 @@ use std::{
 
 use super::{
     client::{
-        autonomous_response_is_silent, autonomous_response_is_superseded, context_revision_ids,
-        extract_completed_response_text, extract_final_agent_message, generated_image_output,
-        remember_generated_image, text_and_image_input_items,
+        autonomous_response_is_superseded, context_revision_ids, extract_completed_response_text,
+        extract_final_agent_message, generated_image_output, remember_generated_image,
+        text_and_image_input_items,
     },
     prompts::{
         autonomous_exploration_prompt, developer_instructions, interaction_reflection_prompt,
@@ -205,11 +205,7 @@ fn extracts_the_last_agent_message_from_a_completed_turn() {
 }
 
 #[test]
-fn autonomous_exploration_is_silent_or_starts_one_conversation() {
-    assert!(autonomous_response_is_silent("  <symbiont-silent/>\n"));
-    assert!(!autonomous_response_is_silent(
-        "This is worth discussing: <symbiont-silent/>"
-    ));
+fn autonomous_exploration_proposes_at_most_one_conversation() {
     assert!(autonomous_response_is_superseded(
         " <symbiont-superseded/>\n"
     ));
@@ -226,6 +222,9 @@ fn autonomous_exploration_is_silent_or_starts_one_conversation() {
     assert!(prompt.contains("pending attention"));
     assert!(prompt.contains("No process narration"));
     assert!(prompt.contains("already answered, invalidated"));
+    assert!(prompt.contains("propose_proactive_message"));
+    assert!(prompt.contains("Host rechecks timing"));
+    assert!(prompt.contains("never put user-visible prose in the final response"));
 }
 
 #[test]
@@ -853,7 +852,7 @@ async fn hunch_tools_preserve_model_owned_state_and_record_autonomous_exploratio
                 "origin": "symbiont",
                 "why_alive": "Scheduled runs have repeated nearby themes.",
                 "what_would_change_it": "Several event-driven runs produce distinct evidence.",
-                "source_revision_ids": [source.page.revision_id]
+                "source_revision_ids": [source.page.revision_id.clone()]
             }
         }))
         .await;
@@ -882,6 +881,23 @@ async fn hunch_tools_preserve_model_owned_state_and_record_autonomous_exploratio
     assert_eq!(snapshot.active_count, 1);
     assert_eq!(snapshot.hunches[0].origin.as_str(), "symbiont");
     assert!(snapshot.hunches[0].last_explored_at.is_some());
+
+    let candidate = tools
+        .execute_for_model(
+            &json!({
+                "namespace": "symbiont",
+                "tool": "propose_proactive_message",
+                "arguments": {
+                    "message": "这里有个值得接着讨论的变化。",
+                    "reason": "The autonomous run found evidence that changes the open question.",
+                    "source_revision_ids": [source.page.revision_id]
+                }
+            }),
+            Some("test-model"),
+            "autonomous",
+        )
+        .await;
+    assert_eq!(candidate.response["success"], true);
 
     let _ = tokio::fs::remove_dir_all(root).await;
 }

@@ -116,11 +116,13 @@ pub struct GeneratedImageOutput {
 
 pub struct ExplorationOutcome {
     pub message: Option<String>,
+    pub message_source_revision_ids: Vec<String>,
     pub metadata: MessageMetadata,
     pub invocations: Vec<InvocationRecord>,
     pub context_revision_ids: Vec<String>,
     pub hunch_revisions: Vec<HunchRevisionRef>,
     pub superseded: bool,
+    pub interrupted: bool,
 }
 
 #[derive(Clone, Debug)]
@@ -133,12 +135,14 @@ pub struct MaintenanceOutcome {
     pub invocations: Vec<InvocationRecord>,
     pub summarized: bool,
     pub model: Option<String>,
+    pub interrupted: bool,
 }
 
 pub struct ContextMaintenanceOutcome {
     pub invocations: Vec<InvocationRecord>,
     pub current_map_updated: bool,
     pub open_loops_updated: bool,
+    pub interrupted: bool,
 }
 
 pub struct ProfileReviewOutcome {
@@ -147,6 +151,7 @@ pub struct ProfileReviewOutcome {
     pub clarification_question: Option<String>,
     pub metadata: MessageMetadata,
     pub context_revision_ids: Vec<String>,
+    pub interrupted: bool,
 }
 
 pub struct ReflectionOutcome {
@@ -156,6 +161,7 @@ pub struct ReflectionOutcome {
     pub metadata: MessageMetadata,
     pub outreach: Option<ReflectionOutreach>,
     pub context_revision_ids: Vec<String>,
+    pub interrupted: bool,
 }
 
 #[derive(Clone, Debug)]
@@ -650,6 +656,7 @@ impl CodexClient {
         compute: &ComputeConfig,
         profile: &ProfileSnapshot,
         continuity_context: &str,
+        input_events: watch::Receiver<u64>,
         events: mpsc::Sender<RuntimeEvent>,
     ) -> Result<ExplorationOutcome> {
         let prompt =
@@ -667,31 +674,40 @@ impl CodexClient {
                 None,
                 None,
                 true,
-                None,
+                Some(input_events),
                 &events,
             )
             .await;
-        self.renew_background_thread(&thread_id, BackgroundThread::Autonomous)
-            .await;
         let mut outcome = outcome?;
+        if !outcome.interrupted {
+            self.renew_background_thread(&thread_id, BackgroundThread::Autonomous)
+                .await;
+        }
         let superseded = is_superseded_autonomous_response(&outcome.text);
-        let message = if is_silent_autonomous_response(&outcome.text) || superseded {
-            if let Some(last) = outcome.invocations.last_mut() {
-                last.produced_message = false;
-            }
-            None
-        } else {
-            Some(outcome.text)
-        };
+        let interrupted = outcome.interrupted;
+        let candidate = (!interrupted && !superseded)
+            .then(|| proactive_message_candidate(&outcome.invocations))
+            .flatten();
+        let message = candidate
+            .as_ref()
+            .map(|candidate| candidate.message.clone());
+        let message_source_revision_ids = candidate
+            .map(|candidate| candidate.source_revision_ids)
+            .unwrap_or_default();
+        for invocation in &mut outcome.invocations {
+            invocation.produced_message = false;
+        }
         outcome.metadata = metadata_for(&outcome.invocations, "autonomous");
         let hunch_revisions = successful_hunch_revisions(&outcome.invocations);
         Ok(ExplorationOutcome {
             message,
+            message_source_revision_ids,
             metadata: outcome.metadata,
             invocations: outcome.invocations,
             context_revision_ids: outcome.context_revision_ids,
             hunch_revisions,
             superseded,
+            interrupted,
         })
     }
 
@@ -701,6 +717,7 @@ impl CodexClient {
         compute: &ComputeConfig,
         profile: &ProfileSnapshot,
         continuity_context: &str,
+        input_events: watch::Receiver<u64>,
         events: mpsc::Sender<RuntimeEvent>,
     ) -> Result<MaintenanceOutcome> {
         let prompt = summary_maintenance_prompt(target_revision_id, MAINTENANCE_COMPLETE_MARKER);
@@ -717,13 +734,15 @@ impl CodexClient {
                 None,
                 None,
                 false,
-                None,
+                Some(input_events),
                 &events,
             )
             .await;
-        self.renew_background_thread(&thread_id, BackgroundThread::Maintenance)
-            .await;
         let mut outcome = outcome?;
+        if !outcome.interrupted {
+            self.renew_background_thread(&thread_id, BackgroundThread::Maintenance)
+                .await;
+        }
         for invocation in &mut outcome.invocations {
             invocation.produced_message = false;
         }
@@ -747,6 +766,7 @@ impl CodexClient {
             invocations: outcome.invocations,
             summarized,
             model,
+            interrupted: outcome.interrupted,
         })
     }
 
@@ -756,6 +776,7 @@ impl CodexClient {
         compute: &ComputeConfig,
         profile: &ProfileSnapshot,
         continuity_context: &str,
+        input_events: watch::Receiver<u64>,
         events: mpsc::Sender<RuntimeEvent>,
     ) -> Result<ContextMaintenanceOutcome> {
         let prompt = context_maintenance_prompt(source_bundle, CONTEXT_MAINTENANCE_COMPLETE_MARKER);
@@ -772,13 +793,15 @@ impl CodexClient {
                 None,
                 None,
                 false,
-                None,
+                Some(input_events),
                 &events,
             )
             .await;
-        self.renew_background_thread(&thread_id, BackgroundThread::Maintenance)
-            .await;
         let mut outcome = outcome?;
+        if !outcome.interrupted {
+            self.renew_background_thread(&thread_id, BackgroundThread::Maintenance)
+                .await;
+        }
         for invocation in &mut outcome.invocations {
             invocation.produced_message = false;
         }
@@ -789,6 +812,7 @@ impl CodexClient {
             ),
             open_loops_updated: successful_symbiont_tool(&outcome.invocations, "update_open_loops"),
             invocations: outcome.invocations,
+            interrupted: outcome.interrupted,
         })
     }
 
@@ -798,6 +822,7 @@ impl CodexClient {
         compute: &ComputeConfig,
         profile: &ProfileSnapshot,
         continuity_context: &str,
+        input_events: watch::Receiver<u64>,
         events: mpsc::Sender<RuntimeEvent>,
     ) -> Result<ProfileReviewOutcome> {
         let prompt = profile_review_prompt(source_bundle, PROFILE_REVIEW_COMPLETE_MARKER);
@@ -814,13 +839,15 @@ impl CodexClient {
                 None,
                 None,
                 false,
-                None,
+                Some(input_events),
                 &events,
             )
             .await;
-        self.renew_background_thread(&thread_id, BackgroundThread::Maintenance)
-            .await;
         let mut outcome = outcome?;
+        if !outcome.interrupted {
+            self.renew_background_thread(&thread_id, BackgroundThread::Maintenance)
+                .await;
+        }
         let review_step = outcome
             .invocations
             .iter()
@@ -860,6 +887,7 @@ impl CodexClient {
             clarification_question,
             metadata,
             context_revision_ids,
+            interrupted: outcome.interrupted,
         })
     }
 
@@ -869,6 +897,7 @@ impl CodexClient {
         compute: &ComputeConfig,
         profile: &ProfileSnapshot,
         continuity_context: &str,
+        input_events: watch::Receiver<u64>,
         events: mpsc::Sender<RuntimeEvent>,
     ) -> Result<ReflectionOutcome> {
         let prompt = interaction_reflection_prompt(source_bundle, REFLECTION_COMPLETE_MARKER);
@@ -885,13 +914,15 @@ impl CodexClient {
                 None,
                 None,
                 false,
-                None,
+                Some(input_events),
                 &events,
             )
             .await;
-        self.renew_background_thread(&thread_id, BackgroundThread::Maintenance)
-            .await;
         let mut outcome = outcome?;
+        if !outcome.interrupted {
+            self.renew_background_thread(&thread_id, BackgroundThread::Maintenance)
+                .await;
+        }
         let reflection_steps = outcome
             .invocations
             .iter()
@@ -905,8 +936,6 @@ impl CodexClient {
                             | "schedule_follow_up"
                             | "request_exploration"
                             | "propose_proactive_message"
-                            | "update_current_map"
-                            | "update_open_loops"
                             | "complete_reflection"
                     ))
                     || (step.namespace == "pcp" && step.tool == "assess_validity")
@@ -972,6 +1001,7 @@ impl CodexClient {
             metadata,
             outreach,
             context_revision_ids,
+            interrupted: outcome.interrupted,
         })
     }
 
@@ -2061,10 +2091,6 @@ fn completed_response_text(params: &Value, streamed_text: &str) -> String {
         .to_owned()
 }
 
-fn is_silent_autonomous_response(text: &str) -> bool {
-    text.trim() == AUTONOMOUS_SILENT_MARKER
-}
-
 fn is_superseded_autonomous_response(text: &str) -> bool {
     text.trim() == AUTONOMOUS_SUPERSEDED_MARKER
 }
@@ -2305,6 +2331,46 @@ fn successful_hunch_revisions(invocations: &[InvocationRecord]) -> Vec<HunchRevi
     revisions
 }
 
+fn proactive_message_candidate(invocations: &[InvocationRecord]) -> Option<ReflectionOutreach> {
+    invocations
+        .iter()
+        .flat_map(|invocation| &invocation.trace_steps)
+        .rev()
+        .find(|step| {
+            step.succeeded
+                && step.namespace == "symbiont"
+                && step.tool == "propose_proactive_message"
+        })
+        .and_then(|step| {
+            let message = step
+                .arguments
+                .get("message")
+                .and_then(Value::as_str)?
+                .trim()
+                .to_owned();
+            let reason = step
+                .arguments
+                .get("reason")
+                .and_then(Value::as_str)?
+                .trim()
+                .to_owned();
+            let source_revision_ids = step
+                .arguments
+                .get("source_revision_ids")
+                .and_then(Value::as_array)?
+                .iter()
+                .filter_map(Value::as_str)
+                .map(str::to_owned)
+                .collect::<Vec<_>>();
+            (!message.is_empty() && !reason.is_empty() && !source_revision_ids.is_empty())
+                .then_some(ReflectionOutreach {
+                    message,
+                    reason,
+                    source_revision_ids,
+                })
+        })
+}
+
 fn successful_tool_result_ids(
     invocations: &[InvocationRecord],
     namespace: &str,
@@ -2438,11 +2504,6 @@ pub(super) fn extract_final_agent_message(params: &Value) -> Option<String> {
 #[cfg(test)]
 pub(super) fn extract_completed_response_text(params: &Value, streamed_text: &str) -> String {
     completed_response_text(params, streamed_text)
-}
-
-#[cfg(test)]
-pub(super) fn autonomous_response_is_silent(text: &str) -> bool {
-    is_silent_autonomous_response(text)
 }
 
 #[cfg(test)]

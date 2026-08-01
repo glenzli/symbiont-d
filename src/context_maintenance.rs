@@ -1,9 +1,11 @@
-use std::{sync::Arc, time::Duration};
+use std::{path::PathBuf, sync::Arc, time::Duration};
 
 use anyhow::{Context, Result};
 use chrono::{DateTime, Utc};
+use serde::{Deserialize, Serialize};
 use tokio::{
-    sync::{Mutex, mpsc},
+    fs,
+    sync::{Mutex, RwLock, mpsc},
     time::sleep,
 };
 use tracing::{debug, warn};
@@ -13,6 +15,7 @@ use crate::{
     codex::CodexClient,
     compute::ComputeStore,
     continuity::{ContinuityHost, MessageLinks},
+    conversation::ConversationCoordinator,
     exploration::today_started_at,
     memory::{MemoryEntry, MemoryRole},
     profile::{ProfileStore, SetupStatus},
@@ -29,6 +32,60 @@ const MAX_SOURCE_EVENTS: usize = 30;
 const MAX_EVENT_CHARS: usize = 1_200;
 const MAX_SOURCE_BUNDLE_CHARS: usize = 18_000;
 
+#[derive(Default, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ContextMaintenanceCheckpoint {
+    assessed_through: Option<String>,
+}
+
+struct ContextMaintenanceCursor {
+    path: PathBuf,
+    checkpoint: RwLock<ContextMaintenanceCheckpoint>,
+}
+
+impl ContextMaintenanceCursor {
+    fn empty(path: PathBuf) -> Self {
+        Self {
+            path,
+            checkpoint: RwLock::new(ContextMaintenanceCheckpoint::default()),
+        }
+    }
+
+    async fn open(path: PathBuf) -> Result<Self> {
+        let checkpoint = match fs::read_to_string(&path).await {
+            Ok(content) => serde_json::from_str(&content)
+                .with_context(|| format!("parse context maintenance cursor {}", path.display()))?,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                ContextMaintenanceCheckpoint::default()
+            }
+            Err(error) => return Err(error.into()),
+        };
+        Ok(Self {
+            path,
+            checkpoint: RwLock::new(checkpoint),
+        })
+    }
+
+    async fn is_assessed(&self, revision_id: &str) -> bool {
+        self.checkpoint.read().await.assessed_through.as_deref() == Some(revision_id)
+    }
+
+    async fn mark_assessed(&self, revision_id: &str) -> Result<()> {
+        let content = {
+            let mut checkpoint = self.checkpoint.write().await;
+            checkpoint.assessed_through = Some(revision_id.to_owned());
+            serde_json::to_vec_pretty(&*checkpoint)?
+        };
+        if let Some(parent) = self.path.parent() {
+            fs::create_dir_all(parent).await?;
+        }
+        let temporary = self.path.with_extension("json.tmp");
+        fs::write(&temporary, content).await?;
+        fs::rename(temporary, &self.path).await?;
+        Ok(())
+    }
+}
+
 pub fn start(
     autonomy: Arc<AutonomyStore>,
     profile: Arc<ProfileStore>,
@@ -38,9 +95,20 @@ pub fn start(
     context: Arc<SymbiontContextStore>,
     reflection: Arc<ReflectionStore>,
     usage: Arc<UsageStore>,
+    conversation: ConversationCoordinator,
+    checkpoint_path: PathBuf,
 ) {
     tokio::spawn(run(
-        autonomy, profile, codex, compute, continuity, context, reflection, usage,
+        autonomy,
+        profile,
+        codex,
+        compute,
+        continuity,
+        context,
+        reflection,
+        usage,
+        conversation,
+        checkpoint_path,
     ));
 }
 
@@ -53,7 +121,16 @@ async fn run(
     context: Arc<SymbiontContextStore>,
     reflection: Arc<ReflectionStore>,
     usage: Arc<UsageStore>,
+    conversation: ConversationCoordinator,
+    checkpoint_path: PathBuf,
 ) {
+    let assessed_through = match ContextMaintenanceCursor::open(checkpoint_path.clone()).await {
+        Ok(cursor) => Arc::new(cursor),
+        Err(error) => {
+            warn!(%error, "could not restore context maintenance cursor");
+            Arc::new(ContextMaintenanceCursor::empty(checkpoint_path))
+        }
+    };
     sleep(INITIAL_DELAY).await;
     loop {
         let delay = match maintain_one(
@@ -65,6 +142,8 @@ async fn run(
             &context,
             &reflection,
             &usage,
+            &conversation,
+            &assessed_through,
         )
         .await
         {
@@ -94,6 +173,8 @@ async fn maintain_one(
     context: &SymbiontContextStore,
     reflection: &ReflectionStore,
     usage: &UsageStore,
+    conversation: &ConversationCoordinator,
+    assessed_through: &ContextMaintenanceCursor,
 ) -> Result<MaintenanceState> {
     let autonomy = autonomy.snapshot().await;
     let profile = profile.snapshot().await;
@@ -116,14 +197,17 @@ async fn maintain_one(
         return Ok(MaintenanceState::Idle);
     };
     let snapshot = context.snapshot().await?;
+    let already_assessed = assessed_through.is_assessed(latest_revision).await;
     let map_is_current = snapshot
         .current_map
         .as_ref()
-        .is_some_and(|document| document.has_source(latest_revision));
+        .is_some_and(|document| document.has_source(latest_revision))
+        || already_assessed;
     let loops_are_current = snapshot
         .open_loops
         .as_ref()
-        .is_some_and(|document| document.has_source(latest_revision));
+        .is_some_and(|document| document.has_source(latest_revision))
+        || already_assessed;
 
     if !map_is_current || !loops_are_current {
         let source_bundle = conversation_source_bundle(&recent, &snapshot);
@@ -134,6 +218,9 @@ async fn maintain_one(
             context,
             reflection,
             usage,
+            conversation,
+            assessed_through,
+            latest_revision,
             &profile,
             &source_bundle,
         )
@@ -162,6 +249,7 @@ async fn maintain_one(
         context,
         reflection,
         usage,
+        conversation,
         &profile,
         &source_bundle,
     )
@@ -175,6 +263,9 @@ async fn maintain_operational_context(
     context: &SymbiontContextStore,
     reflection: &ReflectionStore,
     usage: &UsageStore,
+    conversation: &ConversationCoordinator,
+    assessed_through: &ContextMaintenanceCursor,
+    latest_revision: &str,
     profile: &crate::profile::ProfileSnapshot,
     source_bundle: &str,
 ) -> Result<MaintenanceState> {
@@ -191,6 +282,7 @@ async fn maintain_operational_context(
             &compute,
             profile,
             &continuity_context,
+            conversation.subscribe_input(),
             events_tx,
         )
         .await;
@@ -200,6 +292,16 @@ async fn maintain_operational_context(
         .context("join Symbiont Context maintenance event drain")?;
     let outcome = outcome?;
     usage.record_all(&outcome.invocations).await?;
+    if outcome.interrupted {
+        return Ok(MaintenanceState::Busy);
+    }
+    let projections_exist = context
+        .snapshot()
+        .await
+        .is_ok_and(|snapshot| snapshot.current_map.is_some() && snapshot.open_loops.is_some());
+    if projections_exist {
+        assessed_through.mark_assessed(latest_revision).await?;
+    }
     debug!(
         current_map_updated = outcome.current_map_updated,
         open_loops_updated = outcome.open_loops_updated,
@@ -215,6 +317,7 @@ async fn review_profile(
     context: &SymbiontContextStore,
     reflection: &ReflectionStore,
     usage: &UsageStore,
+    conversation: &ConversationCoordinator,
     profile: &crate::profile::ProfileSnapshot,
     source_bundle: &str,
 ) -> Result<MaintenanceState> {
@@ -231,6 +334,7 @@ async fn review_profile(
             &compute,
             profile,
             &continuity_context,
+            conversation.subscribe_input(),
             events_tx,
         )
         .await;
@@ -240,6 +344,9 @@ async fn review_profile(
         .context("join profile review event drain")?;
     let outcome = outcome?;
     usage.record_all(&outcome.invocations).await?;
+    if outcome.interrupted {
+        return Ok(MaintenanceState::Busy);
+    }
 
     if let Some(question) = outcome.clarification_question.as_deref() {
         let mut input_revision_ids = outcome.context_revision_ids;
@@ -389,4 +496,35 @@ fn document_at_least_as_new_as(left: &ContextDocument, right: &ContextDocument) 
         return false;
     };
     left_at >= right_at
+}
+
+#[cfg(test)]
+mod tests {
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    use super::ContextMaintenanceCursor;
+
+    #[tokio::test]
+    async fn persists_the_latest_semantically_assessed_revision() {
+        let nonce = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("clock")
+            .as_nanos();
+        let root = std::env::temp_dir().join(format!("symbiont-context-cursor-{nonce}"));
+        let path = root.join("context-maintenance.json");
+        let cursor = ContextMaintenanceCursor::open(path.clone())
+            .await
+            .expect("open cursor");
+        assert!(!cursor.is_assessed("rev_previous").await);
+        cursor
+            .mark_assessed("rev_latest")
+            .await
+            .expect("persist cursor");
+
+        let restored = ContextMaintenanceCursor::open(path)
+            .await
+            .expect("restore cursor");
+        assert!(restored.is_assessed("rev_latest").await);
+        let _ = tokio::fs::remove_dir_all(root).await;
+    }
 }

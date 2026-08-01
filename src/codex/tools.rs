@@ -425,7 +425,7 @@ impl SymbiontTools {
                     {
                         "type": "function",
                         "name": "propose_proactive_message",
-                        "description": "During background Reflection, propose at most one exact user-visible message when the private work reveals a distinct thought that is worth initiating now. This is a candidate, not guaranteed delivery. The message must begin a natural conversation, never report Reflection, summarize maintenance, or presume an unanswered user prompt.",
+                        "description": "During background Reflection or autonomous exploration, propose at most one exact user-visible message when private work reveals a distinct thought worth initiating now. This is a candidate, not guaranteed delivery. The message must begin a natural conversation, never report internal work, summarize maintenance, or presume an unanswered user prompt.",
                         "inputSchema": {
                             "type": "object",
                             "properties": {
@@ -1005,6 +1005,7 @@ impl SymbiontTools {
                 ))
             }
             "update_current_map" | "update_open_loops" => {
+                require_maintenance_origin(run_origin, tool)?;
                 let content = required_text(arguments, "content_markdown")?;
                 let mut sources = string_array(arguments, "source_revision_ids")?;
                 sources.extend(self.continuity.recent_source_revisions(1).await?);
@@ -1322,7 +1323,7 @@ impl SymbiontTools {
                 ))
             }
             "propose_proactive_message" => {
-                require_reflection_origin(run_origin, tool)?;
+                require_proactive_origin(run_origin, tool)?;
                 let source_revision_ids = string_array(arguments, "source_revision_ids")?;
                 self.ensure_reflection_sources(&source_revision_ids).await?;
                 let message = required_text(arguments, "message")?;
@@ -1662,6 +1663,22 @@ fn require_reflection_or_interactive_origin(run_origin: &str, tool: &str) -> Res
         anyhow::bail!(
             "{tool} is available only to ordinary conversation or the background Reflection pipeline"
         );
+    }
+    Ok(())
+}
+
+fn require_proactive_origin(run_origin: &str, tool: &str) -> Result<()> {
+    if !matches!(run_origin, "reflection" | "autonomous") {
+        anyhow::bail!(
+            "{tool} is available only to autonomous exploration or background Reflection"
+        );
+    }
+    Ok(())
+}
+
+fn require_maintenance_origin(run_origin: &str, tool: &str) -> Result<()> {
+    if run_origin != "maintenance" {
+        anyhow::bail!("{tool} is available only to dedicated background maintenance");
     }
     Ok(())
 }

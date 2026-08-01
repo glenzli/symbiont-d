@@ -12,6 +12,7 @@ use crate::{
     codex::CodexClient,
     compute::ComputeStore,
     continuity::ContinuityHost,
+    conversation::ConversationCoordinator,
     exploration::today_started_at,
     profile::{ProfileStore, SetupStatus},
     usage::UsageStore,
@@ -31,8 +32,17 @@ pub fn start(
     compute: Arc<ComputeStore>,
     continuity: Arc<ContinuityHost>,
     usage: Arc<UsageStore>,
+    conversation: ConversationCoordinator,
 ) {
-    tokio::spawn(run(autonomy, profile, codex, compute, continuity, usage));
+    tokio::spawn(run(
+        autonomy,
+        profile,
+        codex,
+        compute,
+        continuity,
+        usage,
+        conversation,
+    ));
 }
 
 async fn run(
@@ -42,19 +52,29 @@ async fn run(
     compute: Arc<ComputeStore>,
     continuity: Arc<ContinuityHost>,
     usage: Arc<UsageStore>,
+    conversation: ConversationCoordinator,
 ) {
     sleep(INITIAL_DELAY).await;
     loop {
-        let delay =
-            match maintain_one(&autonomy, &profile, &codex, &compute, &continuity, &usage).await {
-                Ok(MaintenanceState::Maintained) => RETRY_DELAY,
-                Ok(MaintenanceState::Busy) => RETRY_DELAY,
-                Ok(MaintenanceState::Idle) => IDLE_DELAY,
-                Err(error) => {
-                    warn!(%error, "PCP Summary maintenance failed");
-                    RETRY_DELAY
-                }
-            };
+        let delay = match maintain_one(
+            &autonomy,
+            &profile,
+            &codex,
+            &compute,
+            &continuity,
+            &usage,
+            &conversation,
+        )
+        .await
+        {
+            Ok(MaintenanceState::Maintained) => RETRY_DELAY,
+            Ok(MaintenanceState::Busy) => RETRY_DELAY,
+            Ok(MaintenanceState::Idle) => IDLE_DELAY,
+            Err(error) => {
+                warn!(%error, "PCP Summary maintenance failed");
+                RETRY_DELAY
+            }
+        };
         sleep(delay).await;
     }
 }
@@ -72,6 +92,7 @@ async fn maintain_one(
     compute: &ComputeStore,
     continuity: &ContinuityHost,
     usage: &UsageStore,
+    conversation: &ConversationCoordinator,
 ) -> Result<MaintenanceState> {
     let autonomy = autonomy.snapshot().await;
     let profile = profile.snapshot().await;
@@ -104,6 +125,7 @@ async fn maintain_one(
             &compute,
             &profile,
             &continuity_context,
+            conversation.subscribe_input(),
             events_tx,
         )
         .await;
@@ -113,6 +135,9 @@ async fn maintain_one(
         .context("join PCP Summary maintenance event drain")?;
     let outcome = outcome?;
     usage.record_all(&outcome.invocations).await?;
+    if outcome.interrupted {
+        return Ok(MaintenanceState::Busy);
+    }
     continuity
         .mark_summary_assessed(
             target_revision_id.clone(),

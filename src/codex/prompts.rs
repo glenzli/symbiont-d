@@ -125,8 +125,9 @@ pub(super) fn interaction_reflection_prompt(
          `symbiont.upsert_interaction_hypothesis`; revise existing IDs instead of duplicating them, \
          and mark contradicted or superseded interpretations explicitly. A stable_candidate is only \
          a proposal for later critical review.\n\n\
-         Refresh Current Map and Open Loops when new evidence changes them. Schedule a delayed \
-         follow-up only when waiting could change conversation value, never as a reminder. The later autonomous \
+         Do not write Current Map, Open Loops, or orientation; dedicated maintenance owns them. \
+         Schedule a delayed follow-up only when waiting \
+         could change conversation value, never as a reminder. The later autonomous \
          publication gate will still decide whether to speak.\n\n\
          At most one proactive act: `symbiont.request_exploration` for a question needing evidence, \
          or `symbiont.propose_proactive_message` for a ready thought. Keep why here and why now \
@@ -196,8 +197,11 @@ pub(super) fn autonomous_exploration_prompt(
          cannot state why here without forcing a connection, remain silent. Treat unanswered prior \
          initiations in the Conversation Edge as pending attention, not rejection; raise the bar \
          before adding another unrelated topic.\n\n\
-         If nothing merits interruption, return exactly `{silent_marker}`. Otherwise return only \
-         the message the user should see, in the user's language. Start a conversation; do not sound \
+         If nothing merits interruption, do not propose a message. Otherwise call \
+         `symbiont.propose_proactive_message` exactly once with the candidate message, the private \
+         reason it merits interruption now, and exact recent conversation Revisions that anchor it. \
+         The Host rechecks timing and decides whether it is actually published. The candidate must \
+         be in the user's language and start a conversation; do not sound \
          as if answering a request, summarizing a task, reporting a run, or handing over findings. \
          Join the actual conversation; do not drop an abstract thesis into the transcript. \
          Do not say \
@@ -205,7 +209,8 @@ pub(super) fn autonomous_exploration_prompt(
          formulaic report openings such as 'the real change worth watching is' or 'one notable \
          signal is'. Bring the external material into the relationship and current conversation \
          before speaking. Explain evidence or uncertainty only where it naturally supports the \
-         point. No process narration."
+         point. No process narration. After private work and any candidate tool call, return exactly \
+         `{silent_marker}`; never put user-visible prose in the final response."
     )
 }
 
@@ -214,12 +219,15 @@ pub(super) fn context_maintenance_prompt(source_bundle: &str, completion_marker:
         "Refresh symbiont-d's operational context from the bounded source bundle below. This is \
          background memory work, not a user response. Use PCP only when older Detail is needed; \
          do not search the web.\n\n\
-         Call `symbiont.update_current_map` once with a compact account of active work, recent \
-         topics, changing emphasis, and near-term attention. Call `symbiont.update_open_loops` \
-         once with unresolved questions, decisions, tensions, and follow-ups; remove resolved \
-         items. Preserve ambiguity and distinguish user statements from assistant hypotheses. \
-         Include exact supporting Revision IDs. Do not modify the long-term orientation, record \
-         a profile review, or alter Hunches. After both calls, return exactly `{completion_marker}`.\n\n\
+         Compare the source bundle with the supplied Current Map and Open Loops. Call \
+         `symbiont.update_current_map` only when their semantic account of active work, changing \
+         emphasis, or near-term attention should change. Call `symbiont.update_open_loops` only \
+         when unresolved questions, decisions, tensions, or follow-ups should change. Do not write \
+         a new Revision merely to attach the newest source or rephrase equivalent content. Preserve \
+         ambiguity and distinguish user statements from assistant hypotheses. Include exact \
+         supporting Revision IDs in any update. Do not modify the long-term orientation, record a \
+         profile review, or alter Hunches. After assessing both projections, return exactly \
+         `{completion_marker}`.\n\n\
          <source-bundle>\n{source_bundle}\n</source-bundle>"
     )
 }
