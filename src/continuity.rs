@@ -1106,6 +1106,14 @@ impl ContinuityHost {
             .await
     }
 
+    pub async fn durable_page_inventory(
+        &self,
+    ) -> Result<Vec<pcp_sqlite::DurablePageInventoryItem>> {
+        self.store
+            .durable_page_inventory(self.allowed_scopes())
+            .await
+    }
+
     pub async fn mark_summary_assessed(
         &self,
         target_revision_id: String,

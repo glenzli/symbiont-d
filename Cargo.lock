@@ -930,6 +930,7 @@ dependencies = [
  "chrono",
  "pcp-core",
  "rusqlite",
+ "serde",
  "serde_json",
  "tokio",
 ]

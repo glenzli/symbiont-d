@@ -1093,3 +1093,88 @@ fn write_request(
         idempotency_key: Some(idempotency_key.to_owned()),
     }
 }
+
+#[tokio::test]
+async fn durable_inventory_uses_current_heads_and_excludes_runtime_pages() {
+    let root = std::env::temp_dir().join(format!(
+        "pcp-inventory-{}",
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("clock")
+            .as_nanos()
+    ));
+    let store = SqlitePcpStore::open(root.join("pcp.sqlite3"))
+        .await
+        .expect("open store");
+    let owner_id = store.owner_id().to_owned();
+    let namespace = "project:inventory".to_owned();
+    store
+        .create_scope(CreateScopeRequest {
+            owner_id: owner_id.clone(),
+            namespace: namespace.clone(),
+            scope_type: "project".to_owned(),
+            display_name: "Inventory project".to_owned(),
+            description: None,
+            parent_namespace: None,
+            visibility: "private".to_owned(),
+        })
+        .await
+        .expect("create scope");
+    let actor = Actor {
+        actor_type: ActorType::Model,
+        actor_id: "model:inventory".to_owned(),
+    };
+    let durable = store
+        .write_page(
+            write_request(
+                &owner_id,
+                &namespace,
+                actor.clone(),
+                "A durable protocol decision with enough detail to route later.",
+                "inventory:durable",
+            ),
+            vec![namespace.clone()],
+        )
+        .await
+        .expect("write durable page");
+    store
+        .write_summary(
+            WriteSummaryRequest {
+                target_revision_id: durable.revision_id.clone(),
+                expected_summary_revision_id: None,
+                content: "A durable protocol decision used by future retrieval.".to_owned(),
+                created_by: actor.clone(),
+                tool_or_model: Some("test-model".to_owned()),
+                provenance: Vec::new(),
+                idempotency_key: Some("inventory:summary".to_owned()),
+            },
+            vec![namespace.clone()],
+        )
+        .await
+        .expect("write summary");
+    let mut conversation = write_request(
+        &owner_id,
+        &namespace,
+        actor,
+        "A raw chat message must not become a reconciliation candidate.",
+        "inventory:conversation",
+    );
+    conversation.facets = Some(json!({"kind": "conversation_event", "role": "user"}));
+    store
+        .write_page(conversation, vec![namespace.clone()])
+        .await
+        .expect("write conversation page");
+
+    let inventory = store
+        .durable_page_inventory(vec![namespace])
+        .await
+        .expect("read inventory");
+    assert_eq!(inventory.len(), 1);
+    assert_eq!(inventory[0].revision_id, durable.revision_id);
+    assert_eq!(
+        inventory[0].summary.as_deref(),
+        Some("A durable protocol decision used by future retrieval.")
+    );
+
+    let _ = std::fs::remove_dir_all(root);
+}

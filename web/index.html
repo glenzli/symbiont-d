@@ -78,6 +78,11 @@
                 data-top-menu-action
               ><i data-lucide="history" aria-hidden="true"></i><span>探索记录</span></button>
               <button
+                id="open-reconciliation"
+                type="button"
+                data-top-menu-action
+              ><i data-lucide="git-merge" aria-hidden="true"></i><span>记忆整理</span></button>
+              <button
                 id="open-archive"
                 type="button"
                 data-top-menu-action
@@ -632,6 +637,51 @@
         <button class="icon-button" data-close="exploration-dialog" type="button" aria-label="关闭">×</button>
       </header>
       <div id="exploration-history" class="exploration-history" aria-live="polite"></div>
+    </dialog>
+
+    <dialog id="reconciliation-dialog" class="panel-dialog reconciliation-dialog">
+      <header class="dialog-header">
+        <div>
+          <h2>记忆整理</h2>
+          <p id="reconciliation-dialog-status">等待检查</p>
+        </div>
+        <button class="icon-button" data-close="reconciliation-dialog" type="button" aria-label="关闭">×</button>
+      </header>
+      <div class="reconciliation-toolbar">
+        <dl>
+          <div><dt>检查范围</dt><dd id="reconciliation-candidate-count">0 页</dd></div>
+          <div><dt>最近检查</dt><dd id="reconciliation-last-run">尚未运行</dd></div>
+        </dl>
+        <div class="inline-actions">
+          <button id="preview-reconciliation" class="secondary-button" type="button">
+            <i data-lucide="search" aria-hidden="true"></i><span>检查</span>
+          </button>
+          <button id="apply-reconciliation" class="primary-button" type="button" disabled>
+            <i data-lucide="check-check" aria-hidden="true"></i><span>应用建议</span>
+          </button>
+        </div>
+      </div>
+      <div id="reconciliation-content" class="reconciliation-content" aria-live="polite"></div>
+    </dialog>
+
+    <dialog id="reconciliation-budget-dialog" class="panel-dialog reconciliation-budget-dialog">
+      <header class="dialog-header">
+        <div>
+          <h2>仍然应用？</h2>
+          <p>今天的后台分析已达到设定上限</p>
+        </div>
+      </header>
+      <div class="exploration-budget-copy">
+        <p>本次只绕过限制，不会修改每日上限。</p>
+        <dl>
+          <div><dt>今日已用</dt><dd id="reconciliation-budget-used">0</dd></div>
+          <div><dt>每日上限</dt><dd id="reconciliation-budget-limit">0</dd></div>
+        </dl>
+      </div>
+      <footer class="dialog-actions">
+        <button id="cancel-reconciliation-override" class="secondary-button" type="button">取消</button>
+        <button id="confirm-reconciliation-override" class="primary-button" type="button">仍然应用</button>
+      </footer>
     </dialog>
 
     <dialog id="exploration-budget-dialog" class="panel-dialog exploration-budget-dialog">

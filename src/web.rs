@@ -40,6 +40,7 @@ use crate::{
     },
     permission::{PermissionBroker, PermissionDecision, PermissionRequestView},
     profile::{CalibrationMode, ProfileSnapshot, ProfileStore, SetupStatus},
+    reconciliation::{ReconciliationHandle, ReconciliationRuntime, ReconciliationSnapshot},
     reflection::{
         HunchFeedbackTarget, ReflectionConfig, ReflectionHandle, ReflectionRuntime,
         ReflectionSnapshot,
@@ -65,6 +66,7 @@ const SETTINGS_JS: &str = include_str!("../web/settings.js");
 const TASK_UI_JS: &str = include_str!("../web/task-ui.js");
 const EXPLORATION_UI_JS: &str = include_str!("../web/exploration-ui.js");
 const REFLECTION_UI_JS: &str = include_str!("../web/reflection-ui.js");
+const RECONCILIATION_UI_JS: &str = include_str!("../web/reconciliation-ui.js");
 const TOPIC_UI_JS: &str = include_str!("../web/topic-ui.js");
 const MESSAGE_SYNC_JS: &str = include_str!("../web/message-sync.js");
 const MESSAGE_ACTIONS_JS: &str = include_str!("../web/message-actions.js");
@@ -92,6 +94,7 @@ pub struct AppState {
     rate_limits: Arc<RwLock<Option<RateLimitInfo>>>,
     exploration: ExplorationHandle,
     reflection: ReflectionHandle,
+    reconciliation: ReconciliationHandle,
     topics: Arc<TopicService>,
     conversation: ConversationCoordinator,
     bridge: Arc<CodexBridge>,
@@ -115,6 +118,7 @@ impl AppState {
         rate_limits: Arc<RwLock<Option<RateLimitInfo>>>,
         exploration: ExplorationHandle,
         reflection: ReflectionHandle,
+        reconciliation: ReconciliationHandle,
         conversation: ConversationCoordinator,
         bridge: Arc<CodexBridge>,
         permissions: Arc<PermissionBroker>,
@@ -139,6 +143,7 @@ impl AppState {
             rate_limits,
             exploration,
             reflection,
+            reconciliation,
             topics,
             conversation,
             bridge,
@@ -187,6 +192,7 @@ struct BootstrapResponse {
     usage: UsageHeadline,
     exploration: ExplorationSnapshot,
     reflection: ReflectionSnapshot,
+    reconciliation: ReconciliationSnapshot,
     conversation: ConversationSnapshot,
     bridge: BridgeSnapshot,
     permissions: Vec<PermissionRequestView>,
@@ -207,6 +213,7 @@ struct RuntimeResponse {
     usage: UsageHeadline,
     exploration: ExplorationSnapshot,
     reflection: ReflectionRuntime,
+    reconciliation: ReconciliationRuntime,
     conversation: ConversationSnapshot,
     compute_policies: Vec<ComputeTopicPolicy>,
     messages: Vec<MemoryEntry>,
@@ -237,6 +244,22 @@ struct ExplorationHistoryResponse {
 #[derive(Serialize)]
 struct TriggerResponse {
     accepted: bool,
+}
+
+#[derive(Default, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct ReconciliationTriggerQuery {
+    #[serde(default)]
+    override_token_limit: bool,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ReconciliationTriggerResponse {
+    accepted: bool,
+    requires_confirmation: bool,
+    background_tokens_today: u64,
+    daily_token_limit: u64,
 }
 
 #[derive(Deserialize, Default)]
@@ -377,6 +400,7 @@ pub fn router(state: AppState) -> Router {
         .route("/task-ui.js", get(task_ui_js))
         .route("/exploration-ui.js", get(exploration_ui_js))
         .route("/reflection-ui.js", get(reflection_ui_js))
+        .route("/reconciliation-ui.js", get(reconciliation_ui_js))
         .route("/topic-ui.js", get(topic_ui_js))
         .route("/message-sync.js", get(message_sync_js))
         .route("/message-actions.js", get(message_actions_js))
@@ -412,6 +436,12 @@ pub fn router(state: AppState) -> Router {
         .route("/api/reflection", get(reflection_snapshot))
         .route("/api/reflection/config", post(update_reflection))
         .route("/api/reflection/run", post(trigger_reflection))
+        .route("/api/reconciliation", get(reconciliation_snapshot))
+        .route("/api/reconciliation/preview", post(preview_reconciliation))
+        .route(
+            "/api/reconciliation/apply/{run_id}",
+            post(apply_reconciliation),
+        )
         .route("/api/topics", get(topic_index))
         .route("/api/topics/{topic_id}", get(topic_detail))
         .route("/api/bridge/config", post(update_bridge_config))
@@ -525,6 +555,13 @@ async fn reflection_ui_js() -> impl IntoResponse {
     )
 }
 
+async fn reconciliation_ui_js() -> impl IntoResponse {
+    (
+        [(header::CONTENT_TYPE, "text/javascript; charset=utf-8")],
+        RECONCILIATION_UI_JS,
+    )
+}
+
 async fn topic_ui_js() -> impl IntoResponse {
     (
         [(header::CONTENT_TYPE, "text/javascript; charset=utf-8")],
@@ -626,6 +663,7 @@ async fn bootstrap(State(state): State<AppState>) -> Result<Json<BootstrapRespon
             .snapshot()
             .await
             .map_err(ApiError::internal)?,
+        reconciliation: state.reconciliation.snapshot().await,
         conversation: state.conversation.snapshot().await,
         bridge: state.bridge.snapshot().await,
         permissions: state.permissions.snapshot().await,
@@ -960,6 +998,7 @@ async fn runtime(
         usage,
         exploration: state.exploration.snapshot().await,
         reflection: state.reflection.runtime().await,
+        reconciliation: state.reconciliation.runtime().await,
         conversation: state.conversation.snapshot().await,
         compute_policies: state.compute_policies.snapshot().await,
         messages,
@@ -1009,6 +1048,71 @@ async fn trigger_reflection(State(state): State<AppState>) -> Json<TriggerRespon
     Json(TriggerResponse {
         accepted: state.reflection.trigger(),
     })
+}
+
+async fn reconciliation_snapshot(State(state): State<AppState>) -> Json<ReconciliationSnapshot> {
+    Json(state.reconciliation.snapshot().await)
+}
+
+async fn preview_reconciliation(State(state): State<AppState>) -> Json<TriggerResponse> {
+    Json(TriggerResponse {
+        accepted: state.reconciliation.preview(),
+    })
+}
+
+async fn apply_reconciliation(
+    State(state): State<AppState>,
+    AxumPath(run_id): AxumPath<String>,
+    Query(query): Query<ReconciliationTriggerQuery>,
+) -> Result<Json<ReconciliationTriggerResponse>, ApiError> {
+    let headline = state
+        .usage
+        .headline(&today_started_at())
+        .await
+        .map_err(ApiError::internal)?;
+    let autonomy_limit = state.autonomy.snapshot().await.daily_token_limit;
+    let reflection_limit = state.reflection.store().config().await.daily_token_limit;
+    let (background_tokens_today, daily_token_limit) =
+        exceeded_reconciliation_budget(&headline, autonomy_limit, reflection_limit).unwrap_or((
+            headline.reflection_tokens_today,
+            nonzero_min(autonomy_limit, reflection_limit),
+        ));
+    let requires_confirmation = daily_token_limit > 0
+        && background_tokens_today >= daily_token_limit
+        && !query.override_token_limit;
+    let accepted = !requires_confirmation
+        && state
+            .reconciliation
+            .apply(run_id, query.override_token_limit);
+    Ok(Json(ReconciliationTriggerResponse {
+        accepted,
+        requires_confirmation,
+        background_tokens_today,
+        daily_token_limit,
+    }))
+}
+
+fn exceeded_reconciliation_budget(
+    headline: &UsageHeadline,
+    autonomy_limit: u64,
+    reflection_limit: u64,
+) -> Option<(u64, u64)> {
+    if autonomy_limit > 0 && headline.autonomous_tokens_today >= autonomy_limit {
+        return Some((headline.autonomous_tokens_today, autonomy_limit));
+    }
+    if reflection_limit > 0 && headline.reflection_tokens_today >= reflection_limit {
+        return Some((headline.reflection_tokens_today, reflection_limit));
+    }
+    None
+}
+
+fn nonzero_min(left: u64, right: u64) -> u64 {
+    match (left, right) {
+        (0, 0) => 0,
+        (0, right) => right,
+        (left, 0) => left,
+        (left, right) => left.min(right),
+    }
 }
 
 async fn topic_index(State(state): State<AppState>) -> Result<Json<TopicIndex>, ApiError> {

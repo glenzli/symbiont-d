@@ -430,14 +430,20 @@ impl UsageStore {
                         COALESCE(SUM(total_tokens), 0),
                         COALESCE(SUM(
                             CASE
-                                WHEN origin IN ('autonomous', 'maintenance')
+                                WHEN origin IN (
+                                    'autonomous', 'maintenance',
+                                    'reconciliation_preview', 'reconciliation_apply'
+                                )
                                      AND completed_at >= ?1
                                 THEN total_tokens ELSE 0
                             END
                         ), 0),
                         COALESCE(SUM(
                             CASE
-                                WHEN origin IN ('autonomous', 'maintenance', 'reflection')
+                                WHEN origin IN (
+                                    'autonomous', 'maintenance', 'reflection',
+                                    'reconciliation_preview', 'reconciliation_apply'
+                                )
                                      AND completed_at >= ?1
                                      AND produced_message = 1
                                 THEN 1 ELSE 0
@@ -445,7 +451,10 @@ impl UsageStore {
                         ), 0),
                         COALESCE(SUM(
                             CASE
-                                WHEN origin = 'reflection'
+                                WHEN origin IN (
+                                    'reflection',
+                                    'reconciliation_preview', 'reconciliation_apply'
+                                )
                                      AND completed_at >= ?1
                                 THEN total_tokens ELSE 0
                             END

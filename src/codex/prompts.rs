@@ -4,6 +4,7 @@ use crate::{
     compute::ComputeLane,
     diagnostics::ContextFragment,
     profile::{CalibrationMode, ProfileSnapshot, SetupStatus},
+    reconciliation::{ReconciliationMode, ReconciliationProposal},
     rollover::RolloverDecision,
     working_context::WorkingContext,
 };
@@ -264,6 +265,50 @@ pub(super) fn summary_maintenance_prompt(
          content cannot be compressed meaningfully, do not write one. Do not \
          search the web, create aggregate Pages, modify user profile, or address the user. After \
          the decision, return exactly `{completion_marker}`."
+    )
+}
+
+pub(super) fn memory_reconciliation_prompt(
+    mode: ReconciliationMode,
+    run_id: &str,
+    inventory_bundle: &str,
+    proposals: &[ReconciliationProposal],
+    completion_marker: &str,
+) -> String {
+    let mode_instructions = match mode {
+        ReconciliationMode::Preview => {
+            "This is a read-only preview. You may selectively search and read PCP, but the Host \
+             will reject every Page, Summary, Relation, and validity mutation. Submit no more than \
+             six proposals. Prefer no-op over cosmetic organization."
+                .to_owned()
+        }
+        ReconciliationMode::Apply => format!(
+            "Apply only the approved preview proposals below. Re-read every exact current Revision \
+             before mutation and skip stale or unjustified proposals. Make at most six PCP \
+             mutations. Never delete or tombstone. A synthesized Page must use kind \
+             `memory_synthesis`, exact source provenance, and `summarizes` Relations. A \
+             classification revision must preserve payload, sources, provenance, and lifecycle.\n\n\
+             <approved-proposals>\n{}\n</approved-proposals>",
+            serde_json::to_string_pretty(proposals).unwrap_or_else(|_| "[]".to_owned())
+        ),
+    };
+    format!(
+        "Reconcile symbiont-d's durable memory structure for run `{run_id}`. This is bounded \
+         background memory work, not conversation and not web research. The inventory contains \
+         current durable Page heads plus existing Topic Episodes; raw conversation events and \
+         obsolete operational projections were deliberately excluded. Summaries route to Detail \
+         and are not evidence. Use semantic judgment, not numeric scoring or fixed thresholds.\n\n\
+         {mode_instructions}\n\n\
+         Propose or apply only consequential maintenance: classify an otherwise durable Page when \
+         its kind is clear; synthesize a recurring, future-useful subject not already represented; \
+         add a Relation that materially improves navigation; assess validity only from contrary or \
+         superseding evidence; replace a poor routing Summary only when it impairs retrieval. Do not \
+         reorganize content merely because it exists, and do not modify profile, Current Map, Open \
+         Loops, Hunches, Episodes, or raw messages. Use exact Revision IDs.\n\n\
+         Finish by calling `symbiont.complete_reconciliation` exactly once with a concise visible \
+         summary in the user's language and the proposals that remain relevant. Then return exactly \
+         `{completion_marker}`.\n\n\
+         <memory-inventory>\n{inventory_bundle}\n</memory-inventory>"
     )
 }
 

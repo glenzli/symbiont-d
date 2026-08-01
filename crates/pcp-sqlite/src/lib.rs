@@ -1,3 +1,4 @@
+mod inventory;
 mod read;
 mod retract;
 mod row;
@@ -9,6 +10,7 @@ mod summary_migration;
 mod validity;
 mod write;
 
+pub use inventory::DurablePageInventoryItem;
 pub use retract::TombstoneCascadeResult;
 pub use store::SqlitePcpStore;
 

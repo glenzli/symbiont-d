@@ -23,7 +23,7 @@ use super::{
     prompts::{
         additional_context_value, autonomous_exploration_prompt, context_fragments,
         context_maintenance_prompt, developer_instructions, interaction_reflection_prompt,
-        profile_review_prompt, summary_maintenance_prompt,
+        memory_reconciliation_prompt, profile_review_prompt, summary_maintenance_prompt,
     },
     task_bridge::{CodexTaskDetail, CodexTaskSummary, parse_task_detail, parse_task_list},
     tool_dedup::{ToolCallPlan, TurnToolDeduplicator},
@@ -42,6 +42,10 @@ use crate::{
     memory::{MessageMetadata, MessageRunMetadata},
     permission::PermissionBroker,
     profile::{ProfileSnapshot, ProfileStore},
+    reconciliation::{
+        ReconciliationAction, ReconciliationMode, ReconciliationModelOutcome,
+        ReconciliationProposal,
+    },
     reflection::ReflectionStore,
     rollover::{self, NativeThreadCursor, RolloverDecision, ThreadContextPressure},
     symbiont_context::SymbiontContextStore,
@@ -57,6 +61,7 @@ const MAINTENANCE_COMPLETE_MARKER: &str = "<symbiont-maintained/>";
 const CONTEXT_MAINTENANCE_COMPLETE_MARKER: &str = "<symbiont-context-maintained/>";
 const PROFILE_REVIEW_COMPLETE_MARKER: &str = "<symbiont-profile-reviewed/>";
 const REFLECTION_COMPLETE_MARKER: &str = "<symbiont-reflected/>";
+const RECONCILIATION_COMPLETE_MARKER: &str = "<symbiont-reconciled/>";
 const CONTINUATION_SILENT_MARKER: &str = "<symbiont-no-continuation/>";
 
 #[derive(Clone)]
@@ -178,6 +183,18 @@ pub struct ChatInput {
     pub reply_to_revision_id: Option<String>,
     pub initial_lane: ComputeLane,
     pub input_events: watch::Receiver<u64>,
+}
+
+pub struct ReconciliationModelRequest<'a> {
+    pub mode: ReconciliationMode,
+    pub run_id: &'a str,
+    pub inventory_bundle: &'a str,
+    pub proposals: &'a [ReconciliationProposal],
+    pub compute: &'a ComputeConfig,
+    pub profile: &'a ProfileSnapshot,
+    pub continuity_context: &'a str,
+    pub input_events: watch::Receiver<u64>,
+    pub events: mpsc::Sender<RuntimeEvent>,
 }
 
 #[derive(Clone, Debug, Default)]
@@ -1001,6 +1018,83 @@ impl CodexClient {
             metadata,
             outreach,
             context_revision_ids,
+            interrupted: outcome.interrupted,
+        })
+    }
+
+    pub async fn reconcile_memory(
+        &mut self,
+        request: ReconciliationModelRequest<'_>,
+    ) -> Result<ReconciliationModelOutcome> {
+        let prompt = memory_reconciliation_prompt(
+            request.mode,
+            request.run_id,
+            request.inventory_bundle,
+            request.proposals,
+            RECONCILIATION_COMPLETE_MARKER,
+        );
+        let origin = match request.mode {
+            ReconciliationMode::Preview => "reconciliation_preview",
+            ReconciliationMode::Apply => "reconciliation_apply",
+        };
+        let lane = match request.mode {
+            ReconciliationMode::Preview => ComputeLane::Investigate,
+            ReconciliationMode::Apply => ComputeLane::Critical,
+        };
+        let thread_id = self.maintenance_thread_id.clone();
+        let outcome = self
+            .run_request(
+                thread_id.clone(),
+                text_input_items(&prompt),
+                lane,
+                origin,
+                request.compute,
+                request.profile,
+                request.continuity_context,
+                None,
+                None,
+                false,
+                Some(request.input_events),
+                &request.events,
+            )
+            .await;
+        let mut outcome = outcome?;
+        if !outcome.interrupted {
+            self.renew_background_thread(&thread_id, BackgroundThread::Maintenance)
+                .await;
+        }
+        for invocation in &mut outcome.invocations {
+            invocation.produced_message = false;
+        }
+        let completion = outcome
+            .invocations
+            .iter()
+            .flat_map(|invocation| &invocation.trace_steps)
+            .rev()
+            .find(|step| {
+                step.succeeded
+                    && step.namespace == "symbiont"
+                    && step.tool == "complete_reconciliation"
+            });
+        let summary = completion
+            .and_then(|step| step.arguments.get("summary"))
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(str::to_owned);
+        let proposals = completion
+            .and_then(|step| step.arguments.get("proposals"))
+            .cloned()
+            .map(serde_json::from_value::<Vec<ReconciliationProposal>>)
+            .transpose()
+            .context("parse memory reconciliation proposals")?
+            .unwrap_or_default();
+        let actions = reconciliation_actions(&outcome.invocations);
+        Ok(ReconciliationModelOutcome {
+            invocations: outcome.invocations,
+            summary,
+            proposals,
+            actions,
             interrupted: outcome.interrupted,
         })
     }
@@ -2329,6 +2423,56 @@ fn successful_hunch_revisions(invocations: &[InvocationRecord]) -> Vec<HunchRevi
         }
     }
     revisions
+}
+
+fn reconciliation_actions(invocations: &[InvocationRecord]) -> Vec<ReconciliationAction> {
+    invocations
+        .iter()
+        .flat_map(|invocation| &invocation.trace_steps)
+        .filter(|step| {
+            step.succeeded
+                && step.namespace == "pcp"
+                && matches!(
+                    step.tool.as_str(),
+                    "assess_validity"
+                        | "write_summary"
+                        | "write_page"
+                        | "revise_page"
+                        | "link_pages"
+                )
+        })
+        .map(|step| {
+            let mut target_revision_ids = HashSet::new();
+            collect_revision_ids(&step.arguments, &mut target_revision_ids);
+            let result = step
+                .result
+                .pointer("/contentItems/0/text")
+                .and_then(Value::as_str)
+                .and_then(|text| serde_json::from_str::<Value>(text).ok())
+                .unwrap_or(Value::Null);
+            ReconciliationAction {
+                tool: format!("{}.{}", step.namespace, step.tool),
+                target_revision_ids: {
+                    let mut values = target_revision_ids.into_iter().collect::<Vec<_>>();
+                    values.sort();
+                    values
+                },
+                result_page_id: result
+                    .get("pageId")
+                    .and_then(Value::as_str)
+                    .map(str::to_owned),
+                result_revision_id: result
+                    .get("revisionId")
+                    .or_else(|| result.get("summaryRevisionId"))
+                    .and_then(Value::as_str)
+                    .map(str::to_owned),
+                result_relation_id: result
+                    .get("relationId")
+                    .and_then(Value::as_str)
+                    .map(str::to_owned),
+            }
+        })
+        .collect()
 }
 
 fn proactive_message_candidate(invocations: &[InvocationRecord]) -> Option<ReflectionOutreach> {

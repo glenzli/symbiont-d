@@ -12,7 +12,7 @@ use super::{
     },
     prompts::{
         autonomous_exploration_prompt, developer_instructions, interaction_reflection_prompt,
-        summary_maintenance_prompt,
+        memory_reconciliation_prompt, summary_maintenance_prompt,
     },
     tools::SymbiontTools,
     trace::observable_item_event,
@@ -24,6 +24,7 @@ use crate::{
     exploration::{ExplorationIntentQueue, ExplorationIntentReceiver},
     memory::MemoryRole,
     profile::{CalibrationMode, ProfileStore, SetupStatus},
+    reconciliation::ReconciliationMode,
     reflection::ReflectionStore,
     symbiont_context::SymbiontContextStore,
     task_execution::TaskExecutionQueue,
@@ -92,6 +93,13 @@ fn dynamic_tools_expose_host_and_pcp_namespaces() {
             .as_array()
             .unwrap()
             .iter()
+            .any(|tool| tool["name"] == "complete_reconciliation")
+    );
+    assert!(
+        specs[0]["tools"]
+            .as_array()
+            .unwrap()
+            .iter()
             .any(|tool| tool["name"] == "escalate")
     );
     assert_eq!(specs[1]["name"], "pcp");
@@ -110,6 +118,21 @@ fn summary_maintenance_keeps_the_model_on_one_exact_revision() {
     assert!(prompt.contains("Read that Revision's payload"));
     assert!(prompt.contains("do not write one"));
     assert!(prompt.contains("return exactly `<done/>`"));
+}
+
+#[test]
+fn reconciliation_preview_is_concise_and_explicitly_read_only() {
+    let prompt = memory_reconciliation_prompt(
+        ReconciliationMode::Preview,
+        "rec_test",
+        r#"{"durablePages":[],"topicEpisodes":[]}"#,
+        &[],
+        "<done/>",
+    );
+    assert!(prompt.contains("read-only preview"));
+    assert!(prompt.contains("reject every Page, Summary, Relation, and validity mutation"));
+    assert!(prompt.contains("Prefer no-op over cosmetic organization"));
+    assert!(prompt.contains("complete_reconciliation"));
 }
 
 #[test]

@@ -1,5 +1,6 @@
 import { initProfileUi } from "/profile-ui.js";
 import { initReflectionUi } from "/reflection-ui.js";
+import { initReconciliationUi } from "/reconciliation-ui.js";
 import { formatDuration, formatMemorySize, formatTokens } from "/presentation.js";
 import { renderMessageContent, renderRichText } from "/rich-text.js";
 import { initExplorationUi } from "/exploration-ui.js";
@@ -30,6 +31,7 @@ const appState = {
   },
   exploration: null,
   reflection: null,
+  reconciliation: null,
   conversation: null,
   bridge: {
     codexTaskAccess: false,
@@ -81,6 +83,7 @@ const taskUi = initTaskUi(
   settingsUi.open,
 );
 const reflectionUi = initReflectionUi(appState);
+const reconciliationUi = initReconciliationUi(appState);
 const profileUi = initProfileUi(appState, sendMessage);
 initTraceUi();
 const messageSync = initMessageSync({
@@ -304,6 +307,11 @@ function applyRuntime(payload) {
       ? { ...appState.reflection, runtime: payload.reflection }
       : payload.reflection;
   }
+  if (payload.reconciliation) {
+    appState.reconciliation = appState.reconciliation?.recentRuns
+      ? { ...appState.reconciliation, runtime: payload.reconciliation }
+      : payload.reconciliation;
+  }
   appState.conversation = payload.conversation || appState.conversation;
   appState.computePolicies =
     payload.computePolicies || appState.computePolicies;
@@ -314,6 +322,7 @@ function applyRuntime(payload) {
   renderRuntimeStatus();
   settingsUi.renderAutonomyRuntime();
   reflectionUi.renderRuntime();
+  reconciliationUi.runtimeUpdated();
   explorationUi.runtimeUpdated();
   taskUi.runtimeUpdated();
   permissionUi.render();
@@ -334,6 +343,7 @@ async function bootstrap() {
     explorationUi.runtimeUpdated();
     taskUi.runtimeUpdated();
     reflectionUi.render();
+    reconciliationUi.render();
     profileUi.render();
     permissionUi.render();
     messageSync.start();

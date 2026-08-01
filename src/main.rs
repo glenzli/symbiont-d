@@ -1,3 +1,5 @@
+#![recursion_limit = "256"]
+
 mod asset;
 mod autonomy;
 mod bridge;
@@ -15,6 +17,7 @@ mod maintenance;
 mod memory;
 mod permission;
 mod profile;
+mod reconciliation;
 mod reflection;
 mod rollover;
 mod symbiont_context;
@@ -48,6 +51,7 @@ use memory::MemoryStore;
 use pcp_sqlite::SqlitePcpStore;
 use permission::PermissionBroker;
 use profile::ProfileStore;
+use reconciliation::{ReconciliationDependencies, ReconciliationHandle, ReconciliationStore};
 use reflection::{ReflectionHandle, ReflectionStore};
 use symbiont_context::SymbiontContextStore;
 use task_execution::TaskExecutionQueue;
@@ -194,6 +198,14 @@ async fn main() -> Result<()> {
         ))
         .await?,
     );
+    let reconciliation_store = Arc::new(
+        ReconciliationStore::open(resolve_data_path(
+            &workspace,
+            "SYMBIONT_RECONCILIATION_PATH",
+            "reconciliation.json",
+        ))
+        .await?,
+    );
     let rate_limits = codex.rate_limits();
     let codex = Arc::new(Mutex::new(codex));
     let bridge = Arc::new(
@@ -241,6 +253,19 @@ async fn main() -> Result<()> {
         Arc::clone(&usage),
         conversation.clone(),
         exploration.clone(),
+    );
+    let reconciliation = ReconciliationHandle::start(
+        reconciliation_store,
+        ReconciliationDependencies {
+            autonomy: Arc::clone(&autonomy),
+            profile: Arc::clone(&profile),
+            codex: Arc::clone(&codex),
+            compute: Arc::clone(&compute),
+            continuity: Arc::clone(&continuity),
+            reflection: Arc::clone(&reflection_store),
+            usage: Arc::clone(&usage),
+            conversation: conversation.clone(),
+        },
     );
     task_execution::start_worker(
         task_execution_receiver,
@@ -303,6 +328,7 @@ async fn main() -> Result<()> {
         rate_limits,
         exploration,
         reflection,
+        reconciliation,
         conversation,
         bridge,
         permissions,
