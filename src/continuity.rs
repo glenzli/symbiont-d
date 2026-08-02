@@ -9,6 +9,9 @@ use std::{
 
 use anyhow::{Context, Result};
 use chrono::{SecondsFormat, Utc};
+#[cfg(test)]
+use pcp_client::EmbeddedPcpClient;
+use pcp_client::{DurablePageInventoryItem, PcpApi};
 use pcp_core::{
     AccessPrincipal, AccessPrincipalType, AccessSession, Actor, ActorType,
     AssessPageValidityRequest, CreateScopeRequest, InitialRelation, LifecycleStatus,
@@ -17,7 +20,8 @@ use pcp_core::{
     SearchResult, SourceRef, ValidityStanding, WritePageRequest, WriteResult, WriteSummaryRequest,
     WriteSummaryResult, WriteValidityResult,
 };
-use pcp_store::{DurablePageInventoryItem, PcpClient, PcpStore};
+#[cfg(test)]
+use pcp_store::PcpStore;
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 use tokio::sync::{Mutex, RwLock};
@@ -72,6 +76,14 @@ pub struct ScopePolicy {
 }
 
 impl ScopePolicy {
+    fn for_owner(owner_id: &str) -> Self {
+        Self {
+            user: format!("user:{owner_id}"),
+            project: PROJECT_NAMESPACE.to_owned(),
+            conversation: CONVERSATION_NAMESPACE.to_owned(),
+        }
+    }
+
     pub fn all(&self) -> Vec<String> {
         vec![
             self.user.clone(),
@@ -82,7 +94,7 @@ impl ScopePolicy {
 }
 
 pub struct ContinuityHost {
-    store: PcpClient,
+    store: Arc<dyn PcpApi>,
     scopes: ScopePolicy,
     event_counter: AtomicU64,
     orientation: RwLock<Option<WriteResult>>,
@@ -124,25 +136,21 @@ pub struct ImageAssetPage {
 }
 
 impl ContinuityHost {
-    pub async fn open(store: Arc<dyn PcpStore>) -> Result<Self> {
+    pub fn access_session(owner_id: &str) -> AccessSession {
+        AccessSession::full_control(
+            AccessPrincipal {
+                principal_id: "host:symbiont-d".to_owned(),
+                principal_type: AccessPrincipalType::Host,
+                display_name: Some("symbiont-d".to_owned()),
+            },
+            format!("symbiont-d:{}", std::process::id()),
+            ScopePolicy::for_owner(owner_id).all(),
+        )
+    }
+
+    pub async fn open(store: Arc<dyn PcpApi>) -> Result<Self> {
         let owner_id = store.owner_id().to_owned();
-        let scopes = ScopePolicy {
-            user: format!("user:{owner_id}"),
-            project: PROJECT_NAMESPACE.to_owned(),
-            conversation: CONVERSATION_NAMESPACE.to_owned(),
-        };
-        let store = PcpClient::new(
-            store,
-            AccessSession::full_control(
-                AccessPrincipal {
-                    principal_id: "host:symbiont-d".to_owned(),
-                    principal_type: AccessPrincipalType::Host,
-                    display_name: Some("symbiont-d".to_owned()),
-                },
-                format!("symbiont-d:{}", std::process::id()),
-                scopes.all(),
-            ),
-        );
+        let scopes = ScopePolicy::for_owner(&owner_id);
         for request in [
             CreateScopeRequest {
                 owner_id: owner_id.clone(),
@@ -185,8 +193,14 @@ impl ContinuityHost {
         })
     }
 
-    pub fn store(&self) -> &PcpClient {
-        &self.store
+    #[cfg(test)]
+    pub async fn open_embedded_for_test(store: Arc<dyn PcpStore>) -> Result<Self> {
+        let access = Self::access_session(store.owner_id());
+        Self::open(EmbeddedPcpClient::shared(store, access)).await
+    }
+
+    pub fn store(&self) -> &dyn PcpApi {
+        self.store.as_ref()
     }
 
     pub fn allowed_scopes(&self) -> Vec<String> {

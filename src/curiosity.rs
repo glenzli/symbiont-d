@@ -790,7 +790,11 @@ mod tests {
                 .await
                 .expect("open PCP"),
         );
-        let continuity = Arc::new(ContinuityHost::open(pcp).await.expect("open continuity"));
+        let continuity = Arc::new(
+            ContinuityHost::open_embedded_for_test(pcp)
+                .await
+                .expect("open continuity"),
+        );
         let curiosity = CuriosityStore::new(Arc::clone(&continuity));
         let source = continuity
             .ingest_message(
@@ -859,7 +863,11 @@ mod tests {
                 .await
                 .expect("open PCP"),
         );
-        let continuity = Arc::new(ContinuityHost::open(pcp).await.expect("open continuity"));
+        let continuity = Arc::new(
+            ContinuityHost::open_embedded_for_test(pcp)
+                .await
+                .expect("open continuity"),
+        );
         let curiosity = CuriosityStore::new(Arc::clone(&continuity));
         let source = continuity
             .ingest_message(
@@ -973,7 +981,11 @@ mod tests {
                 .await
                 .expect("open PCP"),
         );
-        let continuity = Arc::new(ContinuityHost::open(pcp).await.expect("open continuity"));
+        let continuity = Arc::new(
+            ContinuityHost::open_embedded_for_test(pcp)
+                .await
+                .expect("open continuity"),
+        );
         let curiosity = CuriosityStore::new(continuity);
         let created = curiosity
             .open(NewHunch {

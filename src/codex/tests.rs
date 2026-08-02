@@ -409,7 +409,7 @@ async fn orientation_tool_requires_active_calibration() {
             .expect("open PCP store"),
     );
     let continuity = Arc::new(
-        ContinuityHost::open(store)
+        ContinuityHost::open_embedded_for_test(store)
             .await
             .expect("open continuity host"),
     );
@@ -485,7 +485,7 @@ async fn pcp_tools_write_search_and_read_through_the_dynamic_bridge() {
             .expect("open PCP store"),
     );
     let continuity = Arc::new(
-        ContinuityHost::open(store)
+        ContinuityHost::open_embedded_for_test(store)
             .await
             .expect("open continuity host"),
     );
@@ -764,7 +764,7 @@ async fn reflection_tools_accept_recalled_conversation_revisions_outside_the_eve
             .expect("open PCP store"),
     );
     let continuity = Arc::new(
-        ContinuityHost::open(store)
+        ContinuityHost::open_embedded_for_test(store)
             .await
             .expect("open continuity host"),
     );
@@ -888,7 +888,7 @@ async fn hunch_tools_preserve_model_owned_state_and_record_autonomous_exploratio
             .expect("open PCP store"),
     );
     let continuity = Arc::new(
-        ContinuityHost::open(store)
+        ContinuityHost::open_embedded_for_test(store)
             .await
             .expect("open continuity host"),
     );

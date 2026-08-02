@@ -52,8 +52,10 @@ use curiosity::CuriosityStore;
 use exploration::{ExplorationHandle, ExplorationIntentQueue};
 use identity::IdentityStore;
 use memory::MemoryStore;
+use pcp_client::EmbeddedPcpClient;
 use pcp_index::PcpIndex;
 use pcp_sqlite::SqlitePcpStore;
+use pcp_store::PcpStore;
 use permission::PermissionBroker;
 use profile::ProfileStore;
 use reconciliation::{ReconciliationDependencies, ReconciliationHandle, ReconciliationStore};
@@ -113,7 +115,7 @@ async fn main() -> Result<()> {
         ))
         .await?,
     );
-    let pcp = Arc::new(
+    let pcp_store = Arc::new(
         SqlitePcpStore::open(resolve_data_path(
             &workspace,
             "SYMBIONT_PCP_PATH",
@@ -121,6 +123,9 @@ async fn main() -> Result<()> {
         ))
         .await?,
     );
+    let pcp_access = ContinuityHost::access_session(pcp_store.owner_id());
+    let pcp_store: Arc<dyn PcpStore> = pcp_store;
+    let pcp = EmbeddedPcpClient::shared(pcp_store, pcp_access);
     let continuity = Arc::new(ContinuityHost::open(pcp).await?);
     let context = Arc::new(SymbiontContextStore::new(Arc::clone(&continuity)));
     let curiosity = Arc::new(CuriosityStore::new(Arc::clone(&continuity)));

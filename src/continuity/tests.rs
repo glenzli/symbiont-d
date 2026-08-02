@@ -3,11 +3,13 @@ use std::{
     time::{SystemTime, UNIX_EPOCH},
 };
 
-use pcp_core::{Projection, ReadPagesRequest};
+use pcp_client::EmbeddedPcpClient;
+use pcp_core::{AccessPrincipal, AccessPrincipalType, AccessSession, Projection, ReadPagesRequest};
 use pcp_sqlite::SqlitePcpStore;
+use pcp_store::PcpStore;
 use serde_json::json;
 
-use super::{ContinuityHost, MessageLinks};
+use super::{CONVERSATION_NAMESPACE, ContinuityHost, MessageLinks, PROJECT_NAMESPACE};
 use crate::{
     asset::AssetStore,
     memory::{
@@ -23,6 +25,49 @@ const ONE_PIXEL_PNG: &[u8] = &[
 ];
 
 #[tokio::test]
+async fn continuity_accepts_the_transport_independent_pcp_api() {
+    let nonce = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .expect("clock")
+        .as_nanos();
+    let root = std::env::temp_dir().join(format!("symbiont-pcp-api-{nonce}"));
+    let store = Arc::new(
+        SqlitePcpStore::open(root.join("context.sqlite3"))
+            .await
+            .expect("open PCP store"),
+    );
+    let owner_id = store.owner_id().to_owned();
+    let scopes = vec![
+        format!("user:{owner_id}"),
+        PROJECT_NAMESPACE.to_owned(),
+        CONVERSATION_NAMESPACE.to_owned(),
+    ];
+    let store: Arc<dyn PcpStore> = store;
+    let client = EmbeddedPcpClient::shared(
+        store,
+        AccessSession::full_control(
+            AccessPrincipal {
+                principal_id: "host:contract-test".to_owned(),
+                principal_type: AccessPrincipalType::Host,
+                display_name: None,
+            },
+            "session:contract-test",
+            scopes,
+        ),
+    );
+
+    let continuity = ContinuityHost::open(client)
+        .await
+        .expect("open host through PcpApi");
+    assert_eq!(
+        continuity.store().access().principal.principal_id,
+        "host:contract-test"
+    );
+
+    let _ = tokio::fs::remove_dir_all(root).await;
+}
+
+#[tokio::test]
 async fn context_seed_exposes_the_complete_archive_boundary_and_latest_checkpoint() {
     let nonce = SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -34,7 +79,9 @@ async fn context_seed_exposes_the_complete_archive_boundary_and_latest_checkpoin
             .await
             .expect("open PCP store"),
     );
-    let continuity = ContinuityHost::open(store).await.expect("open host");
+    let continuity = ContinuityHost::open_embedded_for_test(store)
+        .await
+        .expect("open host");
     let user = continuity
         .ingest_message(
             MemoryRole::User,
@@ -80,7 +127,9 @@ async fn quotes_multiple_excerpts_from_one_message_with_one_source_relation() {
             .await
             .expect("open PCP store"),
     );
-    let continuity = ContinuityHost::open(store).await.expect("open host");
+    let continuity = ContinuityHost::open_embedded_for_test(store)
+        .await
+        .expect("open host");
     let source = continuity
         .ingest_message(
             MemoryRole::Assistant,
@@ -201,7 +250,9 @@ async fn links_images_user_events_and_assistant_responses() {
             .await
             .expect("open PCP store"),
     );
-    let continuity = ContinuityHost::open(store).await.expect("open host");
+    let continuity = ContinuityHost::open_embedded_for_test(store)
+        .await
+        .expect("open host");
     let assets = AssetStore::open(root.join("assets"))
         .await
         .expect("open assets");
@@ -400,7 +451,9 @@ async fn stores_generated_images_as_assistant_page_attachments() {
             .await
             .expect("open PCP store"),
     );
-    let continuity = ContinuityHost::open(store).await.expect("open host");
+    let continuity = ContinuityHost::open_embedded_for_test(store)
+        .await
+        .expect("open host");
     let assets = AssetStore::open(root.join("assets"))
         .await
         .expect("open assets");
@@ -535,7 +588,9 @@ async fn marks_unanswered_messages_failed_and_retracts_the_latest_turn() {
             .await
             .expect("open PCP store"),
     );
-    let continuity = ContinuityHost::open(store).await.expect("open host");
+    let continuity = ContinuityHost::open_embedded_for_test(store)
+        .await
+        .expect("open host");
     let earlier = continuity
         .ingest_message(
             MemoryRole::User,

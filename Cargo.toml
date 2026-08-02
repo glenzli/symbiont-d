@@ -10,6 +10,7 @@ axum = { version = "0.8", features = ["multipart"] }
 chrono = { version = "0.4", features = ["serde"] }
 imagesize = "0.14"
 infer = "0.19"
+pcp-client = { path = "../paged-context-protocol/crates/pcp-client" }
 pcp-core = { path = "../paged-context-protocol/crates/pcp-core" }
 pcp-sqlite = { path = "../paged-context-protocol/crates/pcp-sqlite" }
 pcp-store = { path = "../paged-context-protocol/crates/pcp-store" }

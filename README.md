@@ -88,8 +88,11 @@ model instead of being appended to every request.
 and `symbiont-d` are separate layers. The reusable protocol types, SQLite Store,
 revision semantics, retrieval primitives, Summary projections, validity, and
 DAG Relations now live in the adjacent `paged-context-protocol` repository.
-`pcp-store` defines the runtime interface; `pcp-sqlite` is selected only at the
-application composition root.
+`pcp-store` defines the storage contract. `pcp-client` defines the
+transport-independent capability interface consumed by `ContinuityHost`, while
+`pcp-sqlite` is selected only by the current embedded composition root. A later
+remote runtime can implement the same `PcpApi` without changing conversation,
+Reflection, Curiosity, or exploration code.
 
 The Host enters PCP as the fixed `host:symbiont-d` AccessPrincipal. Its
 AccessSession is limited to the user, project, and main-conversation Scopes it
