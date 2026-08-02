@@ -69,7 +69,7 @@ chat / timer / hunch
         v
 symbiont-d host
   |-- Codex app-server: reasoning, web search, model routing
-  |-- in-tree PCP implementation: Pages, summaries, provenance, retrieval
+  |-- PCP engine: Pages, summaries, provenance, retrieval
   |-- Symbiont Context: current map, open loops, profile review
   |-- Reflection: raw interaction events -> Episodes -> working hypotheses
   |-- Curiosity: model-owned questions and their lifecycle
@@ -85,28 +85,24 @@ model instead of being appended to every request.
 ### PCP implementation status
 
 [Paged Context Protocol](https://glenzli.com/projects/paged-context-protocol/)
-and `symbiont-d` are conceptually separate layers, even though their current
-implementations live in this repository and evolve together.
+and `symbiont-d` are separate layers. The reusable protocol types, SQLite Store,
+revision semantics, retrieval primitives, Summary projections, validity, and
+DAG Relations now live in the adjacent `paged-context-protocol` repository.
+`pcp-store` defines the runtime interface; `pcp-sqlite` is selected only at the
+application composition root.
 
-The prototype intentionally keeps `pcp-core`, the SQLite store, model-facing
-tools, summary maintenance, and symbiont's continuity policy close to one
-another. This makes it possible to test the protocol against a real long-lived
-agent loop: conversation ingestion, Summary-to-Detail routing, revision and
-validity tracking, DAG relations, selective recall, retraction, and debugging
-traces all exercise the same data under actual use.
+`symbiont-d` remains the Host: it owns when and why the agent writes, recalls,
+revises, or retracts Pages, together with conversation continuity, profile,
+Reflection, Curiosity, autonomous exploration, model routing, and Codex tools.
+The two repositories still evolve against the same real long-lived agent loop,
+but PCP no longer depends on symbiont-specific policy.
 
-This is a development choice, not a permanent ownership claim. The reusable PCP
-implementation may move into an independent package or repository after its
-storage and tool contracts stabilize. Until then, its internal APIs may change
-with symbiont-d experiments. The intended boundary is already visible:
-
-- `crates/pcp-core` owns protocol data types and requests.
-- `crates/pcp-sqlite` owns the local durable implementation.
-- `symbiont-d` owns when and why the agent writes, recalls, revises, or retracts
-  Pages.
-
-Keeping that distinction explicit allows the prototype to remain integrated
-without defining PCP as a symbiont-d-specific memory format.
+During this extraction phase, the Rust crates are consumed through a sibling
+path dependency. Once their API stabilizes, symbiont-d will pin a published
+version or exact Git revision so builds no longer depend on workspace layout.
+The independent `pcp-mcp` stdio server is an explicit opt-in path for Codex or
+another Host; symbiont-d does not register it globally or expose private Scopes
+to unrelated tasks by default.
 
 A Hunch belongs to `symbiont-d`, not to the user profile. Opening a distinct
 Hunch can wake an exploration cycle; routine revisions do not. When an
@@ -145,6 +141,14 @@ an older or adjacent topic.
 
 - Rust 1.88 or newer.
 - A recent `codex` CLI.
+- A sibling checkout of `paged-context-protocol`:
+
+```text
+lab/
+  paged-context-protocol/
+  symbiont-d/
+```
+
 - An existing Codex login:
 
 ```bash
@@ -304,17 +308,15 @@ npm run build:web
 The read-only PCP CLI can inspect the local store:
 
 ```bash
-cargo run --bin pcp -- doctor
-cargo run --bin pcp -- scopes
-cargo run --bin pcp -- search "query" text
-cargo run --bin pcp -- read rev_...
+PCP_STORE_PATH=data/context.sqlite3 cargo run \
+  --manifest-path ../paged-context-protocol/Cargo.toml -p pcp-cli -- doctor
+PCP_STORE_PATH=data/context.sqlite3 cargo run \
+  --manifest-path ../paged-context-protocol/Cargo.toml -p pcp-cli -- search "query" text
 ```
 
 ## Source Layout
 
 ```text
-crates/pcp-core/    in-tree PCP protocol types and requests
-crates/pcp-sqlite/ in-tree durable PCP implementation
 src/bridge.rs       explicit Codex task and symbiont-context bridge
 src/codex/          Codex app-server client, prompts, tools, traces
 src/continuation.rs short conversational continuation lifecycle
@@ -338,8 +340,8 @@ macos/SymbiontMenu/  native menu-bar client and app bundle build
 - `dynamicTools` in Codex app-server is experimental.
 - Retrieval currently uses Summary, lexical, exact, temporal, and graph
   channels; there is no embedding index.
-- The in-tree PCP implementation is still co-evolving with symbiont-d and does
-  not yet promise a stable standalone API.
+- The extracted PCP crates are still co-evolving with symbiont-d and do not yet
+  promise a stable standalone API.
 - Autonomous behavior and background memory maintenance still need long-running
   real-world evaluation.
 - The native client is currently a thin macOS shell around the local web UI;

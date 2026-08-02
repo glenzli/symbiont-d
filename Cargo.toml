@@ -4,18 +4,15 @@ version = "0.1.0"
 edition = "2024"
 default-run = "symbiont-d"
 
-[workspace]
-members = ["crates/pcp-core", "crates/pcp-sqlite"]
-resolver = "3"
-
 [dependencies]
 anyhow = "1.0"
 axum = { version = "0.8", features = ["multipart"] }
 chrono = { version = "0.4", features = ["serde"] }
 imagesize = "0.14"
 infer = "0.19"
-pcp-core = { path = "crates/pcp-core" }
-pcp-sqlite = { path = "crates/pcp-sqlite" }
+pcp-core = { path = "../paged-context-protocol/crates/pcp-core" }
+pcp-sqlite = { path = "../paged-context-protocol/crates/pcp-sqlite" }
+pcp-store = { path = "../paged-context-protocol/crates/pcp-store" }
 reqwest = { version = "0.13", default-features = false, features = ["rustls"] }
 rusqlite = { version = "0.40", features = ["bundled"] }
 serde = { version = "1.0", features = ["derive"] }

@@ -16,7 +16,7 @@ use pcp_core::{
     SearchPagesRequest, SearchResult, SourceRef, ValidityStanding, WritePageRequest, WriteResult,
     WriteSummaryRequest, WriteSummaryResult, WriteValidityResult,
 };
-use pcp_sqlite::{SqlitePcpStore, TombstoneCascadeResult};
+use pcp_store::{DurablePageInventoryItem, PcpStore};
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 use tokio::sync::{Mutex, RwLock};
@@ -39,6 +39,29 @@ const CONVERSATION_NAMESPACE: &str = "conversation:symbiont-d-main";
 const MODEL_ACTOR_ID: &str = "codex:symbiont-d";
 const SYSTEM_ACTOR_ID: &str = "symbiont-d";
 const MAX_MODEL_WRITE_CHARS: usize = 64_000;
+const INDEX_EXCLUDED_PAGE_KINDS: &[&str] = &[
+    "conversation_event",
+    "summary_projection",
+    "symbiont_current_map",
+    "symbiont_open_loops",
+    "symbiont_profile_review",
+    "symbiont_hunch",
+    "user_orientation",
+    "conversation_checkpoint",
+    "image_asset",
+    "tombstone",
+];
+const SUMMARY_EXCLUDED_PAGE_KINDS: &[&str] = &[
+    "summary_projection",
+    "symbiont_current_map",
+    "symbiont_open_loops",
+    "symbiont_profile_review",
+    "symbiont_hunch",
+    "user_orientation",
+    "conversation_checkpoint",
+    "image_asset",
+    "tombstone",
+];
 
 #[derive(Clone, Debug)]
 pub struct ScopePolicy {
@@ -58,7 +81,7 @@ impl ScopePolicy {
 }
 
 pub struct ContinuityHost {
-    store: Arc<SqlitePcpStore>,
+    store: Arc<dyn PcpStore>,
     scopes: ScopePolicy,
     event_counter: AtomicU64,
     orientation: RwLock<Option<WriteResult>>,
@@ -83,6 +106,13 @@ pub struct StoredMessage {
 }
 
 #[derive(Clone, Debug)]
+pub struct MessageRetractionResult {
+    pub retracted_revision_ids: Vec<String>,
+    pub message_revision_ids: Vec<String>,
+    pub restored_page_ids: Vec<String>,
+}
+
+#[derive(Clone, Debug)]
 pub struct ImageAssetPage {
     pub revision_id: String,
     pub observed_at: String,
@@ -93,7 +123,7 @@ pub struct ImageAssetPage {
 }
 
 impl ContinuityHost {
-    pub async fn open(store: Arc<SqlitePcpStore>) -> Result<Self> {
+    pub async fn open(store: Arc<dyn PcpStore>) -> Result<Self> {
         let owner_id = store.owner_id().to_owned();
         let scopes = ScopePolicy {
             user: format!("user:{owner_id}"),
@@ -142,7 +172,7 @@ impl ContinuityHost {
         })
     }
 
-    pub fn store(&self) -> &Arc<SqlitePcpStore> {
+    pub fn store(&self) -> &Arc<dyn PcpStore> {
         &self.store
     }
 
@@ -977,7 +1007,7 @@ impl ContinuityHost {
     pub async fn retract_latest_user_message(
         &self,
         revision_id: &str,
-    ) -> Result<TombstoneCascadeResult> {
+    ) -> Result<MessageRetractionResult> {
         let messages = self.recent_messages(500).await?;
         let target = messages
             .iter()
@@ -995,7 +1025,7 @@ impl ContinuityHost {
             anyhow::bail!("only the latest user message can be retracted");
         }
 
-        let result = self
+        let cascade = self
             .store
             .tombstone_derivation_cascade(
                 revision_id.to_owned(),
@@ -1003,9 +1033,33 @@ impl ContinuityHost {
                 self.allowed_scopes(),
             )
             .await?;
+        let mut message_revision_ids = Vec::new();
+        for chunk in cascade.retracted_revision_ids.chunks(20) {
+            let pages = self
+                .read(ReadPagesRequest {
+                    revision_ids: chunk.to_vec(),
+                    projections: vec![Projection::Facets],
+                    max_chars: 16_000,
+                })
+                .await?;
+            message_revision_ids.extend(pages.into_iter().filter_map(|page| {
+                (page
+                    .revision
+                    .facets
+                    .as_ref()
+                    .and_then(|facets| facets.get("kind"))
+                    .and_then(Value::as_str)
+                    == Some("conversation_event"))
+                .then_some(page.revision.revision_id)
+            }));
+        }
         *self.last_event_revision.lock().await =
             self.recent_source_revisions(1).await?.into_iter().next();
-        Ok(result)
+        Ok(MessageRetractionResult {
+            retracted_revision_ids: cascade.retracted_revision_ids,
+            message_revision_ids,
+            restored_page_ids: cascade.restored_page_ids,
+        })
     }
 
     pub async fn recent_messages_after(
@@ -1083,6 +1137,7 @@ impl ContinuityHost {
         self.store
             .browse_index(
                 self.resolve_scopes(requested_scopes)?,
+                owned_page_kinds(INDEX_EXCLUDED_PAGE_KINDS),
                 limit,
                 cursor,
                 max_chars,
@@ -1124,15 +1179,20 @@ impl ContinuityHost {
 
     pub async fn next_summary_candidate(&self, minimum_chars: usize) -> Result<Option<String>> {
         self.store
-            .next_summary_candidate(self.allowed_scopes(), minimum_chars)
+            .next_summary_candidate(
+                self.allowed_scopes(),
+                minimum_chars,
+                owned_page_kinds(SUMMARY_EXCLUDED_PAGE_KINDS),
+            )
             .await
     }
 
-    pub async fn durable_page_inventory(
-        &self,
-    ) -> Result<Vec<pcp_sqlite::DurablePageInventoryItem>> {
+    pub async fn durable_page_inventory(&self) -> Result<Vec<DurablePageInventoryItem>> {
         self.store
-            .durable_page_inventory(self.allowed_scopes())
+            .durable_page_inventory(
+                self.allowed_scopes(),
+                owned_page_kinds(INDEX_EXCLUDED_PAGE_KINDS),
+            )
             .await
     }
 
@@ -1397,6 +1457,10 @@ fn system_actor() -> Actor {
         actor_type: ActorType::System,
         actor_id: SYSTEM_ACTOR_ID.to_owned(),
     }
+}
+
+fn owned_page_kinds(kinds: &[&str]) -> Vec<String> {
+    kinds.iter().map(|kind| (*kind).to_owned()).collect()
 }
 
 fn message_facets(entry: &MemoryEntry) -> Value {
