@@ -90,9 +90,10 @@ revision semantics, retrieval primitives, Summary projections, validity, and
 DAG Relations now live in the adjacent `paged-context-protocol` repository.
 `pcp-store` defines the storage contract. `pcp-client` defines the
 transport-independent capability interface consumed by `ContinuityHost`, while
-`pcp-sqlite` is selected only by the current embedded composition root. A later
-remote runtime can implement the same `PcpApi` without changing conversation,
-Reflection, Curiosity, or exploration code.
+`pcp-sqlite` is selected only by the embedded composition root. The optional
+`pcp-runtime` exposes the same complete `PcpApi` over a local Unix socket, so
+switching deployment form does not change conversation, Reflection, Curiosity,
+or exploration code.
 
 The Host enters PCP as the fixed `host:symbiont-d` AccessPrincipal. Its
 AccessSession is limited to the user, project, and main-conversation Scopes it
@@ -113,6 +114,27 @@ version or exact Git revision so builds no longer depend on workspace layout.
 The independent `pcp-mcp` stdio server is an explicit opt-in path for Codex or
 another Host; symbiont-d does not register it globally or expose private Scopes
 to unrelated tasks by default.
+
+Set `SYMBIONT_PCP_RUNTIME_SOCKET` to use a running endpoint instead of opening
+SQLite in-process. The endpoint must be bound to `host:symbiont-d`, use `admin`
+access with explicit cross-Scope derivation, and grant the user Scope plus
+`project:symbiont-d` and `conversation:symbiont-d-main`. One possible launch is:
+
+```bash
+PCP_STORE_PATH=/absolute/path/to/context.sqlite3 \
+PCP_RUNTIME_SOCKET=/absolute/path/to/symbiont-pcp.sock \
+PCP_CLIENT_ID=host:symbiont-d \
+PCP_CLIENT_TYPE=host \
+PCP_ACCESS_MODE=admin \
+PCP_ALLOW_CROSS_SCOPE_DERIVATION=1 \
+PCP_ALLOWED_SCOPES=user:<owner-id>,project:symbiont-d,conversation:symbiont-d-main \
+  ../paged-context-protocol/target/release/pcp-runtime
+
+SYMBIONT_PCP_RUNTIME_SOCKET=/absolute/path/to/symbiont-pcp.sock cargo run
+```
+
+Use `pcp doctor` against the Store first to obtain `<owner-id>`. The socket is a
+single Host trust surface and must not be reused as a Codex MCP endpoint.
 
 A Hunch belongs to `symbiont-d`, not to the user profile. Opening a distinct
 Hunch can wake an exploration cycle; routine revisions do not. When an

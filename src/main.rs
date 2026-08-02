@@ -52,8 +52,9 @@ use curiosity::CuriosityStore;
 use exploration::{ExplorationHandle, ExplorationIntentQueue};
 use identity::IdentityStore;
 use memory::MemoryStore;
-use pcp_client::EmbeddedPcpClient;
+use pcp_client::{EmbeddedPcpClient, PcpApi};
 use pcp_index::PcpIndex;
+use pcp_runtime::RemotePcpClient;
 use pcp_sqlite::SqlitePcpStore;
 use pcp_store::PcpStore;
 use permission::PermissionBroker;
@@ -115,17 +116,26 @@ async fn main() -> Result<()> {
         ))
         .await?,
     );
-    let pcp_store = Arc::new(
-        SqlitePcpStore::open(resolve_data_path(
-            &workspace,
-            "SYMBIONT_PCP_PATH",
-            "context.sqlite3",
-        ))
-        .await?,
-    );
-    let pcp_access = ContinuityHost::access_session(pcp_store.owner_id());
-    let pcp_store: Arc<dyn PcpStore> = pcp_store;
-    let pcp = EmbeddedPcpClient::shared(pcp_store, pcp_access);
+    let pcp: Arc<dyn PcpApi> = if let Some(socket_path) = env::var_os("SYMBIONT_PCP_RUNTIME_SOCKET")
+    {
+        let remote =
+            RemotePcpClient::connect_expected(PathBuf::from(socket_path), "host:symbiont-d")
+                .await
+                .context("connect configured PCP runtime")?;
+        Arc::new(remote)
+    } else {
+        let pcp_store = Arc::new(
+            SqlitePcpStore::open(resolve_data_path(
+                &workspace,
+                "SYMBIONT_PCP_PATH",
+                "context.sqlite3",
+            ))
+            .await?,
+        );
+        let pcp_access = ContinuityHost::access_session(pcp_store.owner_id());
+        let pcp_store: Arc<dyn PcpStore> = pcp_store;
+        EmbeddedPcpClient::shared(pcp_store, pcp_access)
+    };
     let continuity = Arc::new(ContinuityHost::open(pcp).await?);
     let context = Arc::new(SymbiontContextStore::new(Arc::clone(&continuity)));
     let curiosity = Arc::new(CuriosityStore::new(Arc::clone(&continuity)));

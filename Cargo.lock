@@ -951,6 +951,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "pcp-runtime"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "async-trait",
+ "pcp-client",
+ "pcp-core",
+ "pcp-sqlite",
+ "pcp-store",
+ "serde",
+ "serde_json",
+ "tokio",
+]
+
+[[package]]
 name = "pcp-sqlite"
 version = "0.1.0"
 dependencies = [
@@ -1607,6 +1622,7 @@ dependencies = [
  "infer",
  "pcp-client",
  "pcp-core",
+ "pcp-runtime",
  "pcp-sqlite",
  "pcp-store",
  "reqwest",

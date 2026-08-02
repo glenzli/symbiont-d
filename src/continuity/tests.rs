@@ -5,6 +5,7 @@ use std::{
 
 use pcp_client::EmbeddedPcpClient;
 use pcp_core::{AccessPrincipal, AccessPrincipalType, AccessSession, Projection, ReadPagesRequest};
+use pcp_runtime::{RemotePcpClient, serve_unix};
 use pcp_sqlite::SqlitePcpStore;
 use pcp_store::PcpStore;
 use serde_json::json;
@@ -25,7 +26,7 @@ const ONE_PIXEL_PNG: &[u8] = &[
 ];
 
 #[tokio::test]
-async fn continuity_accepts_the_transport_independent_pcp_api() {
+async fn continuity_runs_through_the_remote_pcp_api() {
     let nonce = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .expect("clock")
@@ -43,7 +44,7 @@ async fn continuity_accepts_the_transport_independent_pcp_api() {
         CONVERSATION_NAMESPACE.to_owned(),
     ];
     let store: Arc<dyn PcpStore> = store;
-    let client = EmbeddedPcpClient::shared(
+    let embedded = EmbeddedPcpClient::shared(
         store,
         AccessSession::full_control(
             AccessPrincipal {
@@ -55,16 +56,40 @@ async fn continuity_accepts_the_transport_independent_pcp_api() {
             scopes,
         ),
     );
+    let socket_path =
+        std::path::PathBuf::from("/tmp").join(format!("spd-{}.sock", nonce % 1_000_000_000));
+    let server_path = socket_path.clone();
+    let server = tokio::spawn(async move { serve_unix(server_path, embedded).await });
+    tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+    if server.is_finished() {
+        panic!("PCP runtime exited during startup: {:?}", server.await);
+    }
+    let remote = connect_remote_when_ready(&socket_path).await;
 
-    let continuity = ContinuityHost::open(client)
+    let continuity = ContinuityHost::open(Arc::new(remote))
         .await
-        .expect("open host through PcpApi");
+        .expect("open host through remote PcpApi");
     assert_eq!(
         continuity.store().access().principal.principal_id,
         "host:contract-test"
     );
 
+    server.abort();
+    let _ = server.await;
+    let _ = tokio::fs::remove_file(socket_path).await;
     let _ = tokio::fs::remove_dir_all(root).await;
+}
+
+async fn connect_remote_when_ready(socket_path: &std::path::Path) -> RemotePcpClient {
+    let mut last_error = None;
+    for _ in 0..100 {
+        match RemotePcpClient::connect(socket_path).await {
+            Ok(client) => return client,
+            Err(error) => last_error = Some(error),
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    }
+    panic!("PCP runtime did not become ready: {last_error:?}");
 }
 
 #[tokio::test]
