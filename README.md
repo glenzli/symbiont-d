@@ -50,8 +50,15 @@ user's attention into a feed.
   never numeric ratings.
 - Model-owned Hunches collected in a visible Curiosity Map.
 - Scheduled, manual, and conversation-triggered autonomous exploration.
-- Silent exploration when there is nothing worth interrupting for.
-- Token accounting, daily autonomous limits, recent exploration history, and
+- Model-chosen proactive delivery: an **intervention** for a live decision,
+  risk, timing window, or shared question; or a lower-pressure **note** for a
+  credible, fresh external development that has a real connection to the
+  user's long-term map. Notes may plainly open a new topic rather than pretend
+  to answer the visible chat edge.
+- Silent exploration when there is nothing worth either interrupting for or
+  leaving as a note.
+- Token accounting, separate daily intervention and note limits, recent
+  exploration history, and
   inspectable execution traces.
 
 ## How It Fits Together
@@ -128,9 +135,11 @@ New user input cancels it.
 Longer delayed follow-ups remain separate. The conversational model or
 Reflection can schedule one when time or new evidence matters. When due,
 autonomous publication rechecks everything said since it was scheduled,
-respects quiet hours, and may still remain silent. Proactive messages receive
-recent timestamps and must bridge naturally when returning to an older or
-adjacent topic.
+respects quiet hours, and may still remain silent. A prior unanswered proactive
+message only suppresses repetition of that same or closely adjacent thread: a
+distinct, credible, fresh development can still arrive as a note. Proactive
+messages receive recent timestamps and must bridge naturally when returning to
+an older or adjacent topic.
 
 ## Requirements
 
@@ -237,10 +246,18 @@ for reload, browser, and quit commands.
 
 The client requires macOS 13 or newer and the Apple Command Line Tools. It is
 built with the system AppKit and WebKit frameworks and does not require the full
-Xcode application. Uninstalling it leaves the daemon and all local data intact.
-Its full application icon is forged from the retained source image in
+Xcode application. Its transparent full-size title bar keeps the standard
+macOS window controls while the conversation header occupies the same visual
+row. Uninstalling it leaves the daemon and all local data intact. Its full
+application icon is forged from the retained source image in
 `macos/SymbiontMenu/Resources/`; the menu-bar mark is a separate monochrome
 Template Image so macOS can render it correctly in both light and dark modes.
+
+Assistant messages use that application icon as their default avatar.
+**Settings → Appearance** can replace it and optionally set a separate local
+avatar for the user's own messages. Both selections are local presentation
+state only: they are neither profile data nor model context, and the selected
+assets are not written to PCP.
 
 ## Local Data
 
@@ -251,6 +268,7 @@ data/context.sqlite3   PCP Pages and revisions
 data/symbiont.sqlite3  usage and temporary trace details
 data/reflection.sqlite3 interaction facts, Episodes, hypotheses, follow-ups
 data/assets/           content-addressed image files
+data/identity.toml     local avatar selection; not profile or model context
 data/orientation.md    visible user orientation
 data/profile.toml      initialization state
 data/autonomy.toml     exploration policy and limits
@@ -304,6 +322,7 @@ src/continuity.rs   conversation ingestion and PCP-facing context policy
 src/conversation.rs in-flight message burst coordination
 src/curiosity.rs    Hunch storage and Curiosity Map
 src/exploration.rs  autonomous scheduling, budgets, and publication
+src/identity.rs     local presentation identity and avatar selection
 src/permission.rs   pending approval lifecycle and session grants
 src/reflection/     time-aware interaction analysis and projections
 src/task_execution.rs bound-task queue, lifecycle, and result publication

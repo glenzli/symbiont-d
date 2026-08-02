@@ -9,6 +9,9 @@ use tokio::{
 
 const DEFAULT_DAILY_TOKEN_LIMIT: u64 = 100_000;
 const MAX_DAILY_TOKEN_LIMIT: u64 = 100_000_000;
+const DEFAULT_DAILY_NOTE_LIMIT: u8 = 2;
+const MAX_DAILY_OUTREACH_LIMIT: u8 = 20;
+const DEFAULT_ATTENTION_POSTURE: &str = "我不想每天自己刷新闻。除了会改变当前决策的信号，也请留意可信、新鲜，并且和我的长期问题、项目或思考方式真正相关的外部变化；它不必立刻导出行动。若要切换方向，请明确说出来，不要假装在接续上一段对话。";
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -16,9 +19,13 @@ pub struct AutonomyConfig {
     pub enabled: bool,
     pub interval_minutes: u32,
     pub daily_interrupt_limit: u8,
+    #[serde(default = "default_daily_note_limit")]
+    pub daily_note_limit: u8,
     #[serde(default = "default_daily_token_limit")]
     pub daily_token_limit: u64,
     pub quiet_hours: QuietHours,
+    #[serde(default = "default_attention_posture")]
+    pub attention_posture: String,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -26,6 +33,17 @@ pub struct QuietHours {
     pub enabled: bool,
     pub start: String,
     pub end: String,
+}
+
+impl AutonomyConfig {
+    pub fn attention_context(&self) -> String {
+        format!(
+            "<attention-posture>\n{}\nDaily intervention limit: {}. Daily note limit: {}.\n</attention-posture>",
+            self.attention_posture.trim(),
+            self.daily_interrupt_limit,
+            self.daily_note_limit,
+        )
+    }
 }
 
 pub struct AutonomyStore {
@@ -90,12 +108,14 @@ impl Default for AutonomyConfig {
             enabled: false,
             interval_minutes: 360,
             daily_interrupt_limit: 2,
+            daily_note_limit: DEFAULT_DAILY_NOTE_LIMIT,
             daily_token_limit: DEFAULT_DAILY_TOKEN_LIMIT,
             quiet_hours: QuietHours {
                 enabled: true,
                 start: "23:00".to_owned(),
                 end: "08:00".to_owned(),
             },
+            attention_posture: default_attention_posture(),
         }
     }
 }
@@ -104,18 +124,36 @@ fn validate(config: &AutonomyConfig) -> Result<()> {
     if !(30..=10_080).contains(&config.interval_minutes) {
         anyhow::bail!("exploration interval must be between 30 minutes and 7 days");
     }
-    if config.daily_interrupt_limit > 20 {
+    if config.daily_interrupt_limit > MAX_DAILY_OUTREACH_LIMIT {
         anyhow::bail!("daily interruption limit cannot exceed 20");
+    }
+    if config.daily_note_limit > MAX_DAILY_OUTREACH_LIMIT {
+        anyhow::bail!("daily note limit cannot exceed 20");
     }
     if config.daily_token_limit > MAX_DAILY_TOKEN_LIMIT {
         anyhow::bail!("daily token limit cannot exceed {MAX_DAILY_TOKEN_LIMIT}");
     }
     validate_time(&config.quiet_hours.start)?;
-    validate_time(&config.quiet_hours.end)
+    validate_time(&config.quiet_hours.end)?;
+    if config.attention_posture.trim().is_empty() {
+        anyhow::bail!("attention posture cannot be empty");
+    }
+    if config.attention_posture.chars().count() > 2_000 {
+        anyhow::bail!("attention posture cannot exceed 2000 characters");
+    }
+    Ok(())
 }
 
 const fn default_daily_token_limit() -> u64 {
     DEFAULT_DAILY_TOKEN_LIMIT
+}
+
+const fn default_daily_note_limit() -> u8 {
+    DEFAULT_DAILY_NOTE_LIMIT
+}
+
+fn default_attention_posture() -> String {
+    DEFAULT_ATTENTION_POSTURE.to_owned()
 }
 
 fn validate_time(value: &str) -> Result<()> {

@@ -100,6 +100,8 @@ pub struct UsageHeadline {
     pub total_tokens: u64,
     pub autonomous_tokens_today: u64,
     pub autonomous_messages_today: u64,
+    pub autonomous_interventions_today: u64,
+    pub autonomous_notes_today: u64,
     pub reflection_tokens_today: u64,
 }
 
@@ -452,6 +454,25 @@ impl UsageStore {
                         COALESCE(SUM(
                             CASE
                                 WHEN origin IN (
+                                    'autonomous', 'autonomous_scout', 'maintenance', 'reflection',
+                                    'reconciliation_preview', 'reconciliation_apply'
+                                )
+                                     AND completed_at >= ?1
+                                     AND produced_message = 1
+                                     AND EXISTS (
+                                        SELECT 1
+                                        FROM invocation_tool_trace AS outreach
+                                        WHERE outreach.invocation_id = invocations.id
+                                          AND outreach.namespace = 'symbiont'
+                                          AND outreach.tool = 'propose_proactive_message'
+                                          AND json_extract(outreach.arguments_json, '$.kind') = 'note'
+                                     )
+                                THEN 1 ELSE 0
+                            END
+                        ), 0),
+                        COALESCE(SUM(
+                            CASE
+                                WHEN origin IN (
                                     'reflection',
                                     'reconciliation_preview', 'reconciliation_apply'
                                 )
@@ -467,7 +488,10 @@ impl UsageStore {
                             total_tokens: row.get::<_, i64>(0)? as u64,
                             autonomous_tokens_today: row.get::<_, i64>(1)? as u64,
                             autonomous_messages_today: row.get::<_, i64>(2)? as u64,
-                            reflection_tokens_today: row.get::<_, i64>(3)? as u64,
+                            autonomous_notes_today: row.get::<_, i64>(3)? as u64,
+                            autonomous_interventions_today: row.get::<_, i64>(2)? as u64
+                                - row.get::<_, i64>(3)? as u64,
+                            reflection_tokens_today: row.get::<_, i64>(4)? as u64,
                         })
                     },
                 )

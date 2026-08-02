@@ -236,7 +236,7 @@ async fn maintain_one(
     });
     if review_is_current
         || !profile_review_due(snapshot.profile_review.as_ref())
-        || headline.autonomous_messages_today >= autonomy.daily_interrupt_limit as u64
+        || crate::outreach::all_budgets_exhausted(&autonomy, &headline)
     {
         return Ok(MaintenanceState::Idle);
     }

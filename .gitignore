@@ -8,6 +8,7 @@
 /data/orientation.md
 /data/autonomy.toml
 /data/reflection.toml
+/data/identity.toml
 /data/codex-bridge.toml
 /data/task-runs.json
 /data/exploration-intents.json

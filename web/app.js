@@ -4,6 +4,7 @@ import { initReconciliationUi } from "/reconciliation-ui.js";
 import { formatDuration, formatMemorySize, formatTokens } from "/presentation.js";
 import { renderMessageContent, renderRichText } from "/rich-text.js";
 import { initExplorationUi } from "/exploration-ui.js";
+import { initIdentityUi } from "/identity-ui.js";
 import { initComputeModeUi } from "/compute-mode-ui.js";
 import { initMessageActions } from "/message-actions.js";
 import { initMessageSync } from "/message-sync.js";
@@ -20,6 +21,7 @@ const appState = {
   models: [],
   compute: null,
   computePolicies: [],
+  identity: { avatar: null },
   profile: { status: "unconfigured", mode: null, orientation: "" },
   autonomy: null,
   autonomyPermitted: false,
@@ -73,6 +75,7 @@ const MAX_IMAGE_BYTES = 15 * 1024 * 1024;
 
 const explorationUi = initExplorationUi(appState);
 const settingsUi = initSettings(appState, explorationUi.trigger);
+const identityUi = initIdentityUi(appState);
 const permissionUi = initPermissionUi(appState);
 const taskUi = initTaskUi(
   appState,
@@ -164,6 +167,7 @@ function appendMessage(entry, options = {}) {
   const speaker = fragment.querySelector(".speaker");
   const time = fragment.querySelector("time");
   const body = fragment.querySelector(".message-body");
+  const avatar = fragment.querySelector(".message-avatar");
   const role = entry.role || "assistant";
 
   article.dataset.role = role;
@@ -171,6 +175,7 @@ function appendMessage(entry, options = {}) {
   if (options.pending) article.classList.add("pending");
   if (options.error) article.classList.add("error");
   speaker.textContent = role === "user" ? "你" : "symbiont-d";
+  identityUi.applyAvatar(avatar, role === "user" ? "user" : "symbiont");
   time.dateTime = entry.at || new Date().toISOString();
   time.textContent = new Date(time.dateTime).toLocaleTimeString([], {
     hour: "2-digit",
@@ -284,7 +289,7 @@ function renderRuntimeStatus() {
   } else if (phase === "token_limit") {
     connectionStatus.textContent = "在线 · 今日探索预算已用尽";
   } else if (phase === "message_limit") {
-    connectionStatus.textContent = "在线 · 今日主动消息已达上限";
+    connectionStatus.textContent = "在线 · 今日主动消息额度已用尽";
   } else if (phase === "error") {
     connectionStatus.textContent = "在线 · 探索运行异常";
   } else if (phase === "waiting" && exploration.nextRunAt) {
@@ -301,6 +306,7 @@ function renderRuntimeStatus() {
 }
 
 function applyRuntime(payload) {
+  appState.identity = payload.identity || appState.identity;
   appState.usage = payload.usage || appState.usage;
   appState.exploration = payload.exploration || appState.exploration;
   if (payload.reflection) {
@@ -322,6 +328,7 @@ function applyRuntime(payload) {
   appState.taskRuns = payload.taskRuns || appState.taskRuns;
   renderUsage();
   renderRuntimeStatus();
+  identityUi.render();
   settingsUi.renderAutonomyRuntime();
   reflectionUi.renderRuntime();
   reconciliationUi.runtimeUpdated();
@@ -341,6 +348,7 @@ async function bootstrap() {
     memorySize.textContent = formatMemorySize(state.memoryChars);
     renderUsage();
     renderRuntimeStatus();
+    identityUi.render();
     settingsUi.render();
     explorationUi.runtimeUpdated();
     taskUi.runtimeUpdated();

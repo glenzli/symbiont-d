@@ -115,8 +115,8 @@ input:focus-visible {
 }
 
 .topbar {
-  min-height: 58px;
-  padding: 9px 16px;
+  min-height: 46px;
+  padding: 6px 14px;
   display: flex;
   align-items: center;
   justify-content: space-between;
@@ -129,33 +129,42 @@ input:focus-visible {
   display: flex;
   align-items: center;
   min-width: 0;
-  gap: 9px;
-}
-
-.presence-mark {
-  width: 30px;
-  height: 30px;
-  display: grid;
-  flex: 0 0 auto;
-  place-items: center;
-  border-radius: 5px;
-  color: var(--button-text);
-  background: var(--button);
-  font-size: 12px;
-  font-weight: 750;
+  gap: 6px;
 }
 
 .identity h1 {
+  flex: 0 0 auto;
   margin: 0;
-  font-size: 14px;
+  font-size: 13px;
   font-weight: 700;
   letter-spacing: 0;
 }
 
+.identity-separator,
 .identity p {
   margin: 0;
   color: var(--text-soft);
-  font-size: 10px;
+  font-size: 11px;
+}
+
+.identity p {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+html[data-native-shell="macos"] .shell {
+  border-inline: 0;
+}
+
+html[data-native-shell="macos"] .topbar {
+  box-sizing: border-box;
+  min-height: 32px;
+  height: 32px;
+  padding: 0 14px 0 76px;
+  background: color-mix(in srgb, var(--surface) 92%, transparent);
+  user-select: none;
 }
 
 .top-actions {
@@ -524,12 +533,27 @@ input:focus-visible {
 }
 
 .message {
-  width: min(700px, 90%);
+  width: min(740px, 92%);
   margin: 0 0 17px;
 }
 
 .message[data-role="user"] {
   margin-left: auto;
+}
+
+.message-layout {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+}
+
+.message[data-role="user"] .message-layout {
+  flex-direction: row-reverse;
+}
+
+.message-content {
+  min-width: 0;
+  flex: 1 1 auto;
 }
 
 .message-meta {
@@ -539,6 +563,33 @@ input:focus-visible {
   gap: 7px;
   color: var(--text-faint);
   font-size: 9px;
+}
+
+.message-avatar {
+  width: 30px;
+  height: 30px;
+  margin-top: 1px;
+  display: grid;
+  flex: 0 0 auto;
+  place-items: center;
+  overflow: hidden;
+  flex: 0 0 auto;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--surface-raised);
+  color: var(--text-soft);
+  font-size: 11px;
+  font-weight: 700;
+}
+
+.message-avatar-image {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+}
+
+.message-avatar-fallback {
+  line-height: 1;
 }
 
 .message[data-role="user"] .message-meta {
@@ -928,6 +979,64 @@ input:focus-visible {
   overflow-wrap: anywhere;
 }
 
+.avatar-settings {
+  min-height: 110px;
+  padding: 16px;
+  display: flex;
+  align-items: center;
+  gap: 14px;
+}
+
+.avatar-settings + .avatar-settings {
+  border-top: 1px solid var(--border);
+}
+
+.avatar-settings-preview {
+  width: 76px;
+  height: 76px;
+  display: grid;
+  flex: 0 0 auto;
+  place-items: center;
+  overflow: hidden;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--surface-raised);
+}
+
+.avatar-settings-preview > img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+}
+
+.user-avatar-preview {
+  color: var(--text-soft);
+  font-size: 20px;
+  font-weight: 700;
+}
+
+.avatar-settings-actions {
+  min-width: 0;
+  display: grid;
+  gap: 8px;
+}
+
+.avatar-settings-actions strong {
+  font-size: 12px;
+}
+
+.avatar-settings-actions > div {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.avatar-settings-actions [role="status"] {
+  min-height: 16px;
+  color: var(--text-faint);
+  font-size: 10px;
+}
+
 .composer {
   padding: 10px 16px 12px;
   border-top: 1px solid var(--border);
@@ -935,22 +1044,19 @@ input:focus-visible {
 }
 
 .composer-row {
-  display: grid;
-  grid-template-columns: 40px minmax(0, 1fr) auto;
-  align-items: end;
-  min-height: 42px;
+  min-height: 104px;
   border: 1px solid var(--border-strong);
-  border-radius: 7px;
+  border-radius: 10px;
   background: var(--surface-raised);
   overflow: visible;
 }
 
 .composer textarea {
   width: 100%;
-  min-height: 40px;
-  max-height: 140px;
+  min-height: 68px;
+  max-height: 180px;
   resize: none;
-  padding: 9px 8px;
+  padding: 12px 12px 6px;
   border: 0;
   border-radius: 0;
   color: var(--text);
@@ -961,6 +1067,15 @@ input:focus-visible {
 
 .composer textarea::placeholder {
   color: var(--text-faint);
+}
+
+.composer textarea:focus,
+.composer textarea:focus-visible,
+.composer textarea:active,
+.composer-row:focus-within {
+  outline: none;
+  border-color: var(--border-strong);
+  box-shadow: none;
 }
 
 .composer button,
@@ -977,8 +1092,8 @@ input:focus-visible {
 }
 
 .composer .composer-tool-button {
-  width: 40px;
-  height: 40px;
+  width: 36px;
+  height: 34px;
   padding: 0;
   border: 0;
   border-radius: 0;
@@ -991,9 +1106,16 @@ input:focus-visible {
   background: var(--surface-subtle);
 }
 
-.composer-controls {
+.composer-footer {
   min-height: 40px;
-  padding: 3px 4px 3px 0;
+  padding: 2px 4px 4px 5px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+}
+
+.composer-controls {
+  min-height: 34px;
   display: flex;
   align-items: center;
 }
@@ -2450,6 +2572,23 @@ button:disabled {
   border-bottom: 1px solid var(--border);
 }
 
+.autonomy-setting-grid {
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+}
+
+.attention-posture-field textarea {
+  width: 100%;
+  min-height: 86px;
+  resize: vertical;
+  padding: 8px;
+  border: 1px solid var(--border);
+  border-radius: 5px;
+  color: var(--text);
+  background: var(--surface-raised);
+  font-size: 11px;
+  line-height: 1.5;
+}
+
 .field small {
   color: var(--text-faint);
   font-size: 9px;
@@ -3334,7 +3473,7 @@ button:disabled {
   }
 
   .topbar {
-    min-height: 54px;
+    min-height: 46px;
     padding: 8px 10px;
     display: grid;
     grid-template-columns: minmax(0, 1fr);
@@ -3354,6 +3493,21 @@ button:disabled {
 
   .top-actions > * {
     flex: 0 0 auto;
+  }
+
+  html[data-native-shell="macos"] .topbar {
+    min-height: 32px;
+    height: 32px;
+    padding: 0 12px 0 76px;
+    display: flex;
+    grid-template-columns: none;
+    gap: 8px;
+  }
+
+  html[data-native-shell="macos"] .top-actions {
+    width: auto;
+    overflow: visible;
+    gap: 2px;
   }
 
   .conversation {
@@ -3388,6 +3542,10 @@ button:disabled {
 
   .message-image img {
     max-height: 420px;
+  }
+
+  .avatar-settings {
+    padding: 14px;
   }
 
   .panel-dialog {

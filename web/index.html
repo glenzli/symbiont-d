@@ -12,11 +12,9 @@
     <main class="shell">
       <header class="topbar">
         <div class="identity" aria-label="symbiont-d">
-          <span class="presence-mark" aria-hidden="true">S</span>
-          <div>
-            <h1>symbiont-d</h1>
-            <p id="connection-status">正在连接</p>
-          </div>
+          <h1>symbiont-d</h1>
+          <span class="identity-separator" aria-hidden="true">·</span>
+          <p id="connection-status">正在连接</p>
         </div>
         <div class="top-actions">
           <button
@@ -190,14 +188,6 @@
           >×</button>
         </div>
         <div class="composer-row">
-          <button
-            id="add-image"
-            class="composer-tool-button"
-            type="button"
-            title="添加图片"
-            aria-label="添加图片"
-            data-tooltip="添加图片"
-          ><i data-lucide="paperclip" aria-hidden="true"></i></button>
           <label class="sr-only" for="message">消息</label>
           <textarea
             id="message"
@@ -207,46 +197,56 @@
             placeholder="说点什么…"
             autocomplete="off"
           ></textarea>
-          <div class="composer-controls">
-            <div class="compute-mode-picker">
-              <label class="sr-only" for="compute-mode">本轮计算级别</label>
-              <select
-                id="compute-mode"
-                class="compute-mode-select"
-                tabindex="-1"
-              >
-                <option value="auto">自动</option>
-                <option value="investigate">深入</option>
-                <option value="critical">关键</option>
-              </select>
-              <button
-                id="compute-mode-trigger"
-                class="compute-mode-trigger"
-                type="button"
-                aria-expanded="false"
-                aria-controls="compute-mode-menu"
-                title="本轮计算级别"
-              ><span id="compute-mode-label">自动</span><i data-lucide="chevron-down" aria-hidden="true"></i></button>
-              <div id="compute-mode-menu" class="compute-mode-menu" hidden>
-                <button type="button" data-compute-mode-option="auto">
-                  <span>自动</span><i data-lucide="check" aria-hidden="true"></i>
-                </button>
-                <button type="button" data-compute-mode-option="investigate">
-                  <span>深入</span><i data-lucide="check" aria-hidden="true"></i>
-                </button>
-                <button type="button" data-compute-mode-option="critical">
-                  <span>关键</span><i data-lucide="check" aria-hidden="true"></i>
-                </button>
-              </div>
-            </div>
+          <div class="composer-footer">
             <button
-              id="send"
-              class="composer-send-button"
-              type="submit"
-              title="发送"
-              aria-label="发送"
-              data-tooltip="发送"
-            ><i data-lucide="send-horizontal" aria-hidden="true"></i></button>
+              id="add-image"
+              class="composer-tool-button"
+              type="button"
+              title="添加图片"
+              aria-label="添加图片"
+              data-tooltip="添加图片"
+            ><i data-lucide="paperclip" aria-hidden="true"></i></button>
+            <div class="composer-controls">
+              <div class="compute-mode-picker">
+                <label class="sr-only" for="compute-mode">本轮计算级别</label>
+                <select
+                  id="compute-mode"
+                  class="compute-mode-select"
+                  tabindex="-1"
+                >
+                  <option value="auto">自动</option>
+                  <option value="investigate">深入</option>
+                  <option value="critical">关键</option>
+                </select>
+                <button
+                  id="compute-mode-trigger"
+                  class="compute-mode-trigger"
+                  type="button"
+                  aria-expanded="false"
+                  aria-controls="compute-mode-menu"
+                  title="本轮计算级别"
+                ><span id="compute-mode-label">自动</span><i data-lucide="chevron-down" aria-hidden="true"></i></button>
+                <div id="compute-mode-menu" class="compute-mode-menu" hidden>
+                  <button type="button" data-compute-mode-option="auto">
+                    <span>自动</span><i data-lucide="check" aria-hidden="true"></i>
+                  </button>
+                  <button type="button" data-compute-mode-option="investigate">
+                    <span>深入</span><i data-lucide="check" aria-hidden="true"></i>
+                  </button>
+                  <button type="button" data-compute-mode-option="critical">
+                    <span>关键</span><i data-lucide="check" aria-hidden="true"></i>
+                  </button>
+                </div>
+              </div>
+              <button
+                id="send"
+                class="composer-send-button"
+                type="submit"
+                title="发送"
+                aria-label="发送"
+                data-tooltip="发送"
+              ><i data-lucide="send-horizontal" aria-hidden="true"></i></button>
+            </div>
           </div>
         </div>
         <input
@@ -270,11 +270,47 @@
       </header>
       <nav class="dialog-tabs" role="tablist" aria-label="设置分类">
         <button type="button" role="tab" data-settings-tab="autonomy" aria-selected="true">自主</button>
+        <button type="button" role="tab" data-settings-tab="appearance" aria-selected="false">外观</button>
         <button type="button" role="tab" data-settings-tab="reflection" aria-selected="false">思考</button>
         <button type="button" role="tab" data-settings-tab="models" aria-selected="false">模型</button>
         <button type="button" role="tab" data-settings-tab="bridge" aria-selected="false">连接</button>
         <button type="button" role="tab" data-settings-tab="stats" aria-selected="false">统计</button>
       </nav>
+
+      <section class="tab-panel" data-settings-panel="appearance" hidden>
+        <div class="avatar-settings">
+          <img
+            id="avatar-preview"
+            class="avatar-settings-preview"
+            src="/symbiont-avatar.png"
+            alt="symbiont-d 头像"
+          >
+          <div class="avatar-settings-actions">
+            <strong>symbiont-d 头像</strong>
+            <div>
+              <button id="choose-avatar" class="secondary-button" type="button">选择头像</button>
+              <button id="clear-avatar" class="secondary-button" type="button">还原默认</button>
+            </div>
+            <span id="avatar-save-state" role="status"></span>
+          </div>
+        </div>
+        <input id="avatar-input" type="file" accept="image/png,image/jpeg,image/webp,image/gif" hidden>
+        <div class="avatar-settings">
+          <div class="avatar-settings-preview user-avatar-preview" aria-label="你的头像预览">
+            <img id="user-avatar-preview" alt="">
+            <span id="user-avatar-fallback" aria-hidden="true">你</span>
+          </div>
+          <div class="avatar-settings-actions">
+            <strong>我的头像</strong>
+            <div>
+              <button id="choose-user-avatar" class="secondary-button" type="button">选择头像</button>
+              <button id="clear-user-avatar" class="secondary-button" type="button">清除头像</button>
+            </div>
+            <span id="user-avatar-save-state" role="status"></span>
+          </div>
+        </div>
+        <input id="user-avatar-input" type="file" accept="image/png,image/jpeg,image/webp,image/gif" hidden>
+      </section>
 
       <section class="tab-panel" data-settings-panel="autonomy">
         <form id="autonomy-form">
@@ -294,7 +330,7 @@
             </span>
             <button id="run-exploration" class="secondary-button" type="button">立即探索</button>
           </div>
-          <div class="setting-grid">
+          <div class="setting-grid autonomy-setting-grid">
             <label class="field">
               <span>检查间隔</span>
               <select id="autonomy-interval">
@@ -309,8 +345,12 @@
               </select>
             </label>
             <label class="field">
-              <span>每日主动消息上限</span>
+              <span>每日介入上限</span>
               <input id="daily-interrupt-limit" type="number" min="0" max="20" step="1">
+            </label>
+            <label class="field">
+              <span>每日留话上限</span>
+              <input id="daily-note-limit" type="number" min="0" max="20" step="1">
             </label>
             <label class="field">
               <span>每日自主消耗上限</span>
@@ -326,6 +366,13 @@
                 <span>M tokens</span>
               </span>
               <small>0 表示不限制</small>
+            </label>
+          </div>
+          <div class="setting-section">
+            <label class="field attention-posture-field">
+              <span>主动关注</span>
+              <textarea id="attention-posture" rows="4" maxlength="2000"></textarea>
+              <small>告诉 symbiont 哪些外部变化即使暂时无需行动，也值得留给你。</small>
             </label>
           </div>
           <div class="setting-section">
@@ -740,22 +787,30 @@
 
     <template id="message-template">
       <article class="message">
-        <div class="message-meta">
-          <span class="speaker"></span>
-          <time></time>
-        </div>
-        <div class="message-body"></div>
-        <div class="message-foot">
-          <span class="message-runtime"></span>
-          <span class="message-state"></span>
-          <span class="message-actions"></span>
-          <button
-            class="trace-button"
-            type="button"
-            title="查看执行轨迹"
-            aria-label="查看执行轨迹"
-            hidden
-          >⎇</button>
+        <div class="message-layout">
+          <div class="message-avatar" aria-hidden="true">
+            <img class="message-avatar-image" src="/symbiont-avatar.png" alt="">
+            <span class="message-avatar-fallback" hidden>你</span>
+          </div>
+          <div class="message-content">
+            <div class="message-meta">
+              <span class="speaker"></span>
+              <time></time>
+            </div>
+            <div class="message-body"></div>
+            <div class="message-foot">
+              <span class="message-runtime"></span>
+              <span class="message-state"></span>
+              <span class="message-actions"></span>
+              <button
+                class="trace-button"
+                type="button"
+                title="查看执行轨迹"
+                aria-label="查看执行轨迹"
+                hidden
+              >⎇</button>
+            </div>
+          </div>
         </div>
       </article>
     </template>

@@ -1,5 +1,6 @@
 export function initTopbarUi() {
   const overflow = document.querySelector("#top-overflow");
+
   if (!overflow) return;
 
   overflow.addEventListener("click", (event) => {

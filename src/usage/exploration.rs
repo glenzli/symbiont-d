@@ -3,6 +3,7 @@ use rusqlite::{Connection, params};
 use serde::Serialize;
 
 use crate::diagnostics::TraceEventKind;
+use crate::outreach::{OutreachKind, PROPOSE_OUTREACH_TOOL};
 
 use super::trace::{self, TraceBundle};
 
@@ -15,6 +16,7 @@ pub struct ExplorationRunSummary {
     pub duration_ms: u64,
     pub status: String,
     pub surfaced: bool,
+    pub outreach_kind: Option<OutreachKind>,
     pub message: Option<String>,
     pub total_tokens: u64,
     pub model_runs: Vec<ExplorationModelRun>,
@@ -69,6 +71,7 @@ pub(super) fn read_recent(
 fn summarize(bundle: TraceBundle) -> ExplorationRunSummary {
     let surfaced = bundle.runs.iter().any(|run| run.produced_message);
     let mut message = None;
+    let mut outreach_kind = None;
     let mut agent_message = None;
     let mut reasoning_summaries = Vec::new();
     let mut search_queries = Vec::new();
@@ -76,10 +79,9 @@ fn summarize(bundle: TraceBundle) -> ExplorationRunSummary {
 
     for run in &bundle.runs {
         for step in &run.steps {
-            if step.succeeded
-                && step.namespace == "symbiont"
-                && step.tool == "propose_proactive_message"
+            if step.succeeded && step.namespace == "symbiont" && step.tool == PROPOSE_OUTREACH_TOOL
             {
+                outreach_kind = Some(OutreachKind::from_arguments(&step.arguments));
                 message = step
                     .arguments
                     .get("message")
@@ -172,6 +174,7 @@ fn summarize(bundle: TraceBundle) -> ExplorationRunSummary {
         duration_ms,
         status,
         surfaced,
+        outreach_kind: surfaced.then_some(outreach_kind).flatten(),
         message: surfaced.then_some(message).flatten(),
         total_tokens,
         model_runs,

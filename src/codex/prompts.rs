@@ -108,30 +108,30 @@ pub(super) fn interaction_reflection_prompt(
     completion_marker: &str,
 ) -> String {
     format!(
-        "Reflect on the bounded interaction evidence below. This is private background \
-         interpretation, not a user response. Do not search the web. Separate observed facts from \
-         inference; timing, length, correction, continuation, and silence are contextual evidence, \
-         never ratings. Keep alternative explanations. Prefer no durable change when evidence is \
-         weak, and never promote temporary behavior directly into the user orientation.\n\n\
+        "Reflect on bounded interaction evidence. This is private background, not a user response. \
+         Do not search the web. Separate observed facts from inference; timing, length, correction, \
+         continuation, and silence are contextual evidence, never ratings. Keep alternative \
+         explanations. Prefer no durable change when evidence is weak, and never promote temporary \
+         behavior directly into the user orientation.\n\n\
          Maintain the smallest useful set of overlapping, user-visible Topic Episodes with \
-         `symbiont.upsert_episode`. Create or revise one only when a discussion has become a \
-         sustained, meaningful line whose synthesis is likely to help future thinking. Do not \
-         promote one-off questions, passing news, incidental terms, or every event. Make this a \
-         semantic judgment without scores or fixed message thresholds. The same Revision may \
-         contribute to several Topics. Keep `source_revision_ids` to compact summary evidence; \
-         put the original messages belonging to the Topic in `message_revision_ids`, which \
-         accumulates its visible timeline. Use directed parents only when a new Episode continues or \
-         consolidates earlier Episodes; do not force a tree. Maintain only genuinely useful provisional interpretations with \
-         `symbiont.upsert_interaction_hypothesis`; revise existing IDs instead of duplicating them, \
-         and mark contradicted or superseded interpretations explicitly. A stable_candidate is only \
-         a proposal for later critical review.\n\n\
-         Do not write Current Map, Open Loops, or orientation; dedicated maintenance owns them. \
-         Schedule a delayed follow-up only when waiting \
-         could change conversation value, never as a reminder. The later autonomous \
+         `symbiont.upsert_episode`. Create or revise one only for a sustained line likely to help \
+         future thinking; skip one-off questions, passing news, incidental terms, and routine events. \
+         Make a semantic judgment without scores or fixed message thresholds. The same Revision may \
+         contribute to several Topics. Keep `source_revision_ids` as compact summary evidence; put \
+         the Topic's original messages in `message_revision_ids`, its visible timeline. Use directed \
+         parents only for continuation or consolidation; do not force a tree. Maintain only useful \
+         provisional interpretations with `symbiont.upsert_interaction_hypothesis`; revise existing \
+         IDs, mark contradictions or supersession, and treat stable_candidate only as a proposal for \
+         later critical review.\n\n\
+         Do not write Current Map, Open Loops, or orientation; maintenance owns them. Schedule a \
+         follow-up only when waiting could change value, never as a reminder. The later autonomous \
          publication gate will still decide whether to speak.\n\n\
          At most one proactive act: `symbiont.request_exploration` for a question needing evidence, \
-         or `symbiont.propose_proactive_message` for a ready thought. Keep why here and why now \
-         natural; never a reply, report, recap, or feed item.\n\n\
+         or `symbiont.propose_proactive_message` for a ready thought. Use `intervention` only when \
+         a live decision, risk, timing, or shared question should be raised now. Use `note` for a \
+         credible, fresh development that genuinely connects to the user's long-term work but does \
+         not require action. A note may plainly begin a new direction; never pretend it is a reply, \
+         report, recap, or feed item.\n\n\
          When new evidence materially corrects, limits, disputes, replaces, or retracts a durable \
          earlier Page, find and read the exact candidate, then call `pcp.assess_validity`. Assess \
          only consequential claims or state, not ordinary messages. Anchor the judgment to exact \

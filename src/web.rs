@@ -34,10 +34,12 @@ use crate::{
     curiosity::{CuriositySnapshot, CuriosityStore},
     diagnostics::TraceEventKind,
     exploration::{ExplorationHandle, ExplorationSnapshot, today_started_at},
+    identity::{AvatarSlot, IdentitySnapshot, IdentityStore},
     memory::{
         MemoryEntry, MemoryRole, MessageDeliveryState, MessageMetadata, MessageQuote,
         MessageQuoteDraft, MessageRunMetadata,
     },
+    outreach::PROPOSE_OUTREACH_TOOL,
     pcp_index::{PcpIndex, PcpIndexSnapshot},
     permission::{PermissionBroker, PermissionDecision, PermissionRequestView},
     profile::{CalibrationMode, ProfileSnapshot, ProfileStore, SetupStatus},
@@ -63,6 +65,7 @@ const RICH_TEXT_CSS: &str = include_str!("../web/rich-text.css");
 const PRESENTATION_JS: &str = include_str!("../web/presentation.js");
 const PROFILE_UI_JS: &str = include_str!("../web/profile-ui.js");
 const CURIOSITY_UI_JS: &str = include_str!("../web/curiosity-ui.js");
+const IDENTITY_UI_JS: &str = include_str!("../web/identity-ui.js");
 const SETTINGS_JS: &str = include_str!("../web/settings.js");
 const TASK_UI_JS: &str = include_str!("../web/task-ui.js");
 const EXPLORATION_UI_JS: &str = include_str!("../web/exploration-ui.js");
@@ -76,6 +79,8 @@ const PERMISSION_UI_JS: &str = include_str!("../web/permission-ui.js");
 const TRACE_UI_JS: &str = include_str!("../web/trace-ui.js");
 const TOPBAR_UI_JS: &str = include_str!("../web/topbar-ui.js");
 const STYLES_CSS: &str = include_str!("../web/styles.css");
+const DEFAULT_AVATAR_PNG: &[u8] =
+    include_bytes!("../macos/SymbiontMenu/Resources/AppIconSource.png");
 const MAX_USER_MESSAGE_CHARS: usize = 12_000;
 const MAX_CHAT_BODY_BYTES: usize =
     MAX_USER_MESSAGE_CHARS + (MAX_IMAGE_BYTES * MAX_IMAGES_PER_MESSAGE) + 64_000;
@@ -84,6 +89,7 @@ const MAX_CHAT_BODY_BYTES: usize =
 pub struct AppState {
     continuity: Arc<ContinuityHost>,
     assets: Arc<AssetStore>,
+    identity: Arc<IdentityStore>,
     profile: Arc<ProfileStore>,
     context: Arc<SymbiontContextStore>,
     curiosity: Arc<CuriosityStore>,
@@ -109,6 +115,7 @@ impl AppState {
     pub fn new(
         continuity: Arc<ContinuityHost>,
         assets: Arc<AssetStore>,
+        identity: Arc<IdentityStore>,
         profile: Arc<ProfileStore>,
         context: Arc<SymbiontContextStore>,
         curiosity: Arc<CuriosityStore>,
@@ -135,6 +142,7 @@ impl AppState {
         Self {
             continuity,
             assets,
+            identity,
             profile,
             context,
             curiosity,
@@ -186,6 +194,7 @@ struct BootstrapResponse {
     messages: Vec<MemoryEntry>,
     memory_chars: usize,
     status: &'static str,
+    identity: IdentitySnapshot,
     profile: ProfileSnapshot,
     autonomy: AutonomyConfig,
     autonomy_permitted: bool,
@@ -215,6 +224,7 @@ struct StatsResponse {
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 struct RuntimeResponse {
+    identity: IdentitySnapshot,
     usage: UsageHeadline,
     exploration: ExplorationSnapshot,
     reflection: ReflectionRuntime,
@@ -402,6 +412,7 @@ pub fn router(state: AppState) -> Router {
         .route("/presentation.js", get(presentation_js))
         .route("/profile-ui.js", get(profile_ui_js))
         .route("/curiosity-ui.js", get(curiosity_ui_js))
+        .route("/identity-ui.js", get(identity_ui_js))
         .route("/settings.js", get(settings_js))
         .route("/task-ui.js", get(task_ui_js))
         .route("/exploration-ui.js", get(exploration_ui_js))
@@ -415,6 +426,7 @@ pub fn router(state: AppState) -> Router {
         .route("/trace-ui.js", get(trace_ui_js))
         .route("/topbar-ui.js", get(topbar_ui_js))
         .route("/styles.css", get(styles_css))
+        .route("/symbiont-avatar.png", get(default_avatar))
         .route("/api/health", get(health))
         .route("/api/bootstrap", get(bootstrap))
         .route("/api/chat", post(chat))
@@ -424,6 +436,14 @@ pub fn router(state: AppState) -> Router {
         .route("/api/interaction/typing", post(record_typing))
         .route("/api/permissions/{permission_id}", post(resolve_permission))
         .route("/api/assets/{asset_id}", get(asset))
+        .route(
+            "/api/identity/avatar",
+            post(update_identity_avatar).delete(clear_identity_avatar),
+        )
+        .route(
+            "/api/identity/user-avatar",
+            post(update_user_identity_avatar).delete(clear_user_identity_avatar),
+        )
         .route("/api/onboarding/start", post(start_onboarding))
         .route("/api/archive", get(archive))
         .route("/api/profile/orientation", post(update_orientation))
@@ -533,6 +553,13 @@ async fn curiosity_ui_js() -> impl IntoResponse {
     )
 }
 
+async fn identity_ui_js() -> impl IntoResponse {
+    (
+        [(header::CONTENT_TYPE, "text/javascript; charset=utf-8")],
+        IDENTITY_UI_JS,
+    )
+}
+
 async fn settings_js() -> impl IntoResponse {
     (
         [(header::CONTENT_TYPE, "text/javascript; charset=utf-8")],
@@ -624,6 +651,15 @@ async fn styles_css() -> impl IntoResponse {
     )
 }
 
+async fn default_avatar() -> Response {
+    Response::builder()
+        .header(header::CONTENT_TYPE, "image/png")
+        .header(header::CACHE_CONTROL, "public, max-age=86400")
+        .header("x-content-type-options", "nosniff")
+        .body(Body::from(DEFAULT_AVATAR_PNG))
+        .expect("valid default avatar response")
+}
+
 async fn bootstrap(State(state): State<AppState>) -> Result<Json<BootstrapResponse>, ApiError> {
     let messages = state
         .continuity
@@ -655,6 +691,7 @@ async fn bootstrap(State(state): State<AppState>) -> Result<Json<BootstrapRespon
         messages,
         memory_chars,
         status: "connected",
+        identity: state.identity.snapshot().await,
         profile,
         autonomy,
         autonomy_permitted,
@@ -1003,6 +1040,7 @@ async fn runtime(
         .await
         .map_err(ApiError::internal)?;
     Ok(Json(RuntimeResponse {
+        identity: state.identity.snapshot().await,
         usage,
         exploration: state.exploration.snapshot().await,
         reflection: state.reflection.runtime().await,
@@ -1312,9 +1350,7 @@ fn exploration_redelivery(trace: &TraceBundle) -> Option<ExplorationRedelivery> 
         .iter()
         .flat_map(|run| &run.steps)
         .filter(|step| {
-            step.succeeded
-                && step.namespace == "symbiont"
-                && step.tool == "propose_proactive_message"
+            step.succeeded && step.namespace == "symbiont" && step.tool == PROPOSE_OUTREACH_TOOL
         })
         .filter_map(|step| {
             step.arguments
@@ -1443,6 +1479,85 @@ async fn asset(
         .header("x-content-type-options", "nosniff")
         .body(Body::from(bytes))
         .expect("valid image asset response"))
+}
+
+async fn update_identity_avatar(
+    State(state): State<AppState>,
+    multipart: Multipart,
+) -> Result<Json<IdentitySnapshot>, ApiError> {
+    save_identity_avatar(&state, multipart, AvatarSlot::Symbiont).await
+}
+
+async fn update_user_identity_avatar(
+    State(state): State<AppState>,
+    multipart: Multipart,
+) -> Result<Json<IdentitySnapshot>, ApiError> {
+    save_identity_avatar(&state, multipart, AvatarSlot::User).await
+}
+
+async fn save_identity_avatar(
+    state: &AppState,
+    mut multipart: Multipart,
+    slot: AvatarSlot,
+) -> Result<Json<IdentitySnapshot>, ApiError> {
+    let mut upload = None;
+    while let Some(field) = multipart
+        .next_field()
+        .await
+        .map_err(|error| ApiError::bad_request(format!("Invalid avatar body: {error}")))?
+    {
+        if field.name() != Some("avatar") {
+            continue;
+        }
+        if upload.is_some() {
+            return Err(ApiError::bad_request("Only one avatar image is allowed."));
+        }
+        let filename = field.file_name().map(str::to_owned);
+        let bytes = field
+            .bytes()
+            .await
+            .map_err(|error| ApiError::bad_request(format!("Invalid avatar image: {error}")))?;
+        upload = Some((filename, bytes));
+    }
+    let Some((filename, bytes)) = upload else {
+        return Err(ApiError::bad_request("Choose an avatar image first."));
+    };
+    let avatar = state
+        .assets
+        .save_image(filename.as_deref(), &bytes)
+        .await
+        .map_err(ApiError::bad_request)?
+        .attachment;
+    state
+        .identity
+        .set_avatar(slot, Some(avatar))
+        .await
+        .map(Json)
+        .map_err(ApiError::internal)
+}
+
+async fn clear_identity_avatar(
+    State(state): State<AppState>,
+) -> Result<Json<IdentitySnapshot>, ApiError> {
+    clear_identity_avatar_slot(&state, AvatarSlot::Symbiont).await
+}
+
+async fn clear_user_identity_avatar(
+    State(state): State<AppState>,
+) -> Result<Json<IdentitySnapshot>, ApiError> {
+    clear_identity_avatar_slot(&state, AvatarSlot::User).await
+}
+
+async fn clear_identity_avatar_slot(
+    state: &AppState,
+    slot: AvatarSlot,
+) -> Result<Json<IdentitySnapshot>, ApiError> {
+    state
+        .identity
+        .set_avatar(slot, None)
+        .await
+        .map(Json)
+        .map_err(ApiError::internal)
 }
 
 async fn retract_message(

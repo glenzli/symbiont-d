@@ -1,5 +1,6 @@
 #import "SMSymbiontWindowController.h"
 
+#import <UniformTypeIdentifiers/UniformTypeIdentifiers.h>
 #import <WebKit/WebKit.h>
 
 @interface SMSymbiontWindowController () <NSWindowDelegate, WKNavigationDelegate, WKUIDelegate, WKScriptMessageHandler>
@@ -8,6 +9,7 @@
 @property(nonatomic, weak) id<SMSymbiontWindowControllerDelegate> presentationDelegate;
 @property(nonatomic, strong) WKWebView *webView;
 @property(nonatomic, strong) NSTimer *retryTimer;
+@property(nonatomic, strong) id titlebarMouseDownMonitor;
 @property(nonatomic) SMConnectionState connection;
 
 @end
@@ -17,14 +19,24 @@
 - (instancetype)initWithEndpoint:(NSURL *)endpoint
                          delegate:(id<SMSymbiontWindowControllerDelegate>)delegate {
     WKWebViewConfiguration *configuration = [[WKWebViewConfiguration alloc] init];
+    WKUserScript *nativeShellMarker = [[WKUserScript alloc]
+        initWithSource:@"document.documentElement.setAttribute('data-native-shell', 'macos');"
+        injectionTime:WKUserScriptInjectionTimeAtDocumentEnd
+        forMainFrameOnly:YES];
+    [configuration.userContentController addUserScript:nativeShellMarker];
     WKWebView *webView = [[WKWebView alloc] initWithFrame:NSZeroRect configuration:configuration];
     NSWindow *window = [[NSWindow alloc]
         initWithContentRect:NSMakeRect(0, 0, 720, 820)
                   styleMask:NSWindowStyleMaskTitled | NSWindowStyleMaskClosable |
-                            NSWindowStyleMaskMiniaturizable | NSWindowStyleMaskResizable
+                            NSWindowStyleMaskMiniaturizable | NSWindowStyleMaskResizable |
+                            NSWindowStyleMaskFullSizeContentView
                     backing:NSBackingStoreBuffered
                       defer:NO];
-    window.title = @"symbiont-d";
+    window.title = @"";
+    window.titleVisibility = NSWindowTitleHidden;
+    window.titlebarAppearsTransparent = YES;
+    window.titlebarSeparatorStyle = NSTitlebarSeparatorStyleNone;
+    window.movableByWindowBackground = YES;
     window.minSize = NSMakeSize(460, 560);
     window.releasedWhenClosed = NO;
     window.contentView = webView;
@@ -37,17 +49,75 @@
         _connection = SMConnectionStateConnecting;
 
         window.delegate = self;
-        [window setFrameAutosaveName:@"symbiont-d-main-window"];
+        BOOL restoredFrame = [window setFrameAutosaveName:@"symbiont-d-main-window"];
+        if (!restoredFrame) {
+            [self placeWindowAtRightEdge];
+        }
         webView.navigationDelegate = self;
         webView.UIDelegate = self;
         [configuration.userContentController addScriptMessageHandler:self name:@"symbiontNative"];
+        [self installTitlebarDragMonitor];
     }
     return self;
 }
 
 - (void)dealloc {
     [self.retryTimer invalidate];
+    if (self.titlebarMouseDownMonitor != nil) {
+        [NSEvent removeMonitor:self.titlebarMouseDownMonitor];
+    }
     [self.webView.configuration.userContentController removeScriptMessageHandlerForName:@"symbiontNative"];
+}
+
+- (void)placeWindowAtRightEdge {
+    NSScreen *screen = NSScreen.mainScreen;
+    if (screen == nil) {
+        return;
+    }
+    NSRect visibleFrame = screen.visibleFrame;
+    NSRect frame = self.window.frame;
+    const CGFloat margin = 12.0;
+    frame.origin.x = NSMaxX(visibleFrame) - NSWidth(frame) - margin;
+
+    CGFloat minimumY = NSMinY(visibleFrame) + margin;
+    CGFloat maximumY = NSMaxY(visibleFrame) - NSHeight(frame) - margin;
+    frame.origin.y = maximumY < minimumY
+        ? minimumY
+        : MIN(MAX(NSMidY(visibleFrame) - NSHeight(frame) / 2.0, minimumY), maximumY);
+    [self.window setFrame:frame display:NO];
+}
+
+- (void)installTitlebarDragMonitor {
+    __weak typeof(self) weakSelf = self;
+    self.titlebarMouseDownMonitor = [NSEvent
+        addLocalMonitorForEventsMatchingMask:NSEventMaskLeftMouseDown
+                                      handler:^NSEvent *_Nullable(NSEvent *event) {
+        typeof(self) strongSelf = weakSelf;
+        if (strongSelf != nil && [strongSelf shouldBeginTitlebarDragForEvent:event]) {
+            [strongSelf.window performWindowDragWithEvent:event];
+            return nil;
+        }
+        return event;
+    }];
+}
+
+- (BOOL)shouldBeginTitlebarDragForEvent:(NSEvent *)event {
+    if (event.window != self.window) {
+        return NO;
+    }
+    NSView *contentView = self.window.contentView;
+    if (contentView == nil) {
+        return NO;
+    }
+    NSPoint location = [contentView convertPoint:event.locationInWindow fromView:nil];
+    NSRect bounds = contentView.bounds;
+    const CGFloat trafficLightWidth = 68.0;
+    const CGFloat titlebarHeight = 36.0;
+    CGFloat actionAreaWidth = MIN(280.0, MAX(210.0, NSWidth(bounds) * 0.34));
+    if (location.y > titlebarHeight || location.x < trafficLightWidth) {
+        return NO;
+    }
+    return location.x < NSMaxX(bounds) - actionAreaWidth;
 }
 
 - (void)start {
@@ -208,6 +278,29 @@
         [NSWorkspace.sharedWorkspace openURL:navigationAction.request.URL];
     }
     return nil;
+}
+
+- (void)webView:(WKWebView *)webView
+runOpenPanelWithParameters:(WKOpenPanelParameters *)parameters
+initiatedByFrame:(WKFrameInfo *)frame
+completionHandler:(void (^)(NSArray<NSURL *> *URLs))completionHandler {
+    (void)webView;
+    (void)frame;
+    NSOpenPanel *panel = NSOpenPanel.openPanel;
+    panel.canChooseFiles = YES;
+    panel.canChooseDirectories = NO;
+    panel.allowsMultipleSelection = parameters.allowsMultipleSelection;
+
+    NSMutableArray<UTType *> *allowedTypes = [@[UTTypePNG, UTTypeJPEG, UTTypeGIF] mutableCopy];
+    UTType *webpType = [UTType typeWithFilenameExtension:@"webp"];
+    if (webpType != nil) {
+        [allowedTypes addObject:webpType];
+    }
+    panel.allowedContentTypes = allowedTypes;
+
+    [panel beginSheetModalForWindow:self.window completionHandler:^(NSModalResponse response) {
+        completionHandler(response == NSModalResponseOK ? panel.URLs : @[]);
+    }];
 }
 
 - (void)userContentController:(WKUserContentController *)userContentController

@@ -41,6 +41,7 @@ use crate::{
     diagnostics::{ContextSnapshot, ExecutionTraceEvent, NativeThreadSnapshot, TraceEventKind},
     exploration::ExplorationIntentQueue,
     memory::{MessageMetadata, MessageRunMetadata},
+    outreach::{OutreachCandidate, PROPOSE_OUTREACH_TOOL},
     permission::PermissionBroker,
     profile::{ProfileSnapshot, ProfileStore},
     reconciliation::{
@@ -121,8 +122,7 @@ pub struct GeneratedImageOutput {
 }
 
 pub struct ExplorationOutcome {
-    pub message: Option<String>,
-    pub message_source_revision_ids: Vec<String>,
+    pub outreach: Option<OutreachCandidate>,
     pub metadata: MessageMetadata,
     pub invocations: Vec<InvocationRecord>,
     pub context_revision_ids: Vec<String>,
@@ -165,16 +165,9 @@ pub struct ReflectionOutcome {
     pub summary: Option<String>,
     pub actions: Vec<String>,
     pub metadata: MessageMetadata,
-    pub outreach: Option<ReflectionOutreach>,
+    pub outreach: Option<OutreachCandidate>,
     pub context_revision_ids: Vec<String>,
     pub interrupted: bool,
-}
-
-#[derive(Clone, Debug)]
-pub struct ReflectionOutreach {
-    pub message: String,
-    pub reason: String,
-    pub source_revision_ids: Vec<String>,
 }
 
 pub struct ChatInput {
@@ -731,8 +724,7 @@ impl CodexClient {
         }
 
         let mut interrupted = scout.interrupted;
-        let mut message = None;
-        let mut message_source_revision_ids = Vec::new();
+        let mut outreach = None;
         let mut hunch_revisions = Vec::new();
         if let Some(finding) = finding {
             let review_lane = self
@@ -768,8 +760,7 @@ impl CodexClient {
                 .then(|| proactive_message_candidate(&review.invocations))
                 .flatten();
             if let Some(candidate) = candidate {
-                message = Some(candidate.message);
-                message_source_revision_ids = candidate.source_revision_ids;
+                outreach = Some(candidate);
             }
             hunch_revisions = successful_hunch_revisions(&review.invocations);
             for invocation in &mut review.invocations {
@@ -782,8 +773,7 @@ impl CodexClient {
         let metadata = metadata_for(&invocations, "autonomous");
         let context_revision_ids = context_revision_ids(&invocations);
         Ok(ExplorationOutcome {
-            message,
-            message_source_revision_ids,
+            outreach,
             metadata,
             invocations,
             context_revision_ids,
@@ -1017,7 +1007,7 @@ impl CodexClient {
                             | "upsert_interaction_hypothesis"
                             | "schedule_follow_up"
                             | "request_exploration"
-                            | "propose_proactive_message"
+                            | PROPOSE_OUTREACH_TOOL
                             | "complete_reflection"
                     ))
                     || (step.namespace == "pcp" && step.tool == "assess_validity")
@@ -1041,36 +1031,8 @@ impl CodexClient {
         let outreach = reflection_steps
             .iter()
             .rev()
-            .find(|step| step.tool == "propose_proactive_message")
-            .and_then(|step| {
-                let message = step
-                    .arguments
-                    .get("message")
-                    .and_then(Value::as_str)
-                    .map(str::trim)
-                    .filter(|value| !value.is_empty())?
-                    .to_owned();
-                let reason = step
-                    .arguments
-                    .get("reason")
-                    .and_then(Value::as_str)
-                    .map(str::trim)
-                    .filter(|value| !value.is_empty())?
-                    .to_owned();
-                let source_revision_ids = step
-                    .arguments
-                    .get("source_revision_ids")
-                    .and_then(Value::as_array)?
-                    .iter()
-                    .filter_map(Value::as_str)
-                    .map(str::to_owned)
-                    .collect::<Vec<_>>();
-                (!source_revision_ids.is_empty()).then_some(ReflectionOutreach {
-                    message,
-                    reason,
-                    source_revision_ids,
-                })
-            });
+            .find(|step| step.tool == PROPOSE_OUTREACH_TOOL)
+            .and_then(|step| OutreachCandidate::from_tool_arguments(&step.arguments));
         let metadata = metadata_for(&outcome.invocations, "reflection");
         let context_revision_ids = context_revision_ids(&outcome.invocations);
         for invocation in &mut outcome.invocations {
@@ -2554,44 +2516,15 @@ fn reconciliation_actions(invocations: &[InvocationRecord]) -> Vec<Reconciliatio
         .collect()
 }
 
-fn proactive_message_candidate(invocations: &[InvocationRecord]) -> Option<ReflectionOutreach> {
+fn proactive_message_candidate(invocations: &[InvocationRecord]) -> Option<OutreachCandidate> {
     invocations
         .iter()
         .flat_map(|invocation| &invocation.trace_steps)
         .rev()
         .find(|step| {
-            step.succeeded
-                && step.namespace == "symbiont"
-                && step.tool == "propose_proactive_message"
+            step.succeeded && step.namespace == "symbiont" && step.tool == PROPOSE_OUTREACH_TOOL
         })
-        .and_then(|step| {
-            let message = step
-                .arguments
-                .get("message")
-                .and_then(Value::as_str)?
-                .trim()
-                .to_owned();
-            let reason = step
-                .arguments
-                .get("reason")
-                .and_then(Value::as_str)?
-                .trim()
-                .to_owned();
-            let source_revision_ids = step
-                .arguments
-                .get("source_revision_ids")
-                .and_then(Value::as_array)?
-                .iter()
-                .filter_map(Value::as_str)
-                .map(str::to_owned)
-                .collect::<Vec<_>>();
-            (!message.is_empty() && !reason.is_empty() && !source_revision_ids.is_empty())
-                .then_some(ReflectionOutreach {
-                    message,
-                    reason,
-                    source_revision_ids,
-                })
-        })
+        .and_then(|step| OutreachCandidate::from_tool_arguments(&step.arguments))
 }
 
 fn successful_tool_result_ids(

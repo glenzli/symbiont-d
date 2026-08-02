@@ -13,8 +13,10 @@ mod conversation;
 mod curiosity;
 mod diagnostics;
 mod exploration;
+mod identity;
 mod maintenance;
 mod memory;
+mod outreach;
 mod pcp_index;
 mod permission;
 mod profile;
@@ -48,6 +50,7 @@ use continuity::ContinuityHost;
 use conversation::ConversationCoordinator;
 use curiosity::CuriosityStore;
 use exploration::{ExplorationHandle, ExplorationIntentQueue};
+use identity::IdentityStore;
 use memory::MemoryStore;
 use pcp_index::PcpIndex;
 use pcp_sqlite::SqlitePcpStore;
@@ -99,6 +102,14 @@ async fn main() -> Result<()> {
             &workspace,
             "SYMBIONT_ASSET_PATH",
             "assets",
+        ))
+        .await?,
+    );
+    let identity = Arc::new(
+        IdentityStore::open(resolve_data_path(
+            &workspace,
+            "SYMBIONT_IDENTITY_PATH",
+            "identity.toml",
         ))
         .await?,
     );
@@ -335,6 +346,7 @@ async fn main() -> Result<()> {
     let state = AppState::new(
         continuity,
         assets,
+        identity,
         profile,
         context,
         curiosity,

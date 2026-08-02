@@ -297,6 +297,8 @@ fn autonomous_exploration_separates_reconnaissance_from_conversation() {
     assert!(review.contains("strongest counterpoint"));
     assert!(review.contains("It is valid to maintain a Hunch and remain silent"));
     assert!(review.contains("propose_proactive_message"));
+    assert!(review.contains("Choose `note`"));
+    assert!(review.contains("Unanswered prior initiations suppress repetition"));
     assert!(review.contains("If the connection remains forced, remain silent"));
 }
 
@@ -317,7 +319,8 @@ fn reflection_prompt_preserves_facts_uncertainty_and_profile_boundaries() {
     assert!(prompt.contains("never promote temporary behavior directly"));
     assert!(prompt.contains("publication gate will still decide whether to speak"));
     assert!(prompt.contains("propose_proactive_message"));
-    assert!(prompt.contains("why here and why now"));
+    assert!(prompt.contains("Use `intervention` only"));
+    assert!(prompt.contains("Use `note`"));
     assert!(prompt.contains("feed item"));
     assert!(prompt.contains("pcp.assess_validity"));
     assert!(prompt.contains("not ordinary messages"));
@@ -1011,6 +1014,7 @@ async fn hunch_tools_preserve_model_owned_state_and_record_autonomous_exploratio
                 "arguments": {
                     "message": "这里有个值得接着讨论的变化。",
                     "reason": "The autonomous run found evidence that changes the open question.",
+                    "kind": "note",
                     "source_revision_ids": [source.page.revision_id]
                 }
             }),

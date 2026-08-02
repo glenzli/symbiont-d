@@ -218,6 +218,8 @@ async fn reflection_outreach_counts_as_an_attention_interruption_not_exploration
     let headline = store.headline("2025-12-31T16:00:00Z").await.unwrap();
     assert_eq!(headline.autonomous_tokens_today, 0);
     assert_eq!(headline.autonomous_messages_today, 1);
+    assert_eq!(headline.autonomous_interventions_today, 1);
+    assert_eq!(headline.autonomous_notes_today, 0);
     assert_eq!(headline.reflection_tokens_today, 42);
 
     std::fs::remove_file(path).unwrap();
@@ -352,6 +354,7 @@ async fn groups_recent_autonomous_runs_into_exploration_cycles() {
                     arguments: json!({
                         "message": "A signal worth surfacing.",
                         "reason": "It changes the current decision.",
+                        "kind": "note",
                         "source_revision_ids": ["rev_0123456789abcdef0123456789abcdef"]
                     }),
                     result: json!({"success": true}),
@@ -386,6 +389,8 @@ async fn groups_recent_autonomous_runs_into_exploration_cycles() {
     let headline = store.headline("2025-12-31T16:00:00Z").await.unwrap();
     assert_eq!(headline.autonomous_tokens_today, 200);
     assert_eq!(headline.autonomous_messages_today, 1);
+    assert_eq!(headline.autonomous_notes_today, 1);
+    assert_eq!(headline.autonomous_interventions_today, 0);
 
     std::fs::remove_file(path).unwrap();
 }

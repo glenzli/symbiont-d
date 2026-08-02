@@ -173,7 +173,11 @@ function renderRun(run) {
   const identity = document.createElement("span");
   const outcome = document.createElement("strong");
   const time = document.createElement("time");
-  outcome.textContent = run.surfaced ? "发出了一条消息" : "完成，决定不打扰";
+  outcome.textContent = run.surfaced
+    ? run.outreachKind === "note"
+      ? "留了一条新消息"
+      : "发起了一次介入"
+    : "完成，决定不打扰";
   time.dateTime = run.completedAt;
   time.textContent = new Date(run.completedAt).toLocaleString([], {
     month: "numeric",
@@ -202,7 +206,7 @@ function renderRun(run) {
     const silent = document.createElement("p");
     silent.className = "exploration-silent";
     silent.textContent = run.detailsRetained
-      ? "模型完成了检索和判断，但没有发现值得现在打扰你的信号。"
+      ? "模型完成了检索和判断，但没有发现值得介入或留给你的新信号。"
       : "本次没有发出消息；详细判断过程已过期。";
     article.append(silent);
   }

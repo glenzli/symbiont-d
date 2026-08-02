@@ -23,6 +23,7 @@ use crate::{
     conversation::ConversationCoordinator,
     curiosity::CuriosityStore,
     memory::{MemoryEntry, MemoryRole},
+    outreach::all_budgets_exhausted,
     profile::{ProfileStore, SetupStatus},
     reflection::ReflectionStore,
     symbiont_context::SymbiontContextStore,
@@ -321,6 +322,7 @@ async fn run_scheduler(
                     .map(|intent| intent.id.clone());
                 let result = run_once(
                     Arc::clone(&state),
+                    config.clone(),
                     Arc::clone(&codex),
                     Arc::clone(&compute),
                     Arc::clone(&profile),
@@ -440,9 +442,7 @@ fn evaluate_gate(
             until: Some(next_local_day_start(now)),
         };
     }
-    if !bypass_message_limit
-        && usage.autonomous_messages_today >= config.daily_interrupt_limit as u64
-    {
+    if !bypass_message_limit && all_budgets_exhausted(config, usage) {
         return Gate::Wait {
             phase: ExplorationPhase::MessageLimit,
             until: Some(next_local_day_start(now)),
@@ -481,6 +481,7 @@ async fn update_waiting_state(
 #[allow(clippy::too_many_arguments)]
 async fn run_once(
     state: Arc<RwLock<ExplorationSnapshot>>,
+    autonomy_config: AutonomyConfig,
     codex: Arc<Mutex<CodexClient>>,
     compute: Arc<ComputeStore>,
     profile: Arc<ProfileStore>,
@@ -524,11 +525,12 @@ async fn run_once(
     let recent_messages = continuity.recent_messages(EXPLORATION_CHAT_TAIL).await?;
     let recent_explorations = usage.recent_explorations(EXPLORATION_JOURNAL_RUNS).await?;
     let continuity_context = format!(
-        "{}\n\n{}\n\n{}\n\n{}\n\n{}",
+        "{}\n\n{}\n\n{}\n\n{}\n\n{}\n\n{}",
         continuity.context_seed(None).await,
         context.prompt().await?,
         curiosity.prompt().await?,
         reflection.prompt().await?,
+        autonomy_config.attention_context(),
         exploration_working_context(
             &recent_messages,
             &recent_explorations,
@@ -599,9 +601,13 @@ async fn run_once(
     let can_publish = !outcome.interrupted
         && conversation.current_input_epoch() == input_epoch
         && !conversation.snapshot().await.active;
-    let published = if can_publish && let Some(text) = outcome.message {
+    let headline = usage.headline(&today_started_at()).await?;
+    let published = if can_publish
+        && let Some(outreach) = outcome.outreach.as_ref()
+        && crate::outreach::has_budget(outreach.kind, &autonomy_config, &headline)
+    {
         let mut input_revision_ids = outcome.context_revision_ids;
-        input_revision_ids.extend(outcome.message_source_revision_ids);
+        input_revision_ids.extend(outreach.source_revision_ids.clone());
         input_revision_ids.extend(intent_sources);
         let surfaced_hunch_revision_ids = outcome
             .hunch_revisions
@@ -618,7 +624,7 @@ async fn run_once(
         let stored = continuity
             .ingest_message(
                 MemoryRole::Assistant,
-                &text,
+                &outreach.message,
                 Vec::new(),
                 Some(outcome.metadata),
                 MessageLinks {
@@ -674,14 +680,15 @@ async fn run_once(
     } else {
         ExplorationIntentStatus::Silent
     };
-    snapshot.last_outcome = Some(
-        match status {
-            ExplorationIntentStatus::Messaged => "messaged",
-            ExplorationIntentStatus::Superseded => "superseded",
-            _ => "silent",
-        }
-        .to_owned(),
-    );
+    snapshot.last_outcome = Some(match status {
+        ExplorationIntentStatus::Messaged => outcome
+            .outreach
+            .as_ref()
+            .map(|outreach| format!("messaged_{}", outreach.kind.as_str()))
+            .unwrap_or_else(|| "messaged".to_owned()),
+        ExplorationIntentStatus::Superseded => "superseded".to_owned(),
+        _ => "silent".to_owned(),
+    });
     snapshot.last_error = None;
     snapshot.current_activity = None;
     snapshot.current_trigger = None;
@@ -845,7 +852,7 @@ fn conversation_edge(messages: &[MemoryEntry], now: DateTime<Utc>) -> String {
     lines.push(edge_message("last-visible-message", last_visible));
     if unsolicited_since_last_user > 0 {
         lines.push(
-            "<attention-state>The user has not spoken since these unsolicited messages. This is pending attention, not negative feedback. Another unrelated initiation may read as a feed; raise the interruption bar and prefer continuity or silence.</attention-state>"
+            "<attention-state>The user has not spoken since these unsolicited messages. This is pending attention, not negative feedback. Do not repeat their topic or a close variant. A distinct, credible fresh signal may still be left as a note when it has its own connection to the user's long-term map; do not treat it as an urgent intervention or pretend it continues the unanswered thread.</attention-state>"
                 .to_owned(),
         );
     }
@@ -1015,6 +1022,8 @@ mod tests {
             total_tokens: 1_000,
             autonomous_tokens_today: 100,
             autonomous_messages_today: 1,
+            autonomous_interventions_today: 1,
+            autonomous_notes_today: 0,
             reflection_tokens_today: 0,
         };
         let now = Utc.with_ymd_and_hms(2026, 7, 31, 8, 0, 0).unwrap();

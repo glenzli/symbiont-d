@@ -10,7 +10,7 @@ use tokio::fs;
 pub const MAX_IMAGE_BYTES: usize = 15 * 1024 * 1024;
 pub const MAX_IMAGES_PER_MESSAGE: usize = 4;
 
-#[derive(Clone, Debug, Deserialize, Serialize)]
+#[derive(Clone, Debug, Deserialize, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ImageAttachment {
     pub asset_id: String,

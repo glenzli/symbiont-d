@@ -17,6 +17,7 @@ use crate::{
         feedback_cooldown_at,
     },
     exploration::{ExplorationIntentOrigin, ExplorationIntentQueue, NewExplorationIntent},
+    outreach::PROPOSE_OUTREACH_TOOL,
     profile::ProfileStore,
     reflection::{
         EpisodeInput, EpisodeState, FollowUpInput, HypothesisHorizon, HypothesisInput,
@@ -487,8 +488,8 @@ impl SymbiontTools {
                     },
                     {
                         "type": "function",
-                        "name": "propose_proactive_message",
-                        "description": "During background Reflection or autonomous exploration, propose at most one exact user-visible message when private work reveals a distinct thought worth initiating now. This is a candidate, not guaranteed delivery. The message must begin a natural conversation, never report internal work, summarize maintenance, or presume an unanswered user prompt.",
+                        "name": PROPOSE_OUTREACH_TOOL,
+                        "description": "During background Reflection or autonomous exploration, propose at most one exact user-visible message. Use `intervention` only when the user should see it now because it changes a live decision, risk, timing, or shared question. Use `note` for a credible, fresh development that genuinely connects to the user's long-term work but does not require action. This is a candidate, not guaranteed delivery. A note may honestly open a new direction; never report internal work or pretend it continues an unrelated exchange.",
                         "inputSchema": {
                             "type": "object",
                             "properties": {
@@ -498,7 +499,12 @@ impl SymbiontTools {
                                 },
                                 "reason": {
                                     "type": "string",
-                                    "description": "Private explanation of why this merits an interruption now; never shown in the chat message."
+                                    "description": "Private explanation of why this deserves this attention posture now; never shown in the chat message."
+                                },
+                                "kind": {
+                                    "type": "string",
+                                    "enum": ["intervention", "note"],
+                                    "description": "The attention posture for this candidate."
                                 },
                                 "source_revision_ids": {
                                     "type": "array",
@@ -508,7 +514,7 @@ impl SymbiontTools {
                                     "description": "Exact recent conversation Revisions that make this message timely."
                                 }
                             },
-                            "required": ["message", "reason", "source_revision_ids"],
+                            "required": ["message", "reason", "kind", "source_revision_ids"],
                             "additionalProperties": false
                         }
                     },
@@ -1537,7 +1543,7 @@ impl SymbiontTools {
                     None,
                 ))
             }
-            "propose_proactive_message" => {
+            PROPOSE_OUTREACH_TOOL => {
                 require_proactive_origin(run_origin, tool)?;
                 let source_revision_ids = string_array(arguments, "source_revision_ids")?;
                 self.ensure_reflection_sources(&source_revision_ids).await?;
@@ -1549,9 +1555,14 @@ impl SymbiontTools {
                 if reason.chars().count() > 1_200 {
                     anyhow::bail!("proactive message reason cannot exceed 1200 characters");
                 }
+                let kind = required_text(arguments, "kind")?;
+                if !matches!(kind, "intervention" | "note") {
+                    anyhow::bail!("proactive message kind must be intervention or note");
+                }
                 Ok((
                     serde_json::to_string(&json!({
                         "accepted": true,
+                        "kind": kind,
                         "sourceRevisionIds": source_revision_ids
                     }))?,
                     None,

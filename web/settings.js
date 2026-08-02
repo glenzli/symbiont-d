@@ -20,7 +20,9 @@ export function initSettings(state, triggerExploration) {
   const autonomyEnabled = document.querySelector("#autonomy-enabled");
   const autonomyInterval = document.querySelector("#autonomy-interval");
   const dailyInterruptLimit = document.querySelector("#daily-interrupt-limit");
+  const dailyNoteLimit = document.querySelector("#daily-note-limit");
   const dailyTokenLimit = document.querySelector("#daily-token-limit");
+  const attentionPosture = document.querySelector("#attention-posture");
   const quietHoursEnabled = document.querySelector("#quiet-hours-enabled");
   const quietHoursStart = document.querySelector("#quiet-hours-start");
   const quietHoursEnd = document.querySelector("#quiet-hours-end");
@@ -112,9 +114,11 @@ export function initSettings(state, triggerExploration) {
     autonomyEnabled.checked = state.autonomy.enabled;
     autonomyInterval.value = String(state.autonomy.intervalMinutes);
     dailyInterruptLimit.value = String(state.autonomy.dailyInterruptLimit);
+    dailyNoteLimit.value = String(state.autonomy.dailyNoteLimit ?? 2);
     dailyTokenLimit.value = tokensToMillions(
       state.autonomy.dailyTokenLimit || 0,
     );
+    attentionPosture.value = state.autonomy.attentionPosture || "";
     quietHoursEnabled.checked = state.autonomy.quietHours.enabled;
     quietHoursStart.value = state.autonomy.quietHours.start;
     quietHoursEnd.value = state.autonomy.quietHours.end;
@@ -227,7 +231,9 @@ export function initSettings(state, triggerExploration) {
       enabled: autonomyEnabled.checked,
       intervalMinutes: Number(autonomyInterval.value),
       dailyInterruptLimit: Number(dailyInterruptLimit.value),
+      dailyNoteLimit: Number(dailyNoteLimit.value),
       dailyTokenLimit: millionsToTokens(dailyTokenLimit.value),
+      attentionPosture: attentionPosture.value.trim(),
       quietHours: {
         enabled: quietHoursEnabled.checked,
         start: quietHoursStart.value,
@@ -464,7 +470,7 @@ function explorationStatusText(exploration, usage, autonomy) {
     return `今日预算已用尽 · ${formatTokens(usage?.autonomousTokensToday || 0)}`;
   }
   if (phase === "message_limit") {
-    return `今日主动消息已达 ${autonomy?.dailyInterruptLimit || 0} 条`;
+    return `今日主动消息额度已用尽 · 介入 ${usage?.autonomousInterventionsToday || 0}/${autonomy?.dailyInterruptLimit || 0} · 留话 ${usage?.autonomousNotesToday || 0}/${autonomy?.dailyNoteLimit ?? 2}`;
   }
   if (phase === "error") return exploration.lastError || "探索运行出错";
   return exploration.nextRunAt

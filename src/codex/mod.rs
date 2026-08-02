@@ -10,7 +10,7 @@ mod trace;
 
 pub use client::{
     ChatInput, CodexClient, CodexConfig, GeneratedImageOutput, RateLimitInfo,
-    ReconciliationModelRequest, ReflectionOutreach, RuntimeEvent,
+    ReconciliationModelRequest, RuntimeEvent,
 };
 pub use images::import_generated_images;
 pub use task_bridge::{CodexTaskDetail, CodexTaskSummary};

@@ -14,13 +14,14 @@ use super::{
 };
 use crate::{
     autonomy::AutonomyStore,
-    codex::{CodexClient, ReflectionOutreach, RuntimeEvent},
+    codex::{CodexClient, RuntimeEvent},
     compute::ComputeStore,
     continuity::{ContinuityHost, MessageLinks},
     conversation::ConversationCoordinator,
     curiosity::CuriosityStore,
     exploration::{ExplorationHandle, quiet_end, today_started_at},
     memory::{MemoryEntry, MemoryRole, MessageMetadata},
+    outreach::{OutreachCandidate, has_budget},
     pcp_index::PcpIndex,
     profile::{ProfileStore, SetupStatus},
     symbiont_context::SymbiontContextStore,
@@ -329,6 +330,7 @@ async fn reflect_once(
     trigger: ReflectionTrigger,
 ) -> Result<ReflectState> {
     let config = store.config().await;
+    let autonomy_config = autonomy.snapshot().await;
     let profile_snapshot = profile.snapshot().await;
     let pending_events = store.pending_count().await?;
     {
@@ -369,11 +371,12 @@ async fn reflect_once(
     }
     let compute = compute.snapshot().await;
     let continuity_context = format!(
-        "{}\n\n{}\n\n{}\n\n{}",
+        "{}\n\n{}\n\n{}\n\n{}\n\n{}",
         continuity.context_seed(None).await,
         context.prompt().await?,
         curiosity.prompt().await?,
-        store.prompt().await?
+        store.prompt().await?,
+        autonomy_config.attention_context(),
     );
     let (events_tx, mut events_rx) = mpsc::channel(64);
     let runtime_for_events = runtime.clone();
@@ -529,7 +532,7 @@ async fn publish_outreach(
     continuity: &ContinuityHost,
     conversation: &ConversationCoordinator,
     input_epoch: u64,
-    outreach: &ReflectionOutreach,
+    outreach: &OutreachCandidate,
     metadata: &MessageMetadata,
     context_revision_ids: &[String],
 ) -> Result<bool> {
@@ -539,7 +542,7 @@ async fn publish_outreach(
     }
     let autonomy_config = autonomy.snapshot().await;
     let headline = usage.headline(&today_started_at()).await?;
-    if headline.autonomous_messages_today >= autonomy_config.daily_interrupt_limit as u64
+    if !has_budget(outreach.kind, &autonomy_config, &headline)
         || quiet_end(Utc::now(), &autonomy_config.quiet_hours).is_some()
         || !conversation
             .wait_for_idle_input(input_epoch, Duration::ZERO)
