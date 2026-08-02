@@ -14,6 +14,8 @@ user's attention into a feed.
 ## Current Prototype
 
 - Local chat interface with streaming responses.
+- Optional native macOS menu-bar client with a persistent, resizable WebKit
+  window, unread count, and daemon reconnect state.
 - Continuous message bursts can interrupt the active Codex turn, then restart
   against the complete burst instead of spending the rest of a hidden draft.
 - Optional short continuations use a second model turn only when the first turn
@@ -60,17 +62,44 @@ chat / timer / hunch
         v
 symbiont-d host
   |-- Codex app-server: reasoning, web search, model routing
-  |-- PCP store: messages, summaries, provenance, long-term Pages
+  |-- in-tree PCP implementation: Pages, summaries, provenance, retrieval
   |-- Symbiont Context: current map, open loops, profile review
   |-- Reflection: raw interaction events -> Episodes -> working hypotheses
   |-- Curiosity: model-owned questions and their lifecycle
   |-- Permission Broker: interactive grants and background deny-by-default
-  `-- local UI: conversation, settings, archive, usage, traces
+  |-- browser UI: conversation, settings, archive, usage, traces
+  `-- macOS menu client: native lifecycle around the same local UI
 ```
 
 The Codex thread provides short-term conversational flow. PCP is the durable
 context boundary. Older information is searched and selectively read by the
 model instead of being appended to every request.
+
+### PCP implementation status
+
+[Paged Context Protocol](https://glenzli.com/projects/paged-context-protocol/)
+and `symbiont-d` are conceptually separate layers, even though their current
+implementations live in this repository and evolve together.
+
+The prototype intentionally keeps `pcp-core`, the SQLite store, model-facing
+tools, summary maintenance, and symbiont's continuity policy close to one
+another. This makes it possible to test the protocol against a real long-lived
+agent loop: conversation ingestion, Summary-to-Detail routing, revision and
+validity tracking, DAG relations, selective recall, retraction, and debugging
+traces all exercise the same data under actual use.
+
+This is a development choice, not a permanent ownership claim. The reusable PCP
+implementation may move into an independent package or repository after its
+storage and tool contracts stabilize. Until then, its internal APIs may change
+with symbiont-d experiments. The intended boundary is already visible:
+
+- `crates/pcp-core` owns protocol data types and requests.
+- `crates/pcp-sqlite` owns the local durable implementation.
+- `symbiont-d` owns when and why the agent writes, recalls, revises, or retracts
+  Pages.
+
+Keeping that distinction explicit allows the prototype to remain integrated
+without defining PCP as a symbiont-d-specific memory format.
 
 A Hunch belongs to `symbiont-d`, not to the user profile. Opening a distinct
 Hunch can wake an exploration cycle; routine revisions do not. When an
@@ -185,6 +214,34 @@ changing the source.
 Service logs are written to `data/logs/`. Uninstalling the service preserves
 all local data.
 
+### Add the macOS menu-bar client
+
+The optional native client is a separate process from the daemon. It reuses the
+same local interface in a resizable WebKit window, stays out of the Dock, and
+keeps unread and connection state visible in the menu bar. Closing its window
+hides it; it does not stop `symbiont-d`.
+
+Install it as a login item after installing the daemon:
+
+```bash
+./scripts/menu-install.sh
+```
+
+Click the message icon in the macOS menu bar to open the window. Right-click it
+for reload, browser, and quit commands.
+
+```bash
+./scripts/menu-status.sh
+./scripts/menu-uninstall.sh
+```
+
+The client requires macOS 13 or newer and the Apple Command Line Tools. It is
+built with the system AppKit and WebKit frameworks and does not require the full
+Xcode application. Uninstalling it leaves the daemon and all local data intact.
+Its full application icon is forged from the retained source image in
+`macos/SymbiontMenu/Resources/`; the menu-bar mark is a separate monochrome
+Template Image so macOS can render it correctly in both light and dark modes.
+
 ## Local Data
 
 Runtime data stays under `data/` by default and is ignored by Git:
@@ -238,8 +295,8 @@ cargo run --bin pcp -- read rev_...
 ## Source Layout
 
 ```text
-crates/pcp-core/    protocol types and requests
-crates/pcp-sqlite/ SQLite PCP implementation
+crates/pcp-core/    in-tree PCP protocol types and requests
+crates/pcp-sqlite/ in-tree durable PCP implementation
 src/bridge.rs       explicit Codex task and symbiont-context bridge
 src/codex/          Codex app-server client, prompts, tools, traces
 src/continuation.rs short conversational continuation lifecycle
@@ -254,6 +311,7 @@ src/web_fetch.rs    permission-gated exact-page retrieval
 src/web.rs          local HTTP API
 web/                embedded browser interface
 integrations/       installable Codex skill source
+macos/SymbiontMenu/  native menu-bar client and app bundle build
 ```
 
 ## Known Limits
@@ -261,7 +319,9 @@ integrations/       installable Codex skill source
 - `dynamicTools` in Codex app-server is experimental.
 - Retrieval currently uses Summary, lexical, exact, temporal, and graph
   channels; there is no embedding index.
+- The in-tree PCP implementation is still co-evolving with symbiont-d and does
+  not yet promise a stable standalone API.
 - Autonomous behavior and background memory maintenance still need long-running
   real-world evaluation.
-- The current interface is a local web app. Service packaging currently covers
-  macOS `launchd`; there is no native desktop shell yet.
+- The native client is currently a thin macOS shell around the local web UI;
+  system notifications and a Codex plugin entry point are not yet implemented.

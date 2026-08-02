@@ -60,8 +60,21 @@ mv "$TEMP_PLIST" "$PLIST_PATH"
 trap - EXIT
 
 launchctl bootout "$DOMAIN/$LABEL" >/dev/null 2>&1 || true
+unload_attempt=0
+while launchctl print "$DOMAIN/$LABEL" >/dev/null 2>&1; do
+  unload_attempt=$((unload_attempt + 1))
+  if [ "$unload_attempt" -ge 10 ]; then
+    echo "Could not unload $LABEL after 10 seconds" >&2
+    exit 1
+  fi
+  sleep 1
+done
+
 bootstrap_attempt=0
 while ! launchctl bootstrap "$DOMAIN" "$PLIST_PATH"; do
+  if launchctl print "$DOMAIN/$LABEL" >/dev/null 2>&1; then
+    break
+  fi
   bootstrap_attempt=$((bootstrap_attempt + 1))
   if [ "$bootstrap_attempt" -ge 5 ]; then
     echo "Could not load $LABEL after 5 attempts" >&2
@@ -73,7 +86,7 @@ launchctl enable "$DOMAIN/$LABEL"
 launchctl kickstart -k "$DOMAIN/$LABEL"
 
 attempt=0
-while [ "$attempt" -lt 30 ]; do
+while [ "$attempt" -lt 90 ]; do
   if curl --fail --silent --max-time 1 \
     http://127.0.0.1:4317/api/health >/dev/null 2>&1; then
     break
@@ -82,8 +95,8 @@ while [ "$attempt" -lt 30 ]; do
   sleep 1
 done
 
-if [ "$attempt" -eq 30 ]; then
-  echo "$LABEL was loaded but did not become healthy within 30 seconds" >&2
+if [ "$attempt" -eq 90 ]; then
+  echo "$LABEL was loaded but did not become healthy within 90 seconds" >&2
   echo "Inspect $LOG_DIR/stdout.log and $LOG_DIR/stderr.log" >&2
   exit 1
 fi

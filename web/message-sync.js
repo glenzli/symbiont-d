@@ -22,6 +22,7 @@ export function initMessageSync({
   let pollTimer = null;
   let refreshing = false;
   let seenTimer = null;
+  let reportedConnection = null;
 
   const observer = new IntersectionObserver(
     (entries) => {
@@ -88,7 +89,11 @@ export function initMessageSync({
       const response = await fetch(`/api/runtime${query}`, {
         cache: "no-store",
       });
-      if (!response.ok) return;
+      if (!response.ok) {
+        reportConnection(false);
+        return;
+      }
+      reportConnection(true);
       const payload = await response.json();
       applyRuntime(payload);
       if (shouldDeferMessages()) return;
@@ -108,6 +113,7 @@ export function initMessageSync({
       }
       persist();
     } catch {
+      reportConnection(false);
       // A later poll recovers after a daemon restart or brief disconnect.
     } finally {
       refreshing = false;
@@ -226,6 +232,13 @@ export function initMessageSync({
       count ? `${count} 条未读消息` : "没有未读消息",
     );
     document.title = count ? `(${count}) ${BASE_TITLE}` : BASE_TITLE;
+    notifyNative({ type: "unread", count });
+  }
+
+  function reportConnection(connected) {
+    if (reportedConnection === connected) return;
+    reportedConnection = connected;
+    notifyNative({ type: "connection", connected });
   }
 
   function persist() {
@@ -273,6 +286,14 @@ export function initMessageSync({
 
   renderUnread();
   return { completeBootstrap, remove, start, track, refresh };
+}
+
+function notifyNative(payload) {
+  try {
+    window.webkit?.messageHandlers?.symbiontNative?.postMessage(payload);
+  } catch {
+    // The browser UI has no native host, and should behave exactly as before.
+  }
 }
 
 function isIncomingAssistant(message) {

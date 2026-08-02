@@ -1,5 +1,6 @@
 /target
 /node_modules
+/macos/SymbiontMenu/build
 /data/memory.md
 /data/compute.toml
 /data/compute-policies.toml
