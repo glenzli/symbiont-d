@@ -136,6 +136,19 @@ SYMBIONT_PCP_RUNTIME_SOCKET=/absolute/path/to/symbiont-pcp.sock cargo run
 Use `pcp doctor` against the Store first to obtain `<owner-id>`. The socket is a
 single Host trust surface and must not be reused as a Codex MCP endpoint.
 
+For a shared PCP daemon, use the broker configuration in the PCP repository
+instead. It can open the Store once while exposing one `host:symbiont-d` socket
+and a different, narrower Codex socket. `user:{owner_id}` is expanded by the
+runtime, so the broker form does not require manually copying the Store owner:
+
+```bash
+../paged-context-protocol/target/release/pcp-runtime \
+  --config ../paged-context-protocol/examples/runtime.toml
+```
+
+symbiont-d still receives only its configured socket path; it cannot select a
+different Principal inside the broker.
+
 A Hunch belongs to `symbiont-d`, not to the user profile. Opening a distinct
 Hunch can wake an exploration cycle; routine revisions do not. When an
 autonomous message materially surfaces a Hunch, PCP records that exact
