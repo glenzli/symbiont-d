@@ -233,46 +233,11 @@ impl SymbiontContextStore {
             return self
                 .continuity
                 .store()
-                .revise_page(
-                    RevisePageRequest {
-                        page_id: current.page_id,
-                        expected_revision_id: current.revision_id,
-                        created_by: actor.clone(),
-                        lifecycle_status: LifecycleStatus::Active,
-                        observed_at: Some(observed_at.clone()),
-                        valid_from: None,
-                        valid_to: None,
-                        payload: Some(PagePayload {
-                            media_type: "text/markdown".to_owned(),
-                            content: content.to_owned(),
-                        }),
-                        source_refs,
-                        facets: Some(facets),
-                        provenance: vec![ProvenanceEvent {
-                            operation: "revise".to_owned(),
-                            actor,
-                            timestamp: observed_at,
-                            input_revision_ids: inputs,
-                            tool_or_model: Some(author.label().to_owned()),
-                        }],
-                        initial_relations: Vec::new(),
-                        idempotency_key: None,
-                    },
-                    self.continuity.allowed_scopes(),
-                )
-                .await
-                .context("revise symbiont context Page");
-        }
-
-        self.continuity
-            .store()
-            .write_page(
-                WritePageRequest {
-                    owner_id: self.continuity.store().owner_id().to_owned(),
-                    namespace: kind.namespace(&self.continuity).to_owned(),
-                    visibility: "private".to_owned(),
-                    lifecycle_status: LifecycleStatus::Active,
+                .revise_page(RevisePageRequest {
+                    page_id: current.page_id,
+                    expected_revision_id: current.revision_id,
                     created_by: actor.clone(),
+                    lifecycle_status: LifecycleStatus::Active,
                     observed_at: Some(observed_at.clone()),
                     valid_from: None,
                     valid_to: None,
@@ -283,17 +248,46 @@ impl SymbiontContextStore {
                     source_refs,
                     facets: Some(facets),
                     provenance: vec![ProvenanceEvent {
-                        operation: "derive".to_owned(),
+                        operation: "revise".to_owned(),
                         actor,
                         timestamp: observed_at,
-                        input_revision_ids: source_revision_ids,
+                        input_revision_ids: inputs,
                         tool_or_model: Some(author.label().to_owned()),
                     }],
                     initial_relations: Vec::new(),
-                    idempotency_key: Some(format!("symbiont-context:{}", kind.stable_key())),
-                },
-                self.continuity.allowed_scopes(),
-            )
+                    idempotency_key: None,
+                })
+                .await
+                .context("revise symbiont context Page");
+        }
+
+        self.continuity
+            .store()
+            .write_page(WritePageRequest {
+                owner_id: self.continuity.store().owner_id().to_owned(),
+                namespace: kind.namespace(&self.continuity).to_owned(),
+                visibility: "private".to_owned(),
+                lifecycle_status: LifecycleStatus::Active,
+                created_by: actor.clone(),
+                observed_at: Some(observed_at.clone()),
+                valid_from: None,
+                valid_to: None,
+                payload: Some(PagePayload {
+                    media_type: "text/markdown".to_owned(),
+                    content: content.to_owned(),
+                }),
+                source_refs,
+                facets: Some(facets),
+                provenance: vec![ProvenanceEvent {
+                    operation: "derive".to_owned(),
+                    actor,
+                    timestamp: observed_at,
+                    input_revision_ids: source_revision_ids,
+                    tool_or_model: Some(author.label().to_owned()),
+                }],
+                initial_relations: Vec::new(),
+                idempotency_key: Some(format!("symbiont-context:{}", kind.stable_key())),
+            })
             .await
             .context("write symbiont context Page")
     }

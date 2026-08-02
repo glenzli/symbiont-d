@@ -187,44 +187,11 @@ impl PcpIndex {
             let page = self
                 .continuity
                 .store()
-                .revise_page(
-                    RevisePageRequest {
-                        page_id: current.revision.page_id,
-                        expected_revision_id: current.revision.revision_id,
-                        created_by: actor,
-                        lifecycle_status: LifecycleStatus::Active,
-                        observed_at: Some(episode.last_activity_at.clone()),
-                        valid_from: None,
-                        valid_to: None,
-                        payload: Some(PagePayload {
-                            media_type: "text/markdown".to_owned(),
-                            content,
-                        }),
-                        source_refs,
-                        facets: Some(facets),
-                        provenance,
-                        initial_relations: relations,
-                        idempotency_key: Some(format!("episode-index:{}:{digest}", episode.id)),
-                    },
-                    self.continuity.allowed_scopes(),
-                )
-                .await?;
-            return Ok(SyncOutcome {
-                page,
-                kind: SyncKind::Revised,
-            });
-        }
-
-        let page = self
-            .continuity
-            .store()
-            .write_page(
-                WritePageRequest {
-                    owner_id: self.continuity.store().owner_id().to_owned(),
-                    namespace: self.continuity.project_scope().to_owned(),
-                    visibility: "private".to_owned(),
-                    lifecycle_status: LifecycleStatus::Active,
+                .revise_page(RevisePageRequest {
+                    page_id: current.revision.page_id,
+                    expected_revision_id: current.revision.revision_id,
                     created_by: actor,
+                    lifecycle_status: LifecycleStatus::Active,
                     observed_at: Some(episode.last_activity_at.clone()),
                     valid_from: None,
                     valid_to: None,
@@ -236,10 +203,37 @@ impl PcpIndex {
                     facets: Some(facets),
                     provenance,
                     initial_relations: relations,
-                    idempotency_key: Some(format!("episode-index:create:{}:{digest}", episode.id)),
-                },
-                self.continuity.allowed_scopes(),
-            )
+                    idempotency_key: Some(format!("episode-index:{}:{digest}", episode.id)),
+                })
+                .await?;
+            return Ok(SyncOutcome {
+                page,
+                kind: SyncKind::Revised,
+            });
+        }
+
+        let page = self
+            .continuity
+            .store()
+            .write_page(WritePageRequest {
+                owner_id: self.continuity.store().owner_id().to_owned(),
+                namespace: self.continuity.project_scope().to_owned(),
+                visibility: "private".to_owned(),
+                lifecycle_status: LifecycleStatus::Active,
+                created_by: actor,
+                observed_at: Some(episode.last_activity_at.clone()),
+                valid_from: None,
+                valid_to: None,
+                payload: Some(PagePayload {
+                    media_type: "text/markdown".to_owned(),
+                    content,
+                }),
+                source_refs,
+                facets: Some(facets),
+                provenance,
+                initial_relations: relations,
+                idempotency_key: Some(format!("episode-index:create:{}:{digest}", episode.id)),
+            })
             .await?;
         Ok(SyncOutcome {
             page,

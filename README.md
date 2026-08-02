@@ -91,6 +91,13 @@ DAG Relations now live in the adjacent `paged-context-protocol` repository.
 `pcp-store` defines the runtime interface; `pcp-sqlite` is selected only at the
 application composition root.
 
+The Host enters PCP as the fixed `host:symbiont-d` AccessPrincipal. Its
+AccessSession is limited to the user, project, and main-conversation Scopes it
+owns. Model-facing dynamic tools execute through that Host session rather than
+asserting their own storage identity. Cross-Scope derivation is explicit for
+this trusted private-memory pipeline and every Store operation emits a
+metadata-only access event.
+
 `symbiont-d` remains the Host: it owns when and why the agent writes, recalls,
 revises, or retracts Pages, together with conversation continuity, profile,
 Reflection, Curiosity, autonomous exploration, model routing, and Codex tools.

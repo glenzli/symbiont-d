@@ -527,6 +527,20 @@ async fn pcp_tools_write_search_and_read_through_the_dynamic_bridge() {
         exploration_intents,
     );
 
+    let described = tools
+        .execute(&json!({
+            "namespace": "pcp",
+            "tool": "describe",
+            "arguments": {}
+        }))
+        .await;
+    assert_eq!(described.response["success"], true);
+    let described_json = tool_content_json(&described.response);
+    assert_eq!(
+        described_json["access"]["principal"]["principalId"],
+        "host:symbiont-d"
+    );
+
     let written = tools
         .execute(&json!({
             "namespace": "pcp",

@@ -10,13 +10,14 @@ use std::{
 use anyhow::{Context, Result};
 use chrono::{SecondsFormat, Utc};
 use pcp_core::{
-    Actor, ActorType, AssessPageValidityRequest, CreateScopeRequest, InitialRelation,
-    LifecycleStatus, LinkPagesRequest, PagePayload, Projection, ProvenanceEvent, ReadPage,
-    ReadPagesRequest, Relation, RevisePageRequest, Scope, SearchFilters, SearchMode,
-    SearchPagesRequest, SearchResult, SourceRef, ValidityStanding, WritePageRequest, WriteResult,
-    WriteSummaryRequest, WriteSummaryResult, WriteValidityResult,
+    AccessPrincipal, AccessPrincipalType, AccessSession, Actor, ActorType,
+    AssessPageValidityRequest, CreateScopeRequest, InitialRelation, LifecycleStatus,
+    LinkPagesRequest, PagePayload, Projection, ProvenanceEvent, ReadPage, ReadPagesRequest,
+    Relation, RevisePageRequest, Scope, SearchFilters, SearchMode, SearchPagesRequest,
+    SearchResult, SourceRef, ValidityStanding, WritePageRequest, WriteResult, WriteSummaryRequest,
+    WriteSummaryResult, WriteValidityResult,
 };
-use pcp_store::{DurablePageInventoryItem, PcpStore};
+use pcp_store::{DurablePageInventoryItem, PcpClient, PcpStore};
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 use tokio::sync::{Mutex, RwLock};
@@ -81,7 +82,7 @@ impl ScopePolicy {
 }
 
 pub struct ContinuityHost {
-    store: Arc<dyn PcpStore>,
+    store: PcpClient,
     scopes: ScopePolicy,
     event_counter: AtomicU64,
     orientation: RwLock<Option<WriteResult>>,
@@ -130,6 +131,18 @@ impl ContinuityHost {
             project: PROJECT_NAMESPACE.to_owned(),
             conversation: CONVERSATION_NAMESPACE.to_owned(),
         };
+        let store = PcpClient::new(
+            store,
+            AccessSession::full_control(
+                AccessPrincipal {
+                    principal_id: "host:symbiont-d".to_owned(),
+                    principal_type: AccessPrincipalType::Host,
+                    display_name: Some("symbiont-d".to_owned()),
+                },
+                format!("symbiont-d:{}", std::process::id()),
+                scopes.all(),
+            ),
+        );
         for request in [
             CreateScopeRequest {
                 owner_id: owner_id.clone(),
@@ -172,7 +185,7 @@ impl ContinuityHost {
         })
     }
 
-    pub fn store(&self) -> &Arc<dyn PcpStore> {
+    pub fn store(&self) -> &PcpClient {
         &self.store
     }
 
@@ -279,39 +292,36 @@ impl ContinuityHost {
             }
             let result = self
                 .store
-                .write_page(
-                    WritePageRequest {
-                        owner_id: self.store.owner_id().to_owned(),
-                        namespace: self.scopes.conversation.clone(),
-                        visibility: "private".to_owned(),
-                        lifecycle_status: LifecycleStatus::Active,
-                        created_by: actor.clone(),
-                        observed_at: Some(entry.at.clone()),
-                        valid_from: None,
-                        valid_to: None,
-                        payload: Some(PagePayload {
-                            media_type: "text/markdown".to_owned(),
-                            content: entry.content.clone(),
-                        }),
-                        source_refs: vec![SourceRef {
-                            source_type: "legacy_markdown_memory".to_owned(),
-                            uri: memory.source_uri(),
-                            locator: Some(format!("entry:{index}")),
-                            metadata: None,
-                        }],
-                        facets: Some(message_facets(&entry)),
-                        provenance: vec![ProvenanceEvent {
-                            operation: "import".to_owned(),
-                            actor: system_actor(),
-                            timestamp: now(),
-                            input_revision_ids: Vec::new(),
-                            tool_or_model: Some("symbiont legacy importer".to_owned()),
-                        }],
-                        initial_relations,
-                        idempotency_key: Some(format!("legacy-memory:{}:{index}", entry.at)),
-                    },
-                    self.allowed_scopes(),
-                )
+                .write_page(WritePageRequest {
+                    owner_id: self.store.owner_id().to_owned(),
+                    namespace: self.scopes.conversation.clone(),
+                    visibility: "private".to_owned(),
+                    lifecycle_status: LifecycleStatus::Active,
+                    created_by: actor.clone(),
+                    observed_at: Some(entry.at.clone()),
+                    valid_from: None,
+                    valid_to: None,
+                    payload: Some(PagePayload {
+                        media_type: "text/markdown".to_owned(),
+                        content: entry.content.clone(),
+                    }),
+                    source_refs: vec![SourceRef {
+                        source_type: "legacy_markdown_memory".to_owned(),
+                        uri: memory.source_uri(),
+                        locator: Some(format!("entry:{index}")),
+                        metadata: None,
+                    }],
+                    facets: Some(message_facets(&entry)),
+                    provenance: vec![ProvenanceEvent {
+                        operation: "import".to_owned(),
+                        actor: system_actor(),
+                        timestamp: now(),
+                        input_revision_ids: Vec::new(),
+                        tool_or_model: Some("symbiont legacy importer".to_owned()),
+                    }],
+                    initial_relations,
+                    idempotency_key: Some(format!("legacy-memory:{}:{index}", entry.at)),
+                })
                 .await?;
             previous_revision = Some(result.revision_id.clone());
             source_revisions.push(result.revision_id);
@@ -345,57 +355,51 @@ impl ContinuityHost {
         let actor = system_actor();
         let initial = self
             .store
-            .write_page(
-                WritePageRequest {
-                    owner_id: self.store.owner_id().to_owned(),
-                    namespace: self.scopes.user.clone(),
-                    visibility: "private".to_owned(),
-                    lifecycle_status: LifecycleStatus::Active,
-                    created_by: actor.clone(),
-                    observed_at: profile.updated_at.clone(),
-                    valid_from: None,
-                    valid_to: None,
-                    payload: Some(PagePayload {
-                        media_type: "text/markdown".to_owned(),
-                        content: profile.orientation.trim().to_owned(),
-                    }),
-                    source_refs: vec![SourceRef {
-                        source_type: "symbiont_orientation".to_owned(),
-                        uri: "symbiont://profile/orientation".to_owned(),
-                        locator: None,
-                        metadata: None,
-                    }],
-                    facets: Some(json!({
-                        "kind": "user_orientation",
-                        "stableKey": "symbiont.orientation"
-                    })),
-                    provenance: vec![ProvenanceEvent {
-                        operation: "derive".to_owned(),
-                        actor: actor.clone(),
-                        timestamp: now(),
-                        input_revision_ids: source_revision_ids,
-                        tool_or_model: Some("symbiont onboarding".to_owned()),
-                    }],
-                    initial_relations: Vec::new(),
-                    idempotency_key: Some("symbiont.orientation".to_owned()),
-                },
-                self.allowed_scopes(),
-            )
+            .write_page(WritePageRequest {
+                owner_id: self.store.owner_id().to_owned(),
+                namespace: self.scopes.user.clone(),
+                visibility: "private".to_owned(),
+                lifecycle_status: LifecycleStatus::Active,
+                created_by: actor.clone(),
+                observed_at: profile.updated_at.clone(),
+                valid_from: None,
+                valid_to: None,
+                payload: Some(PagePayload {
+                    media_type: "text/markdown".to_owned(),
+                    content: profile.orientation.trim().to_owned(),
+                }),
+                source_refs: vec![SourceRef {
+                    source_type: "symbiont_orientation".to_owned(),
+                    uri: "symbiont://profile/orientation".to_owned(),
+                    locator: None,
+                    metadata: None,
+                }],
+                facets: Some(json!({
+                    "kind": "user_orientation",
+                    "stableKey": "symbiont.orientation"
+                })),
+                provenance: vec![ProvenanceEvent {
+                    operation: "derive".to_owned(),
+                    actor: actor.clone(),
+                    timestamp: now(),
+                    input_revision_ids: source_revision_ids,
+                    tool_or_model: Some("symbiont onboarding".to_owned()),
+                }],
+                initial_relations: Vec::new(),
+                idempotency_key: Some("symbiont.orientation".to_owned()),
+            })
             .await?;
         let current_revision = self
             .store
-            .current_revision_id(initial.page_id.clone(), self.allowed_scopes())
+            .current_revision_id(initial.page_id.clone())
             .await?;
         let current = self
             .store
-            .read_pages(
-                ReadPagesRequest {
-                    revision_ids: vec![current_revision.clone()],
-                    projections: vec![Projection::Payload],
-                    max_chars: 64_000,
-                },
-                self.allowed_scopes(),
-            )
+            .read_pages(ReadPagesRequest {
+                revision_ids: vec![current_revision.clone()],
+                projections: vec![Projection::Payload],
+                max_chars: 64_000,
+            })
             .await?;
         let current_content = current
             .first()
@@ -414,41 +418,38 @@ impl ContinuityHost {
         let previous_revision = current_revision.clone();
         let revised = self
             .store
-            .revise_page(
-                RevisePageRequest {
-                    page_id: initial.page_id,
-                    expected_revision_id: current_revision,
-                    created_by: actor.clone(),
-                    lifecycle_status: LifecycleStatus::Active,
-                    observed_at: profile.updated_at.clone(),
-                    valid_from: None,
-                    valid_to: None,
-                    payload: Some(PagePayload {
-                        media_type: "text/markdown".to_owned(),
-                        content: profile.orientation.trim().to_owned(),
-                    }),
-                    source_refs: vec![SourceRef {
-                        source_type: "symbiont_orientation".to_owned(),
-                        uri: "symbiont://profile/orientation".to_owned(),
-                        locator: None,
-                        metadata: None,
-                    }],
-                    facets: Some(json!({
-                        "kind": "user_orientation",
-                        "stableKey": "symbiont.orientation"
-                    })),
-                    provenance: vec![ProvenanceEvent {
-                        operation: "revise".to_owned(),
-                        actor,
-                        timestamp: now(),
-                        input_revision_ids: vec![previous_revision],
-                        tool_or_model: Some("symbiont profile editor".to_owned()),
-                    }],
-                    initial_relations: Vec::new(),
-                    idempotency_key: None,
-                },
-                self.allowed_scopes(),
-            )
+            .revise_page(RevisePageRequest {
+                page_id: initial.page_id,
+                expected_revision_id: current_revision,
+                created_by: actor.clone(),
+                lifecycle_status: LifecycleStatus::Active,
+                observed_at: profile.updated_at.clone(),
+                valid_from: None,
+                valid_to: None,
+                payload: Some(PagePayload {
+                    media_type: "text/markdown".to_owned(),
+                    content: profile.orientation.trim().to_owned(),
+                }),
+                source_refs: vec![SourceRef {
+                    source_type: "symbiont_orientation".to_owned(),
+                    uri: "symbiont://profile/orientation".to_owned(),
+                    locator: None,
+                    metadata: None,
+                }],
+                facets: Some(json!({
+                    "kind": "user_orientation",
+                    "stableKey": "symbiont.orientation"
+                })),
+                provenance: vec![ProvenanceEvent {
+                    operation: "revise".to_owned(),
+                    actor,
+                    timestamp: now(),
+                    input_revision_ids: vec![previous_revision],
+                    tool_or_model: Some("symbiont profile editor".to_owned()),
+                }],
+                initial_relations: Vec::new(),
+                idempotency_key: None,
+            })
             .await?;
         *self.orientation.write().await = Some(revised.clone());
         Ok(Some(revised))
@@ -610,34 +611,31 @@ impl ContinuityHost {
         };
         let page = self
             .store
-            .write_page(
-                WritePageRequest {
-                    owner_id: self.store.owner_id().to_owned(),
-                    namespace: self.scopes.conversation.clone(),
-                    visibility: "private".to_owned(),
-                    lifecycle_status: LifecycleStatus::Active,
-                    created_by: actor.clone(),
-                    observed_at: Some(entry.at.clone()),
-                    valid_from: None,
-                    valid_to: None,
-                    payload: Some(PagePayload {
-                        media_type: "text/markdown".to_owned(),
-                        content: payload_content,
-                    }),
-                    source_refs: Vec::new(),
-                    facets: Some(message_facets(&entry)),
-                    provenance: vec![ProvenanceEvent {
-                        operation: "ingest".to_owned(),
-                        actor,
-                        timestamp: entry.at.clone(),
-                        input_revision_ids: provenance_inputs,
-                        tool_or_model,
-                    }],
-                    initial_relations,
-                    idempotency_key: Some(event_key),
-                },
-                self.allowed_scopes(),
-            )
+            .write_page(WritePageRequest {
+                owner_id: self.store.owner_id().to_owned(),
+                namespace: self.scopes.conversation.clone(),
+                visibility: "private".to_owned(),
+                lifecycle_status: LifecycleStatus::Active,
+                created_by: actor.clone(),
+                observed_at: Some(entry.at.clone()),
+                valid_from: None,
+                valid_to: None,
+                payload: Some(PagePayload {
+                    media_type: "text/markdown".to_owned(),
+                    content: payload_content,
+                }),
+                source_refs: Vec::new(),
+                facets: Some(message_facets(&entry)),
+                provenance: vec![ProvenanceEvent {
+                    operation: "ingest".to_owned(),
+                    actor,
+                    timestamp: entry.at.clone(),
+                    input_revision_ids: provenance_inputs,
+                    tool_or_model,
+                }],
+                initial_relations,
+                idempotency_key: Some(event_key),
+            })
             .await?;
         entry.revision_id = Some(page.revision_id.clone());
         *last_event_revision = Some(page.revision_id.clone());
@@ -660,43 +658,40 @@ impl ContinuityHost {
             let payload = serde_json::to_string_pretty(&image.attachment)?;
             let result = self
                 .store
-                .write_page(
-                    WritePageRequest {
-                        owner_id: self.store.owner_id().to_owned(),
-                        namespace: self.scopes.conversation.clone(),
-                        visibility: "private".to_owned(),
-                        lifecycle_status: LifecycleStatus::Active,
-                        created_by: actor.clone(),
-                        observed_at: Some(observed_at.to_owned()),
-                        valid_from: None,
-                        valid_to: None,
-                        payload: Some(PagePayload {
-                            media_type: "application/vnd.symbiont.image+json".to_owned(),
-                            content: payload,
-                        }),
-                        source_refs: vec![SourceRef {
-                            source_type: image.source_type().to_owned(),
-                            uri: image.source_uri().to_owned(),
-                            locator: None,
-                            metadata: image.source_metadata(),
-                        }],
-                        facets: Some(json!({
-                            "kind": "image_asset",
-                            "sha256": image.attachment.sha256,
-                            "origin": image.source_type()
-                        })),
-                        provenance: vec![ProvenanceEvent {
-                            operation: "ingest".to_owned(),
-                            actor: actor.clone(),
-                            timestamp: observed_at.to_owned(),
-                            input_revision_ids: Vec::new(),
-                            tool_or_model: tool_or_model.map(str::to_owned),
-                        }],
-                        initial_relations: Vec::new(),
-                        idempotency_key: Some(format!("image-asset:{}", image.attachment.sha256)),
-                    },
-                    self.allowed_scopes(),
-                )
+                .write_page(WritePageRequest {
+                    owner_id: self.store.owner_id().to_owned(),
+                    namespace: self.scopes.conversation.clone(),
+                    visibility: "private".to_owned(),
+                    lifecycle_status: LifecycleStatus::Active,
+                    created_by: actor.clone(),
+                    observed_at: Some(observed_at.to_owned()),
+                    valid_from: None,
+                    valid_to: None,
+                    payload: Some(PagePayload {
+                        media_type: "application/vnd.symbiont.image+json".to_owned(),
+                        content: payload,
+                    }),
+                    source_refs: vec![SourceRef {
+                        source_type: image.source_type().to_owned(),
+                        uri: image.source_uri().to_owned(),
+                        locator: None,
+                        metadata: image.source_metadata(),
+                    }],
+                    facets: Some(json!({
+                        "kind": "image_asset",
+                        "sha256": image.attachment.sha256,
+                        "origin": image.source_type()
+                    })),
+                    provenance: vec![ProvenanceEvent {
+                        operation: "ingest".to_owned(),
+                        actor: actor.clone(),
+                        timestamp: observed_at.to_owned(),
+                        input_revision_ids: Vec::new(),
+                        tool_or_model: tool_or_model.map(str::to_owned),
+                    }],
+                    initial_relations: Vec::new(),
+                    idempotency_key: Some(format!("image-asset:{}", image.attachment.sha256)),
+                })
                 .await?;
             revision_ids.push(result.revision_id);
         }
@@ -1027,11 +1022,7 @@ impl ContinuityHost {
 
         let cascade = self
             .store
-            .tombstone_derivation_cascade(
-                revision_id.to_owned(),
-                system_actor(),
-                self.allowed_scopes(),
-            )
+            .tombstone_derivation_cascade(revision_id.to_owned(), system_actor())
             .await?;
         let mut message_revision_ids = Vec::new();
         for chunk in cascade.retracted_revision_ids.chunks(20) {
@@ -1146,13 +1137,11 @@ impl ContinuityHost {
     }
 
     pub async fn read(&self, request: ReadPagesRequest) -> Result<Vec<ReadPage>> {
-        self.store.read_pages(request, self.allowed_scopes()).await
+        self.store.read_pages(request).await
     }
 
     pub async fn current_revision_id(&self, page_id: &str) -> Result<String> {
-        self.store
-            .current_revision_id(page_id.to_owned(), self.allowed_scopes())
-            .await
+        self.store.current_revision_id(page_id.to_owned()).await
     }
 
     pub async fn surfaced_hunch_revisions(&self, message_revision_id: &str) -> Result<Vec<String>> {
@@ -1179,20 +1168,13 @@ impl ContinuityHost {
 
     pub async fn next_summary_candidate(&self, minimum_chars: usize) -> Result<Option<String>> {
         self.store
-            .next_summary_candidate(
-                self.allowed_scopes(),
-                minimum_chars,
-                owned_page_kinds(SUMMARY_EXCLUDED_PAGE_KINDS),
-            )
+            .next_summary_candidate(minimum_chars, owned_page_kinds(SUMMARY_EXCLUDED_PAGE_KINDS))
             .await
     }
 
     pub async fn durable_page_inventory(&self) -> Result<Vec<DurablePageInventoryItem>> {
         self.store
-            .durable_page_inventory(
-                self.allowed_scopes(),
-                owned_page_kinds(INDEX_EXCLUDED_PAGE_KINDS),
-            )
+            .durable_page_inventory(owned_page_kinds(INDEX_EXCLUDED_PAGE_KINDS))
             .await
     }
 
@@ -1203,12 +1185,7 @@ impl ContinuityHost {
         tool_or_model: Option<String>,
     ) -> Result<()> {
         self.store
-            .mark_summary_assessed(
-                target_revision_id,
-                outcome.to_owned(),
-                tool_or_model,
-                self.allowed_scopes(),
-            )
+            .mark_summary_assessed(target_revision_id, outcome.to_owned(), tool_or_model)
             .await
     }
 
@@ -1229,34 +1206,31 @@ impl ContinuityHost {
         self.resolve_scopes(&[namespace.to_owned()])?;
         let actor = model_actor();
         self.store
-            .write_page(
-                WritePageRequest {
-                    owner_id: self.store.owner_id().to_owned(),
-                    namespace: namespace.to_owned(),
-                    visibility: "private".to_owned(),
-                    lifecycle_status: LifecycleStatus::Active,
-                    created_by: actor.clone(),
-                    observed_at: Some(now()),
-                    valid_from: None,
-                    valid_to: None,
-                    payload: Some(PagePayload {
-                        media_type: "text/markdown".to_owned(),
-                        content: content.trim().to_owned(),
-                    }),
-                    source_refs,
-                    facets,
-                    provenance: vec![ProvenanceEvent {
-                        operation: "derive".to_owned(),
-                        actor,
-                        timestamp: now(),
-                        input_revision_ids: source_revision_ids,
-                        tool_or_model: Some("Codex".to_owned()),
-                    }],
-                    initial_relations: relations,
-                    idempotency_key,
-                },
-                self.allowed_scopes(),
-            )
+            .write_page(WritePageRequest {
+                owner_id: self.store.owner_id().to_owned(),
+                namespace: namespace.to_owned(),
+                visibility: "private".to_owned(),
+                lifecycle_status: LifecycleStatus::Active,
+                created_by: actor.clone(),
+                observed_at: Some(now()),
+                valid_from: None,
+                valid_to: None,
+                payload: Some(PagePayload {
+                    media_type: "text/markdown".to_owned(),
+                    content: content.trim().to_owned(),
+                }),
+                source_refs,
+                facets,
+                provenance: vec![ProvenanceEvent {
+                    operation: "derive".to_owned(),
+                    actor,
+                    timestamp: now(),
+                    input_revision_ids: source_revision_ids,
+                    tool_or_model: Some("Codex".to_owned()),
+                }],
+                initial_relations: relations,
+                idempotency_key,
+            })
             .await
     }
 
@@ -1279,24 +1253,21 @@ impl ContinuityHost {
             }
         }
         self.store
-            .write_summary(
-                WriteSummaryRequest {
-                    target_revision_id,
-                    expected_summary_revision_id,
-                    content,
-                    created_by: actor.clone(),
-                    tool_or_model: Some(tool_or_model.clone()),
-                    provenance: vec![ProvenanceEvent {
-                        operation: "summarize".to_owned(),
-                        actor,
-                        timestamp: now(),
-                        input_revision_ids: inputs,
-                        tool_or_model: Some(tool_or_model),
-                    }],
-                    idempotency_key,
-                },
-                self.allowed_scopes(),
-            )
+            .write_summary(WriteSummaryRequest {
+                target_revision_id,
+                expected_summary_revision_id,
+                content,
+                created_by: actor.clone(),
+                tool_or_model: Some(tool_or_model.clone()),
+                provenance: vec![ProvenanceEvent {
+                    operation: "summarize".to_owned(),
+                    actor,
+                    timestamp: now(),
+                    input_revision_ids: inputs,
+                    tool_or_model: Some(tool_or_model),
+                }],
+                idempotency_key,
+            })
             .await
     }
 
@@ -1315,20 +1286,17 @@ impl ContinuityHost {
         basis_revision_ids.sort();
         basis_revision_ids.dedup();
         self.store
-            .assess_page_validity(
-                AssessPageValidityRequest {
-                    target_revision_id,
-                    expected_assessment_id,
-                    standing,
-                    rationale,
-                    scope,
-                    basis_revision_ids,
-                    created_by: model_actor(),
-                    tool_or_model: Some(tool_or_model.unwrap_or_else(|| "Codex".to_owned())),
-                    idempotency_key,
-                },
-                self.allowed_scopes(),
-            )
+            .assess_page_validity(AssessPageValidityRequest {
+                target_revision_id,
+                expected_assessment_id,
+                standing,
+                rationale,
+                scope,
+                basis_revision_ids,
+                created_by: model_actor(),
+                tool_or_model: Some(tool_or_model.unwrap_or_else(|| "Codex".to_owned())),
+                idempotency_key,
+            })
             .await
     }
 
@@ -1352,33 +1320,30 @@ impl ContinuityHost {
         provenance_inputs.push(expected_revision_id.clone());
         provenance_inputs.extend(source_revision_ids);
         self.store
-            .revise_page(
-                RevisePageRequest {
-                    page_id,
-                    expected_revision_id,
-                    created_by: actor.clone(),
-                    lifecycle_status,
-                    observed_at: Some(now()),
-                    valid_from: None,
-                    valid_to: None,
-                    payload: Some(PagePayload {
-                        media_type: "text/markdown".to_owned(),
-                        content: content.trim().to_owned(),
-                    }),
-                    source_refs,
-                    facets,
-                    provenance: vec![ProvenanceEvent {
-                        operation: "revise".to_owned(),
-                        actor,
-                        timestamp: now(),
-                        input_revision_ids: provenance_inputs,
-                        tool_or_model: Some("Codex".to_owned()),
-                    }],
-                    initial_relations: Vec::new(),
-                    idempotency_key,
-                },
-                self.allowed_scopes(),
-            )
+            .revise_page(RevisePageRequest {
+                page_id,
+                expected_revision_id,
+                created_by: actor.clone(),
+                lifecycle_status,
+                observed_at: Some(now()),
+                valid_from: None,
+                valid_to: None,
+                payload: Some(PagePayload {
+                    media_type: "text/markdown".to_owned(),
+                    content: content.trim().to_owned(),
+                }),
+                source_refs,
+                facets,
+                provenance: vec![ProvenanceEvent {
+                    operation: "revise".to_owned(),
+                    actor,
+                    timestamp: now(),
+                    input_revision_ids: provenance_inputs,
+                    tool_or_model: Some("Codex".to_owned()),
+                }],
+                initial_relations: Vec::new(),
+                idempotency_key,
+            })
             .await
     }
 
@@ -1390,16 +1355,13 @@ impl ContinuityHost {
         idempotency_key: Option<String>,
     ) -> Result<Relation> {
         self.store
-            .link_pages(
-                LinkPagesRequest {
-                    from_revision_id,
-                    relation_type,
-                    to_revision_id,
-                    created_by: model_actor(),
-                    idempotency_key,
-                },
-                self.allowed_scopes(),
-            )
+            .link_pages(LinkPagesRequest {
+                from_revision_id,
+                relation_type,
+                to_revision_id,
+                created_by: model_actor(),
+                idempotency_key,
+            })
             .await
     }
 

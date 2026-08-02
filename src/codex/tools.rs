@@ -1727,7 +1727,10 @@ impl SymbiontTools {
             anyhow::bail!("this model stage is host-enforced read-only");
         }
         let result = match tool {
-            "describe" => serde_json::to_value(self.continuity.store().capabilities())?,
+            "describe" => json!({
+                "capabilities": self.continuity.store().capabilities(),
+                "access": self.continuity.store().access(),
+            }),
             "list_scopes" => {
                 let (scopes, next_cursor) = self
                     .continuity
