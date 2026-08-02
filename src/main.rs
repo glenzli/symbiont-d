@@ -54,7 +54,7 @@ use identity::IdentityStore;
 use memory::MemoryStore;
 use pcp_client::{EmbeddedPcpClient, PcpApi};
 use pcp_index::PcpIndex;
-use pcp_runtime::RemotePcpClient;
+use pcp_rpc::RemotePcpClient;
 use pcp_sqlite::SqlitePcpStore;
 use pcp_store::PcpStore;
 use permission::PermissionBroker;

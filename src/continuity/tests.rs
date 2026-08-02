@@ -5,7 +5,7 @@ use std::{
 
 use pcp_client::EmbeddedPcpClient;
 use pcp_core::{AccessPrincipal, AccessPrincipalType, AccessSession, Projection, ReadPagesRequest};
-use pcp_runtime::{RemotePcpClient, serve_unix};
+use pcp_rpc::{RemotePcpClient, serve_unix};
 use pcp_sqlite::SqlitePcpStore;
 use pcp_store::PcpStore;
 use serde_json::json;

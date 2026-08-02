@@ -90,10 +90,12 @@ revision semantics, retrieval primitives, Summary projections, validity, and
 DAG Relations now live in the adjacent `paged-context-protocol` repository.
 `pcp-store` defines the storage contract. `pcp-client` defines the
 transport-independent capability interface consumed by `ContinuityHost`, while
-`pcp-sqlite` is selected only by the embedded composition root. The optional
-`pcp-runtime` exposes the same complete `PcpApi` over a local Unix socket, so
-switching deployment form does not change conversation, Reflection, Curiosity,
-or exploration code.
+`pcp-sqlite` is selected only by the embedded composition root. The lightweight
+`pcp-rpc` crate provides the remote client and Unix socket transport without
+linking the daemon or SQLite implementation. The optional `pcp-runtime` composes
+that transport with a Store and identity-bound endpoints, so switching
+deployment form does not change conversation, Reflection, Curiosity, or
+exploration code.
 
 The Host enters PCP as the fixed `host:symbiont-d` AccessPrincipal. Its
 AccessSession is limited to the user, project, and main-conversation Scopes it
