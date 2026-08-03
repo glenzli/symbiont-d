@@ -56,7 +56,12 @@ fn is_cacheable_read(tool: &str) -> bool {
 fn is_pcp_mutation(tool: &str) -> bool {
     matches!(
         tool,
-        "assess_validity" | "write_summary" | "write_page" | "supersede_page" | "relate_pages"
+        "assess_validity"
+            | "write_summary"
+            | "write_page"
+            | "supersede_page"
+            | "consolidate_pages"
+            | "relate_pages"
     )
 }
 

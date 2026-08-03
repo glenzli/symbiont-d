@@ -24,3 +24,13 @@ allowed_scopes = [
   "project:symbiont-d",
   "conversation:symbiont-d-main",
 ]
+
+[[endpoints]]
+socket_path = "../data/run/pcp-codex-read.sock"
+client_id = "codex:pcp-read"
+client_type = "model_client"
+client_name = "Codex PCP read trial"
+access_mode = "read"
+allowed_scopes = [
+  "user:{owner_id}",
+]

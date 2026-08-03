@@ -723,7 +723,7 @@ async fn marks_unanswered_messages_failed_and_retracts_the_latest_turn() {
     );
 
     let result = continuity
-        .retract_latest_user_message(&user.page.revision_id)
+        .retract_user_message_and_after(&user.page.revision_id)
         .await
         .expect("retract latest user message");
     assert!(result.message_revision_ids.contains(&user.page.revision_id));
@@ -736,6 +736,91 @@ async fn marks_unanswered_messages_failed_and_retracts_the_latest_turn() {
     assert_eq!(
         remaining[0].revision_id.as_deref(),
         Some(earlier.page.revision_id.as_str())
+    );
+
+    let _ = tokio::fs::remove_dir_all(root).await;
+}
+
+#[tokio::test]
+async fn retracting_a_user_message_removes_its_conversation_suffix() {
+    let nonce = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .expect("clock")
+        .as_nanos();
+    let root = std::env::temp_dir().join(format!("symbiont-retract-suffix-{nonce}"));
+    let store = Arc::new(
+        SqlitePcpStore::open(root.join("context.sqlite3"))
+            .await
+            .expect("open PCP store"),
+    );
+    let continuity = ContinuityHost::open_embedded_for_test(store)
+        .await
+        .expect("open host");
+    let first_user = continuity
+        .ingest_message(
+            MemoryRole::User,
+            "The original premise.",
+            Vec::new(),
+            None,
+            MessageLinks::default(),
+        )
+        .await
+        .expect("ingest first user event");
+    let first_assistant = continuity
+        .ingest_message(
+            MemoryRole::Assistant,
+            "The first answer.",
+            Vec::new(),
+            None,
+            MessageLinks {
+                responds_to: Some(first_user.page.revision_id.clone()),
+                ..MessageLinks::default()
+            },
+        )
+        .await
+        .expect("ingest first assistant event");
+    let second_user = continuity
+        .ingest_message(
+            MemoryRole::User,
+            "A follow-up based on that answer.",
+            Vec::new(),
+            None,
+            MessageLinks::default(),
+        )
+        .await
+        .expect("ingest second user event");
+    let second_assistant = continuity
+        .ingest_message(
+            MemoryRole::Assistant,
+            "The second answer.",
+            Vec::new(),
+            None,
+            MessageLinks {
+                responds_to: Some(second_user.page.revision_id.clone()),
+                ..MessageLinks::default()
+            },
+        )
+        .await
+        .expect("ingest second assistant event");
+
+    let result = continuity
+        .retract_user_message_and_after(&first_user.page.revision_id)
+        .await
+        .expect("retract conversation suffix");
+    for revision_id in [
+        &first_user.page.revision_id,
+        &first_assistant.page.revision_id,
+        &second_user.page.revision_id,
+        &second_assistant.page.revision_id,
+    ] {
+        assert!(result.message_revision_ids.contains(revision_id));
+    }
+    assert!(
+        continuity
+            .recent_messages(20)
+            .await
+            .expect("read remaining messages")
+            .is_empty()
     );
 
     let _ = tokio::fs::remove_dir_all(root).await;

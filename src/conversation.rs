@@ -39,6 +39,12 @@ pub struct ConversationLease {
     id: u64,
 }
 
+#[derive(Debug)]
+pub enum SettledConversation {
+    Messages(Vec<QueuedUserMessage>),
+    Interrupted,
+}
+
 #[derive(Clone, Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ConversationSnapshot {
@@ -63,6 +69,7 @@ struct ActiveConversation {
     id: u64,
     pending: Vec<QueuedUserMessage>,
     append_reservations: usize,
+    interrupted: bool,
     last_input_at: Instant,
     started_at: String,
 }
@@ -90,6 +97,7 @@ impl ConversationCoordinator {
             id,
             pending: vec![message],
             append_reservations: 0,
+            interrupted: false,
             last_input_at: Instant::now(),
             started_at: chrono::Utc::now().to_rfc3339(),
         });
@@ -104,6 +112,9 @@ impl ConversationCoordinator {
             .active
             .as_mut()
             .ok_or_else(|| anyhow::anyhow!("no active conversation response"))?;
+        if active.interrupted {
+            anyhow::bail!("the active conversation response is stopping");
+        }
         active.append_reservations += 1;
         Ok(ConversationLease { id: active.id })
     }
@@ -153,6 +164,28 @@ impl ConversationCoordinator {
         *self.input_epoch.borrow()
     }
 
+    pub async fn interrupt(&self) -> bool {
+        let interrupted = {
+            let mut state = self.state.lock().await;
+            let Some(active) = state.active.as_mut() else {
+                return false;
+            };
+            if active.interrupted {
+                return false;
+            }
+            active.interrupted = true;
+            active.pending.clear();
+            active.append_reservations = 0;
+            state.typing_until = None;
+            true
+        };
+        if interrupted {
+            self.bump_input_epoch();
+            self.changed.notify_waiters();
+        }
+        interrupted
+    }
+
     pub async fn wait_for_idle_input(&self, expected_epoch: u64, maximum: Duration) -> bool {
         let maximum = Instant::now() + maximum;
         loop {
@@ -180,15 +213,15 @@ impl ConversationCoordinator {
         }
     }
 
-    pub async fn settle_and_take(
-        &self,
-        lease: ConversationLease,
-    ) -> Result<Vec<QueuedUserMessage>> {
+    pub async fn settle_and_take(&self, lease: ConversationLease) -> Result<SettledConversation> {
         let maximum = Instant::now() + MAX_SETTLE;
         loop {
             let deadline = {
                 let state = self.state.lock().await;
                 let active = matching_active(&state, lease)?;
+                if active.interrupted {
+                    return Ok(SettledConversation::Interrupted);
+                }
                 let quiet = active.last_input_at + QUIET_WINDOW;
                 state
                     .typing_until
@@ -199,8 +232,13 @@ impl ConversationCoordinator {
             if Instant::now() >= deadline {
                 let mut state = self.state.lock().await;
                 let active = matching_active_mut(&mut state, lease)?;
+                if active.interrupted {
+                    return Ok(SettledConversation::Interrupted);
+                }
                 if !active.pending.is_empty() {
-                    return Ok(std::mem::take(&mut active.pending));
+                    return Ok(SettledConversation::Messages(std::mem::take(
+                        &mut active.pending,
+                    )));
                 }
                 anyhow::bail!("conversation batch settled without pending messages");
             }
@@ -214,6 +252,11 @@ impl ConversationCoordinator {
     pub async fn has_pending(&self, lease: ConversationLease) -> Result<bool> {
         let state = self.state.lock().await;
         Ok(!matching_active(&state, lease)?.pending.is_empty())
+    }
+
+    pub async fn is_interrupted(&self, lease: ConversationLease) -> Result<bool> {
+        let state = self.state.lock().await;
+        Ok(matching_active(&state, lease)?.interrupted)
     }
 
     pub async fn finish_if_idle(&self, lease: ConversationLease) -> Result<bool> {
@@ -326,7 +369,11 @@ mod tests {
             .append_reserved(reservation, message("two"))
             .await
             .unwrap();
-        let batch = coordinator.settle_and_take(lease).await.unwrap();
+        let SettledConversation::Messages(batch) =
+            coordinator.settle_and_take(lease).await.unwrap()
+        else {
+            panic!("conversation was unexpectedly interrupted");
+        };
         assert_eq!(batch.len(), 2);
         assert!(coordinator.finish_if_idle(lease).await.unwrap());
         assert!(!coordinator.snapshot().await.active);
@@ -336,7 +383,11 @@ mod tests {
     async fn reserved_append_keeps_the_response_open_until_storage_finishes() {
         let coordinator = ConversationCoordinator::new();
         let lease = coordinator.start(message("one")).await.unwrap();
-        let batch = coordinator.settle_and_take(lease).await.unwrap();
+        let SettledConversation::Messages(batch) =
+            coordinator.settle_and_take(lease).await.unwrap()
+        else {
+            panic!("conversation was unexpectedly interrupted");
+        };
         assert_eq!(batch.len(), 1);
 
         let reservation = coordinator.reserve_append().await.unwrap();
@@ -346,9 +397,31 @@ mod tests {
             .await
             .unwrap();
 
-        let batch = coordinator.settle_and_take(lease).await.unwrap();
+        let SettledConversation::Messages(batch) =
+            coordinator.settle_and_take(lease).await.unwrap()
+        else {
+            panic!("conversation was unexpectedly interrupted");
+        };
         assert_eq!(batch[0].text, "two");
         assert!(coordinator.finish_if_idle(lease).await.unwrap());
+    }
+
+    #[tokio::test]
+    async fn interrupt_cancels_a_settling_conversation_and_notifies_turns() {
+        let coordinator = ConversationCoordinator::new();
+        let mut input_events = coordinator.subscribe_input();
+        let lease = coordinator.start(message("one")).await.unwrap();
+        input_events.changed().await.unwrap();
+
+        assert!(coordinator.interrupt().await);
+        input_events.changed().await.unwrap();
+        assert!(coordinator.is_interrupted(lease).await.unwrap());
+        assert!(matches!(
+            coordinator.settle_and_take(lease).await.unwrap(),
+            SettledConversation::Interrupted
+        ));
+        coordinator.abort(lease).await;
+        assert!(!coordinator.snapshot().await.active);
     }
 
     #[tokio::test]

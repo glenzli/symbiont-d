@@ -222,9 +222,13 @@ pub(super) fn memory_reconciliation_prompt(
         ReconciliationMode::Apply => format!(
             "Apply only the approved preview proposals below. Re-read every exact current Revision \
              before mutation and skip stale or unjustified proposals. Make at most six PCP \
-             mutations. Never delete or tombstone. A synthesized Page must use kind \
-             `memory_synthesis`, exact source provenance, and `summarizes` Relations. A \
-             classification revision must preserve payload, sources, provenance, and lifecycle.\n\n\
+             mutations. Never delete or tombstone. For an approved `consolidate`, call \
+             `pcp.consolidate_pages` once with one current Revision as the canonical Page, every \
+             current Revision it replaces, and a self-contained replacement payload. For an \
+             approved `synthesize`, create an aggregate Page only when its inputs should remain \
+             independently current; use kind `memory_synthesis`, exact source provenance, and \
+             `derived_from` Relations. A classification revision must preserve payload, sources, \
+             provenance, and lifecycle.\n\n\
              <approved-proposals>\n{}\n</approved-proposals>",
             serde_json::to_string_pretty(proposals).unwrap_or_else(|_| "[]".to_owned())
         ),
@@ -237,7 +241,10 @@ pub(super) fn memory_reconciliation_prompt(
          and are not evidence. Use semantic judgment, not numeric scoring or fixed thresholds.\n\n\
          {mode_instructions}\n\n\
          Propose or apply only consequential maintenance: classify an otherwise durable Page when \
-         its kind is clear; synthesize a recurring, future-useful subject not already represented; \
+         its kind is clear; consolidate two or more current Pages only when they redundantly \
+         represent one durable subject and one self-contained Page can replace all of them; \
+         synthesize a recurring, future-useful subject only when its inputs should remain \
+         independently retrievable; \
          add a Relation that materially improves navigation; assess validity only from contrary or \
          superseding evidence; replace a poor routing Summary only when it impairs retrieval. Do not \
          reorganize content merely because it exists, and do not modify profile, Current Map, Open \

@@ -19,6 +19,7 @@ import {
   Trash2,
   Undo2,
   Workflow,
+  X,
   createIcons,
 } from "lucide";
 
@@ -43,6 +44,7 @@ const icons = {
   Trash2,
   Undo2,
   Workflow,
+  X,
 };
 
 export function renderIcons(root = document) {

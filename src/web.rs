@@ -30,6 +30,7 @@ use crate::{
     continuity::{ContinuityHost, MAX_QUOTES_PER_MESSAGE, MessageLinks},
     conversation::{
         ConversationCoordinator, ConversationLease, ConversationSnapshot, QueuedUserMessage,
+        SettledConversation,
     },
     curiosity::{CuriositySnapshot, CuriosityStore},
     diagnostics::TraceEventKind,
@@ -303,6 +304,11 @@ struct MessageRetractionResponse {
     memory_chars: usize,
 }
 
+#[derive(Serialize)]
+struct ChatInterruptResponse {
+    accepted: bool,
+}
+
 #[derive(Deserialize)]
 struct OnboardingRequest {
     mode: CalibrationMode,
@@ -377,6 +383,7 @@ enum WireEvent {
         text: String,
     },
     Reset,
+    Interrupted,
     Complete {
         message: MemoryEntry,
         memory_chars: usize,
@@ -431,6 +438,7 @@ pub fn router(state: AppState) -> Router {
         .route("/api/bootstrap", get(bootstrap))
         .route("/api/chat", post(chat))
         .route("/api/chat/append", post(append_chat))
+        .route("/api/chat/interrupt", post(interrupt_chat))
         .route("/api/messages/{revision_id}", delete(retract_message))
         .route("/api/interaction/seen", post(record_seen))
         .route("/api/interaction/typing", post(record_typing))
@@ -1564,10 +1572,11 @@ async fn retract_message(
     State(state): State<AppState>,
     AxumPath(revision_id): AxumPath<String>,
 ) -> Result<Json<MessageRetractionResponse>, ApiError> {
+    state.conversation.interrupt().await;
     state.continuations.cancel_all().await;
     let result = state
         .continuity
-        .retract_latest_user_message(&revision_id)
+        .retract_user_message_and_after(&revision_id)
         .await
         .map_err(ApiError::conflict)?;
     state
@@ -1593,6 +1602,16 @@ async fn retract_message(
         restored_page_count: result.restored_page_ids.len(),
         memory_chars,
     }))
+}
+
+async fn interrupt_chat(
+    State(state): State<AppState>,
+) -> Result<Json<ChatInterruptResponse>, ApiError> {
+    let accepted = state.conversation.interrupt().await;
+    if accepted {
+        state.continuations.cancel_all().await;
+    }
+    Ok(Json(ChatInterruptResponse { accepted }))
 }
 
 async fn chat(State(state): State<AppState>, multipart: Multipart) -> Result<Response, ApiError> {
@@ -1913,7 +1932,19 @@ async fn run_chat(
     let mut first_batch = true;
     let mut input_events = state.conversation.subscribe_input();
     let (outcome, last_user_revision_id, response_input_epoch) = loop {
-        let batch = state.conversation.settle_and_take(lease).await?;
+        let batch = match state.conversation.settle_and_take(lease).await? {
+            SettledConversation::Messages(batch) => batch,
+            SettledConversation::Interrupted => {
+                return finish_interrupted_chat(
+                    &state,
+                    lease,
+                    runtime_tx,
+                    runtime_forwarder,
+                    wire_tx,
+                )
+                .await;
+            }
+        };
         input_events.borrow_and_update();
         let current = batch
             .last()
@@ -1979,10 +2010,50 @@ async fn run_chat(
                     .bridge
                     .finish_interactive_turn(&current_revision_id)
                     .await;
+                if state
+                    .conversation
+                    .is_interrupted(lease)
+                    .await
+                    .unwrap_or(false)
+                {
+                    return finish_interrupted_chat(
+                        &state,
+                        lease,
+                        runtime_tx,
+                        runtime_forwarder,
+                        wire_tx,
+                    )
+                    .await;
+                }
                 state.continuations.cancel_all().await;
                 return Err(error);
             }
         };
+        if state.conversation.is_interrupted(lease).await? {
+            state
+                .reflection
+                .store()
+                .cancel_follow_ups(&outcome.scheduled_follow_up_ids, "interrupted_by_user")
+                .await?;
+            state
+                .continuations
+                .cancel(&outcome.reserved_continuation_ids)
+                .await;
+            state
+                .exploration
+                .supersede_intents(&outcome.requested_exploration_ids, "interrupted_by_user")
+                .await?;
+            for invocation in &mut outcome.invocations {
+                invocation.produced_message = false;
+            }
+            state.usage.record_all(&outcome.invocations).await?;
+            state
+                .bridge
+                .finish_interactive_turn(&current_revision_id)
+                .await;
+            return finish_interrupted_chat(&state, lease, runtime_tx, runtime_forwarder, wire_tx)
+                .await;
+        }
         if outcome.interrupted
             || state.conversation.has_pending(lease).await?
             || !state.conversation.finish_if_idle(lease).await?
@@ -2101,6 +2172,21 @@ async fn run_chat(
             compute_policies: state.compute_policies.snapshot().await,
         })
         .await;
+    Ok(())
+}
+
+async fn finish_interrupted_chat(
+    state: &AppState,
+    lease: ConversationLease,
+    runtime_tx: mpsc::Sender<RuntimeEvent>,
+    runtime_forwarder: JoinHandle<()>,
+    wire_tx: mpsc::Sender<WireEvent>,
+) -> anyhow::Result<()> {
+    state.continuations.cancel_all().await;
+    state.conversation.abort(lease).await;
+    drop(runtime_tx);
+    runtime_forwarder.await?;
+    let _ = wire_tx.send(WireEvent::Interrupted).await;
     Ok(())
 }
 

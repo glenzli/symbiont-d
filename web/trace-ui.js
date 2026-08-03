@@ -299,7 +299,14 @@ function deduplicatedFromSequence(step) {
 function isPcpWrite(step) {
   return (
     step.namespace === "pcp" &&
-    ["assess_validity", "write_summary", "write_page", "revise_page", "link_pages"].includes(step.tool)
+    [
+      "assess_validity",
+      "write_summary",
+      "write_page",
+      "supersede_page",
+      "consolidate_pages",
+      "relate_pages",
+    ].includes(step.tool)
   );
 }
 

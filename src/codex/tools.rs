@@ -615,7 +615,7 @@ impl SymbiontTools {
                                         "properties": {
                                             "action": {
                                                 "type": "string",
-                                                "enum": ["classify", "synthesize", "link", "assess_validity", "resummarize"]
+                                                "enum": ["classify", "consolidate", "synthesize", "link", "assess_validity", "resummarize"]
                                             },
                                             "subject": {"type": "string"},
                                             "reason": {"type": "string"},
@@ -930,6 +930,33 @@ impl SymbiontTools {
                                 }
                             },
                             "required": ["target_page_id", "content"],
+                            "additionalProperties": false
+                        }
+                    },
+                    {
+                        "type": "function",
+                        "name": "consolidate_pages",
+                        "description": "During an approved durable-memory reconciliation apply only, replace two or more current Pages that express one subject with one self-contained canonical Page. Inputs remain traceable but leave default recall.",
+                        "inputSchema": {
+                            "type": "object",
+                            "properties": {
+                                "canonical_page_id": {
+                                    "type": "string",
+                                    "description": "One exact current Page whose Ref and durable identity should continue."
+                                },
+                                "replaced_page_ids": {
+                                    "type": "array",
+                                    "items": {"type": "string"},
+                                    "minItems": 2,
+                                    "maxItems": 20,
+                                    "description": "All exact current Pages replaced by the new synthesis, including the canonical Page."
+                                },
+                                "content": {
+                                    "type": "string",
+                                    "description": "Self-contained durable content preserving distinctions, uncertainty, decisions, and current state; not a routing Summary."
+                                }
+                            },
+                            "required": ["canonical_page_id", "replaced_page_ids", "content"],
                             "additionalProperties": false
                         }
                     },
@@ -1628,10 +1655,16 @@ impl SymbiontTools {
                     | "write_summary"
                     | "write_page"
                     | "supersede_page"
+                    | "consolidate_pages"
                     | "relate_pages"
             )
         {
             anyhow::bail!("this model stage is host-enforced read-only");
+        }
+        if tool == "consolidate_pages" && run_origin != "reconciliation_apply" {
+            anyhow::bail!(
+                "Page consolidation is available only to an approved reconciliation apply run"
+            );
         }
         let result = match tool {
             "describe" => json!({
@@ -1781,6 +1814,22 @@ impl SymbiontTools {
                 json!({
                     "pageId": revised.revision_id,
                     "created": revised.created,
+                })
+            }
+            "consolidate_pages" => {
+                let consolidated = self
+                    .continuity
+                    .consolidate_model_pages(
+                        required_text(arguments, "canonical_page_id")?.to_owned(),
+                        string_array(arguments, "replaced_page_ids")?,
+                        required_text(arguments, "content")?.to_owned(),
+                        tool_or_model.map(str::to_owned),
+                    )
+                    .await?;
+                json!({
+                    "refId": consolidated.page_id,
+                    "pageId": consolidated.revision_id,
+                    "created": consolidated.created,
                 })
             }
             "relate_pages" => {

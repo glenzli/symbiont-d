@@ -185,7 +185,7 @@
             type="button"
             title="清除当前任务关系"
             aria-label="清除当前任务关系"
-          >×</button>
+          ><i data-lucide="x" aria-hidden="true"></i></button>
         </div>
         <div class="composer-row">
           <label class="sr-only" for="message">消息</label>
@@ -246,6 +246,15 @@
                 aria-label="发送"
                 data-tooltip="发送"
               ><i data-lucide="send-horizontal" aria-hidden="true"></i></button>
+              <button
+                id="stop-response"
+                class="composer-send-button composer-stop-button"
+                type="button"
+                title="停止回复"
+                aria-label="停止回复"
+                data-tooltip="停止回复"
+                hidden
+              >■</button>
             </div>
           </div>
         </div>

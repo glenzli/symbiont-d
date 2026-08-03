@@ -14,11 +14,11 @@ use pcp_client::EmbeddedPcpClient;
 use pcp_client::{DurablePageInventoryItem, PcpApi};
 use pcp_core::{
     AccessPrincipal, AccessPrincipalType, AccessSession, Actor, ActorType,
-    AssessPageValidityRequest, CreateScopeRequest, InitialRelation, LifecycleStatus,
-    LinkPagesRequest, PagePayload, Projection, ProvenanceEvent, ReadPage, ReadPagesRequest,
-    Relation, RevisePageRequest, Scope, SearchFilters, SearchMode, SearchPagesRequest,
-    SearchResult, SourceRef, ValidityStanding, WritePageRequest, WriteResult, WriteSummaryRequest,
-    WriteSummaryResult, WriteValidityResult,
+    AssessPageValidityRequest, ConsolidatePagesRequest, CreateScopeRequest, InitialRelation,
+    LifecycleStatus, LinkPagesRequest, PagePayload, Projection, ProvenanceEvent, ReadPage,
+    ReadPagesRequest, Relation, RevisePageRequest, Scope, SearchFilters, SearchMode,
+    SearchPagesRequest, SearchResult, SourceRef, ValidityStanding, WritePageRequest, WriteResult,
+    WriteSummaryRequest, WriteSummaryResult, WriteValidityResult,
 };
 #[cfg(test)]
 use pcp_store::PcpStore;
@@ -982,33 +982,40 @@ impl ContinuityHost {
         Ok(entries)
     }
 
-    pub async fn retract_latest_user_message(
+    pub async fn retract_user_message_and_after(
         &self,
         revision_id: &str,
     ) -> Result<MessageRetractionResult> {
         let messages = self.recent_messages(500).await?;
-        let target = messages
+        let target_index = messages
             .iter()
-            .find(|entry| entry.revision_id.as_deref() == Some(revision_id))
+            .position(|entry| entry.revision_id.as_deref() == Some(revision_id))
             .context("message is not an active conversation event")?;
-        if target.role != MemoryRole::User {
+        if messages[target_index].role != MemoryRole::User {
             anyhow::bail!("only user messages can be retracted");
         }
-        let latest_user_revision = messages
-            .iter()
-            .rev()
-            .find(|entry| entry.role == MemoryRole::User)
-            .and_then(|entry| entry.revision_id.as_deref());
-        if latest_user_revision != Some(revision_id) {
-            anyhow::bail!("only the latest user message can be retracted");
-        }
 
-        let cascade = self
-            .store
-            .tombstone_derivation_cascade(revision_id.to_owned(), system_actor())
-            .await?;
+        let suffix_revisions = messages[target_index..]
+            .iter()
+            .filter_map(|entry| entry.revision_id.clone())
+            .collect::<Vec<_>>();
+        let mut retracted_revision_ids = Vec::new();
+        let mut restored_page_ids = Vec::new();
+        for root_revision_id in suffix_revisions.iter().rev() {
+            let cascade = self
+                .store
+                .tombstone_derivation_cascade(root_revision_id.clone(), system_actor())
+                .await?;
+            retracted_revision_ids.extend(cascade.retracted_revision_ids);
+            restored_page_ids.extend(cascade.restored_page_ids);
+        }
+        retracted_revision_ids.sort();
+        retracted_revision_ids.dedup();
+        restored_page_ids.sort();
+        restored_page_ids.dedup();
+
         let mut message_revision_ids = Vec::new();
-        for chunk in cascade.retracted_revision_ids.chunks(20) {
+        for chunk in retracted_revision_ids.chunks(20) {
             let pages = self
                 .read(ReadPagesRequest {
                     revision_ids: chunk.to_vec(),
@@ -1027,10 +1034,12 @@ impl ContinuityHost {
                 .then_some(page.revision.revision_id)
             }));
         }
+        message_revision_ids.sort();
+        message_revision_ids.dedup();
         Ok(MessageRetractionResult {
-            retracted_revision_ids: cascade.retracted_revision_ids,
+            retracted_revision_ids,
             message_revision_ids,
-            restored_page_ids: cascade.restored_page_ids,
+            restored_page_ids,
         })
     }
 
@@ -1292,6 +1301,81 @@ impl ContinuityHost {
             None,
         )
         .await
+    }
+
+    pub async fn consolidate_model_pages(
+        &self,
+        canonical_revision_id: String,
+        mut replaced_revision_ids: Vec<String>,
+        content: String,
+        tool_or_model: Option<String>,
+    ) -> Result<WriteResult> {
+        if content.trim().is_empty() || content.chars().count() > MAX_MODEL_WRITE_CHARS {
+            anyhow::bail!(
+                "consolidated Page content must contain 1-{MAX_MODEL_WRITE_CHARS} characters"
+            );
+        }
+        replaced_revision_ids.push(canonical_revision_id.clone());
+        replaced_revision_ids.sort();
+        replaced_revision_ids.dedup();
+        if replaced_revision_ids.len() < 2 {
+            anyhow::bail!("consolidation requires at least two distinct current Pages");
+        }
+        let canonical = self
+            .store
+            .read_pages(ReadPagesRequest {
+                revision_ids: vec![canonical_revision_id.clone()],
+                projections: vec![
+                    Projection::Manifest,
+                    Projection::Sources,
+                    Projection::Facets,
+                ],
+                max_chars: 8_000,
+            })
+            .await?
+            .into_iter()
+            .next()
+            .context("canonical consolidation Page is not available")?;
+        let actor = model_actor();
+        let timestamp = now();
+        let mut facets = canonical.revision.facets.unwrap_or_else(|| json!({}));
+        if let Some(object) = facets.as_object_mut() {
+            object
+                .entry("kind")
+                .or_insert_with(|| Value::String("memory_synthesis".to_owned()));
+        }
+        let mut digest = Sha256::new();
+        for revision_id in &replaced_revision_ids {
+            digest.update(revision_id.as_bytes());
+            digest.update([0]);
+        }
+        digest.update(content.trim().as_bytes());
+        let idempotency_key = format!("model-consolidation:{:x}", digest.finalize());
+        self.store
+            .consolidate_pages(ConsolidatePagesRequest {
+                canonical_revision_id,
+                replaced_revision_ids: replaced_revision_ids.clone(),
+                created_by: actor.clone(),
+                lifecycle_status: LifecycleStatus::Active,
+                observed_at: Some(timestamp.clone()),
+                valid_from: None,
+                valid_to: None,
+                payload: Some(PagePayload {
+                    media_type: "text/markdown".to_owned(),
+                    content: content.trim().to_owned(),
+                }),
+                source_refs: canonical.revision.source_refs,
+                facets: Some(facets),
+                provenance: vec![ProvenanceEvent {
+                    operation: "consolidate".to_owned(),
+                    actor,
+                    timestamp,
+                    input_revision_ids: replaced_revision_ids,
+                    tool_or_model: Some(tool_or_model.unwrap_or_else(|| "Codex".to_owned())),
+                }],
+                idempotency_key: Some(idempotency_key),
+            })
+            .await
     }
 
     #[allow(clippy::too_many_arguments)]

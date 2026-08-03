@@ -253,6 +253,7 @@ function runtimeText(runtime) {
 function proposalKind(kind) {
   return {
     classify: "补充分类",
+    consolidate: "收敛重复页",
     synthesize: "形成综合页",
     link: "建立关系",
     assess_validity: "检查有效性",

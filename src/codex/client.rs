@@ -2253,6 +2253,7 @@ fn activity_label(item: Option<&Value>) -> Option<String> {
                     "write_summary" => "正在建立上下文索引",
                     "write_page" => "正在整理长期上下文",
                     "supersede_page" => "正在更新长期上下文",
+                    "consolidate_pages" => "正在收敛重复上下文",
                     "relate_pages" => "正在建立上下文关系",
                     "complete_orientation" => "正在整理初始画像",
                     "revise_orientation" => "正在修订长期画像",
@@ -2476,6 +2477,7 @@ fn reconciliation_actions(invocations: &[InvocationRecord]) -> Vec<Reconciliatio
                         | "write_summary"
                         | "write_page"
                         | "supersede_page"
+                        | "consolidate_pages"
                         | "relate_pages"
                 )
         })

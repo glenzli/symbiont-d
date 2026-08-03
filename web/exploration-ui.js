@@ -197,6 +197,22 @@ function renderRun(run) {
   header.append(identity, trace);
   article.append(header);
 
+  if (run.focus) {
+    const focus = document.createElement("section");
+    focus.className = "exploration-focus";
+    const label = document.createElement("strong");
+    const title = document.createElement("p");
+    label.textContent = "这次看了什么";
+    title.textContent = run.focus.title;
+    focus.append(label, title);
+    if (run.focus.detail) {
+      const detail = document.createElement("p");
+      detail.textContent = run.focus.detail;
+      focus.append(detail);
+    }
+    article.append(focus);
+  }
+
   if (run.message) {
     const message = document.createElement("div");
     message.className = "exploration-result rich-text";

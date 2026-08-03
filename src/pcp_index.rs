@@ -18,7 +18,6 @@ use crate::{
 };
 
 const EPISODE_LIMIT: usize = 1_000;
-const EPISODE_MESSAGE_LIMIT: usize = 200;
 
 #[derive(Clone, Debug, Default, Serialize)]
 #[serde(rename_all = "snake_case")]
@@ -97,17 +96,13 @@ impl PcpIndex {
         };
 
         for episode in episodes {
-            let message_revision_ids = self
-                .reflection
-                .episode_revision_ids(&episode.id, EPISODE_MESSAGE_LIMIT)
-                .await?;
             let parent_revision_ids = episode
                 .parent_episode_ids
                 .iter()
                 .filter_map(|id| indexed_revisions.get(id).cloned())
                 .collect::<Vec<_>>();
             let outcome = self
-                .sync_episode(&episode, &message_revision_ids, &parent_revision_ids)
+                .sync_episode(&episode, &parent_revision_ids)
                 .await
                 .with_context(|| format!("sync PCP Topic Episode {}", episode.id))?;
             indexed_revisions.insert(episode.id.clone(), outcome.page.revision_id.clone());
@@ -123,11 +118,10 @@ impl PcpIndex {
     async fn sync_episode(
         &self,
         episode: &ConversationEpisode,
-        message_revision_ids: &[String],
         parent_revision_ids: &[String],
     ) -> Result<SyncOutcome> {
         let stable_key = format!("reflection.episode.{}", episode.id);
-        let digest = episode_digest(episode, message_revision_ids, parent_revision_ids)?;
+        let digest = episode_digest(episode)?;
         let content = format!("# {}\n\n{}", episode.title.trim(), episode.summary.trim());
         let facets = json!({
             "kind": "conversation_episode",
@@ -137,26 +131,22 @@ impl PcpIndex {
             "title": episode.title,
             "state": episode.state.as_str(),
             "startedAt": episode.started_at,
-            "lastActivityAt": episode.last_activity_at,
-            "sourceRevisionCount": episode.source_revision_ids.len(),
-            "messageRevisionCount": message_revision_ids.len(),
-            "parentEpisodeCount": parent_revision_ids.len(),
             "sourceDigest": digest,
         });
-        let mut aggregate_targets = message_revision_ids.to_vec();
-        aggregate_targets.extend_from_slice(parent_revision_ids);
-        aggregate_targets.sort();
-        aggregate_targets.dedup();
+        let aggregate_targets = sorted(parent_revision_ids.to_vec());
         let mut source_revision_ids = episode.source_revision_ids.clone();
         source_revision_ids.sort();
         source_revision_ids.dedup();
         let relations = episode_relations(&aggregate_targets, &source_revision_ids);
         let actor = index_actor();
+        let mut provenance_inputs = aggregate_targets.clone();
+        provenance_inputs.extend(source_revision_ids.iter().cloned());
+        provenance_inputs = sorted(provenance_inputs);
         let provenance = vec![ProvenanceEvent {
             operation: "derive".to_owned(),
             actor: actor.clone(),
             timestamp: now(),
-            input_revision_ids: aggregate_targets,
+            input_revision_ids: provenance_inputs,
             tool_or_model: Some("symbiont Reflection index".to_owned()),
         }];
         let source_refs = vec![SourceRef {
@@ -321,18 +311,13 @@ fn dependency_order(mut episodes: Vec<ConversationEpisode>) -> Vec<ConversationE
     ordered
 }
 
-fn episode_digest(
-    episode: &ConversationEpisode,
-    message_revision_ids: &[String],
-    parent_revision_ids: &[String],
-) -> Result<String> {
+fn episode_digest(episode: &ConversationEpisode) -> Result<String> {
     let value = json!({
         "title": episode.title,
         "summary": episode.summary,
         "state": episode.state.as_str(),
         "sources": sorted(episode.source_revision_ids.clone()),
-        "messages": sorted(message_revision_ids.to_vec()),
-        "parents": sorted(parent_revision_ids.to_vec()),
+        "parents": sorted(episode.parent_episode_ids.clone()),
     });
     let encoded = serde_json::to_vec(&value).context("encode Topic Episode index digest")?;
     Ok(format!("{:x}", Sha256::digest(encoded)))
@@ -450,6 +435,28 @@ mod tests {
         assert_eq!(first.created_pages, 1);
         let second = index.sync_all().await.expect("sync index again");
         assert_eq!(second.unchanged_pages, 1);
+        let followup = continuity
+            .ingest_message(
+                MemoryRole::User,
+                "A later message belongs to the topic without changing its semantic index.",
+                Vec::new(),
+                None,
+                MessageLinks::default(),
+            )
+            .await
+            .expect("write follow-up message");
+        index
+            .reflection
+            .record_message(&followup.entry, None, false, &[])
+            .await
+            .expect("record follow-up Reflection message");
+        index
+            .reflection
+            .attach_episode_messages(&episode.id, &[followup.page.revision_id])
+            .await
+            .expect("attach follow-up to Episode");
+        let membership_only = index.sync_all().await.expect("sync membership-only change");
+        assert_eq!(membership_only.unchanged_pages, 1);
         index
             .reflection
             .upsert_episode(EpisodeInput {
@@ -490,9 +497,15 @@ mod tests {
             .expect("read Episode relations")
             .remove(0);
         assert!(page.relations.iter().any(|relation| {
-            relation.relation_type == "aggregates"
+            relation.relation_type == "derived_from"
                 && relation.to_revision_id == user.page.revision_id
         }));
+        assert!(
+            !page
+                .relations
+                .iter()
+                .any(|relation| relation.relation_type == "aggregates")
+        );
 
         let _ = tokio::fs::remove_dir_all(root).await;
     }

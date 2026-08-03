@@ -1229,6 +1229,16 @@ html[data-native-shell="macos"] .topbar {
   background: var(--surface-subtle);
 }
 
+.composer .composer-stop-button {
+  color: var(--danger-text);
+  background: color-mix(in srgb, var(--danger-text) 12%, transparent);
+}
+
+.composer .composer-stop-button:hover:not(:disabled) {
+  color: var(--danger-text);
+  background: color-mix(in srgb, var(--danger-text) 20%, transparent);
+}
+
 .attachment-tray {
   min-height: 64px;
   margin-bottom: 8px;
@@ -1393,9 +1403,22 @@ html[data-native-shell="macos"] .topbar {
 
 .composer .task-target-tray .task-target-clear {
   width: 24px;
+  min-width: 24px;
   padding: 0;
-  font-size: 14px;
-  font-weight: 400;
+  margin: 0;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  line-height: 0;
+  appearance: none;
+  -webkit-appearance: none;
+}
+
+.composer .task-target-tray .task-target-clear svg {
+  width: 13px;
+  height: 13px;
+  display: block;
+  transform: translateY(-1px);
 }
 
 .attachment-preview {
@@ -2348,6 +2371,37 @@ html[data-native-shell="macos"] .topbar {
   margin: 8px 0 0;
   color: var(--text-soft);
   font-size: 10px;
+}
+
+.exploration-focus {
+  margin-top: 8px;
+  padding: 8px 10px;
+  border-left: 2px solid var(--border-strong);
+  background: var(--surface-subtle);
+}
+
+.exploration-focus strong,
+.exploration-focus p {
+  margin: 0;
+}
+
+.exploration-focus strong {
+  display: block;
+  margin-bottom: 3px;
+  color: var(--text-faint);
+  font-size: 9px;
+  font-weight: 650;
+}
+
+.exploration-focus p {
+  font-size: 10px;
+  overflow-wrap: anywhere;
+}
+
+.exploration-focus p + p {
+  margin-top: 3px;
+  color: var(--text-soft);
+  font-size: 9px;
 }
 
 .exploration-process {

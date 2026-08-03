@@ -2,10 +2,10 @@ import { renderIcons } from "/icons.js";
 
 const ACTIONS = {
   copy: { icon: "copy", label: "复制文本" },
-  delete: { icon: "trash-2", label: "删除失败消息", destructive: true },
-  edit: { icon: "pencil", label: "撤回后编辑" },
+  delete: { icon: "trash-2", label: "删除本条及后续对话", destructive: true },
+  edit: { icon: "pencil", label: "从此处编辑并重开对话" },
   quote: { icon: "quote", label: "引用此消息" },
-  recall: { icon: "undo-2", label: "撤回本条消息及后续回应", destructive: true },
+  recall: { icon: "undo-2", label: "撤回本条及后续对话", destructive: true },
   retry: { icon: "rotate-cw", label: "重新发送" },
 };
 
@@ -68,16 +68,12 @@ export function initMessageActions({ conversation, isBusy, perform }) {
   }
 
   function refresh() {
-    const userMessages = [
-      ...conversation.querySelectorAll('.message[data-role="user"]'),
-    ];
-    const latest = userMessages.at(-1);
     for (const message of conversation.querySelectorAll(".message")) {
-      render(message, message === latest);
+      render(message);
     }
   }
 
-  function render(message, isLatest) {
+  function render(message) {
     const foot = message.querySelector(".message-foot");
     const stateLabel = foot.querySelector(".message-state");
     const actions = foot.querySelector(".message-actions");
@@ -85,7 +81,13 @@ export function initMessageActions({ conversation, isBusy, perform }) {
     const entry = entries.get(message);
     const actionBusy = message.dataset.actionBusy === "true";
     stateLabel.textContent =
-      state === "pending" ? "等待回复" : state === "failed" ? "回复中断" : "";
+      state === "pending"
+        ? "等待回复"
+        : state === "failed"
+          ? "回复中断"
+          : state === "stopped"
+            ? "已停止"
+            : "";
     stateLabel.title = failures.get(message) || "";
     message.classList.toggle("message-failed", state === "failed");
     actions.replaceChildren();
@@ -98,11 +100,10 @@ export function initMessageActions({ conversation, isBusy, perform }) {
     }
     if (
       message.dataset.role === "user" &&
-      isLatest &&
       !isBusy() &&
       !actionBusy
     ) {
-      if (state === "failed") {
+      if (state === "failed" || state === "stopped") {
         actions.append(actionButton("retry"), actionButton("delete"));
       } else if (state === "delivered") {
         actions.append(actionButton("edit"), actionButton("recall"));

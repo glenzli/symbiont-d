@@ -307,17 +307,33 @@ async fn groups_recent_autonomous_runs_into_exploration_cycles() {
                 &child_started,
                 120,
                 false,
-                vec![ToolTraceStep {
-                    sequence: 0,
-                    namespace: "pcp".to_owned(),
-                    tool: "read_pages".to_owned(),
-                    started_at: root_started.clone(),
-                    completed_at: child_started.clone(),
-                    duration_ms: 1_000,
-                    succeeded: true,
-                    arguments: json!({"revisionIds": ["context"]}),
-                    result: json!({"success": true}),
-                }],
+                vec![
+                    ToolTraceStep {
+                        sequence: 0,
+                        namespace: "pcp".to_owned(),
+                        tool: "read_pages".to_owned(),
+                        started_at: root_started.clone(),
+                        completed_at: child_started.clone(),
+                        duration_ms: 1_000,
+                        succeeded: true,
+                        arguments: json!({"revisionIds": ["context"]}),
+                        result: json!({"success": true}),
+                    },
+                    ToolTraceStep {
+                        sequence: 1,
+                        namespace: "symbiont".to_owned(),
+                        tool: "submit_exploration_finding".to_owned(),
+                        started_at: root_started.clone(),
+                        completed_at: child_started.clone(),
+                        duration_ms: 1_000,
+                        succeeded: true,
+                        arguments: json!({
+                            "topic": "Agent runtime durability",
+                            "claim": "Recovery semantics matter more than static recall.",
+                        }),
+                        result: json!({"success": true}),
+                    },
+                ],
                 vec![
                     ExecutionTraceEvent {
                         sequence: 0,
@@ -381,6 +397,14 @@ async fn groups_recent_autonomous_runs_into_exploration_cycles() {
     assert_eq!(runs[0].pcp_recall_calls, 1);
     assert_eq!(runs[0].web_searches, 1);
     assert_eq!(runs[0].search_queries, vec!["current signal"]);
+    assert_eq!(
+        runs[0].focus.as_ref().unwrap().title,
+        "Agent runtime durability"
+    );
+    assert_eq!(
+        runs[0].focus.as_ref().unwrap().detail.as_deref(),
+        Some("Recovery semantics matter more than static recall.")
+    );
     assert!(runs[0].surfaced);
     assert_eq!(
         runs[0].message.as_deref(),

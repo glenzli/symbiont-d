@@ -18,6 +18,7 @@ pub struct ExplorationRunSummary {
     pub surfaced: bool,
     pub outreach_kind: Option<OutreachKind>,
     pub message: Option<String>,
+    pub focus: Option<ExplorationFocusSummary>,
     pub total_tokens: u64,
     pub model_runs: Vec<ExplorationModelRun>,
     pub reasoning_summaries: Vec<String>,
@@ -26,6 +27,13 @@ pub struct ExplorationRunSummary {
     pub pcp_recall_calls: u64,
     pub pcp_write_calls: u64,
     pub details_retained: bool,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ExplorationFocusSummary {
+    pub title: String,
+    pub detail: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -76,6 +84,7 @@ fn summarize(bundle: TraceBundle) -> ExplorationRunSummary {
     let mut reasoning_summaries = Vec::new();
     let mut search_queries = Vec::new();
     let mut web_searches = 0_u64;
+    let mut finding_focus = None;
 
     for run in &bundle.runs {
         for step in &run.steps {
@@ -89,6 +98,19 @@ fn summarize(bundle: TraceBundle) -> ExplorationRunSummary {
                     .map(str::trim)
                     .filter(|text| !text.is_empty())
                     .map(str::to_owned);
+            }
+            if step.succeeded
+                && step.namespace == "symbiont"
+                && step.tool == "submit_exploration_finding"
+            {
+                let title = compact_argument(&step.arguments, "topic", 180);
+                let detail = compact_argument(&step.arguments, "claim", 360);
+                if let Some(title) = title {
+                    finding_focus = Some(ExplorationFocusSummary {
+                        detail: detail.filter(|detail| detail != &title),
+                        title,
+                    });
+                }
             }
         }
         for event in &run.events {
@@ -167,6 +189,7 @@ fn summarize(bundle: TraceBundle) -> ExplorationRunSummary {
 
     reasoning_summaries.truncate(24);
     search_queries.truncate(12);
+    let focus = finding_focus.or_else(|| fallback_focus(&search_queries, &reasoning_summaries));
     ExplorationRunSummary {
         trace_id: bundle.trace_id,
         started_at,
@@ -176,6 +199,7 @@ fn summarize(bundle: TraceBundle) -> ExplorationRunSummary {
         surfaced,
         outreach_kind: surfaced.then_some(outreach_kind).flatten(),
         message: surfaced.then_some(message).flatten(),
+        focus,
         total_tokens,
         model_runs,
         reasoning_summaries,
@@ -185,4 +209,56 @@ fn summarize(bundle: TraceBundle) -> ExplorationRunSummary {
         pcp_write_calls: bundle.pcp_write_calls,
         details_retained: bundle.details_retained,
     }
+}
+
+fn fallback_focus(
+    search_queries: &[String],
+    reasoning_summaries: &[String],
+) -> Option<ExplorationFocusSummary> {
+    if let Some(title) = search_queries.first() {
+        let detail = search_queries
+            .iter()
+            .skip(1)
+            .take(2)
+            .map(|query| compact_text(query, 180))
+            .collect::<Vec<_>>()
+            .join("；");
+        return Some(ExplorationFocusSummary {
+            title: compact_text(title, 220),
+            detail: (!detail.is_empty()).then_some(detail),
+        });
+    }
+    reasoning_summaries
+        .iter()
+        .map(|summary| compact_text(summary, 360))
+        .find(|summary| !summary.is_empty())
+        .map(|title| ExplorationFocusSummary {
+            title,
+            detail: None,
+        })
+}
+
+fn compact_argument(
+    arguments: &serde_json::Value,
+    field: &str,
+    max_chars: usize,
+) -> Option<String> {
+    arguments
+        .get(field)
+        .and_then(serde_json::Value::as_str)
+        .map(|value| compact_text(value, max_chars))
+        .filter(|value| !value.is_empty())
+}
+
+fn compact_text(value: &str, max_chars: usize) -> String {
+    let normalized = value.split_whitespace().collect::<Vec<_>>().join(" ");
+    if normalized.chars().count() <= max_chars {
+        return normalized;
+    }
+    let mut compact = normalized
+        .chars()
+        .take(max_chars.saturating_sub(1))
+        .collect::<String>();
+    compact.push('…');
+    compact
 }

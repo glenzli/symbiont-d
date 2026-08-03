@@ -52,6 +52,7 @@ const composer = document.querySelector("#composer");
 const input = document.querySelector("#message");
 const computeMode = document.querySelector("#compute-mode");
 const sendButton = document.querySelector("#send");
+const stopResponseButton = document.querySelector("#stop-response");
 const addImageButton = document.querySelector("#add-image");
 const imageInput = document.querySelector("#image-input");
 const attachmentTray = document.querySelector("#attachment-tray");
@@ -69,6 +70,7 @@ let activeOutgoing = [];
 let activePending = null;
 let typingSignalTimer = null;
 let composerNoticeTimer = null;
+let stoppingResponse = false;
 
 const MAX_IMAGES = 4;
 const MAX_IMAGE_BYTES = 15 * 1024 * 1024;
@@ -204,8 +206,12 @@ function resizeComposer() {
 function setBusy(nextBusy) {
   busy = nextBusy;
   composer.classList.toggle("response-active", nextBusy);
+  sendButton.hidden = nextBusy;
+  stopResponseButton.hidden = !nextBusy;
   messageActions.refresh();
   if (!nextBusy) {
+    stoppingResponse = false;
+    stopResponseButton.disabled = false;
     renderRuntimeStatus();
     clearInterval(activityTimer);
     activityTimer = null;
@@ -382,6 +388,7 @@ async function consumeStream(response, pending, outgoing) {
   let buffer = "";
   let receivedText = "";
   let completed = false;
+  let interrupted = false;
 
   while (true) {
     const { value, done } = await reader.read();
@@ -412,6 +419,8 @@ async function consumeStream(response, pending, outgoing) {
         pending.classList.remove("streaming");
         pending.querySelector(".message-body").textContent = "";
         connectionStatus.textContent = "正在回应";
+      } else if (event.type === "interrupted") {
+        interrupted = true;
       } else if (event.type === "complete") {
         completed = true;
         for (const message of activeOutgoing) {
@@ -435,7 +444,8 @@ async function consumeStream(response, pending, outgoing) {
     }
     if (done) break;
   }
-  if (!completed) throw new Error("回复在完成前中断。");
+  if (!completed && !interrupted) throw new Error("回复在完成前中断。");
+  return { interrupted };
 }
 
 async function sendMessage(
@@ -475,7 +485,14 @@ async function sendMessage(
       method: "POST",
       body: chatBody(text, images, minimumLane, quotes, topic),
     });
-    await consumeStream(response, pending, outgoing);
+    const result = await consumeStream(response, pending, outgoing);
+    if (result.interrupted) {
+      pending.remove();
+      for (const message of activeOutgoing) {
+        messageActions.update(message, null, { deliveryState: "stopped" });
+      }
+      notifyComposer("已停止回复");
+    }
   } catch (error) {
     pending.remove();
     for (const message of activeOutgoing) {
@@ -738,6 +755,10 @@ function extractTopic(entry) {
 
 composer.addEventListener("submit", (event) => {
   event.preventDefault();
+  if (stoppingResponse) {
+    notifyComposer("正在停止上一条回复");
+    return;
+  }
   const text = input.value.trim();
   const images = selectedImages;
   const quotes = quoteUi.drafts();
@@ -767,19 +788,40 @@ input.addEventListener("keydown", (event) => {
 });
 
 addImageButton.addEventListener("click", () => imageInput.click());
+stopResponseButton.addEventListener("click", () => {
+  stopActiveResponse();
+});
 imageInput.addEventListener("change", () => {
   addImages([...imageInput.files]);
   imageInput.value = "";
 });
-input.addEventListener("paste", (event) => {
-  const images = [...event.clipboardData.items]
-    .filter((item) => item.kind === "file" && item.type.startsWith("image/"))
-    .map((item) => item.getAsFile())
-    .filter(Boolean);
-  if (images.length) {
-    event.preventDefault();
-    addImages(images);
+
+async function stopActiveResponse() {
+  if (!busy || stoppingResponse) return;
+  stoppingResponse = true;
+  stopResponseButton.disabled = true;
+  composerState.textContent = "正在停止回复";
+  try {
+    const response = await fetch("/api/chat/interrupt", { method: "POST" });
+    const payload = await response.json();
+    if (!response.ok) throw new Error(payload.error || "无法停止回复");
+    if (!payload.accepted) {
+      notifyComposer("回复已结束");
+    }
+  } catch (error) {
+    stoppingResponse = false;
+    stopResponseButton.disabled = false;
+    composerState.textContent = error.message;
   }
+}
+composer.addEventListener("paste", (event) => {
+  const images = clipboardImages(event.clipboardData);
+  const mayContainFiles = Array.from(event.clipboardData?.types || []).includes("Files");
+  if (!images.length && !mayContainFiles) return;
+  event.preventDefault();
+  addPastedImages(images, mayContainFiles).catch((error) => {
+    composerState.textContent = error.message;
+  });
 });
 composer.addEventListener("dragover", (event) => {
   if ([...event.dataTransfer.types].includes("Files")) {
@@ -817,6 +859,94 @@ function addImages(files) {
     selectedImages.push({ file, url: URL.createObjectURL(file) });
   }
   renderAttachmentTray();
+}
+
+function clipboardImages(clipboardData) {
+  if (!clipboardData) return [];
+  const candidates = [
+    ...Array.from(clipboardData.files || []),
+    ...Array.from(clipboardData.items || [])
+      .filter((item) => item.kind === "file" && item.type.startsWith("image/"))
+      .map((item) => item.getAsFile())
+      .filter(Boolean),
+  ].filter((file) => file.type.startsWith("image/"));
+  const seen = new Set();
+  return candidates.filter((file) => {
+    const key = [file.name, file.type, file.size, file.lastModified].join(":");
+    if (seen.has(key)) return false;
+    seen.add(key);
+    return true;
+  });
+}
+
+async function addPastedImages(images, mayContainFiles) {
+  let files = images;
+  if (!files.length && mayContainFiles && navigator.clipboard?.read) {
+    try {
+      files = await readClipboardImages();
+    } catch {
+      throw new Error("无法读取剪贴板中的图片");
+    }
+  }
+  if (!files.length) throw new Error("无法读取剪贴板中的图片");
+  composerState.textContent = "正在读取剪贴板图片";
+  const normalized = await Promise.all(files.map(normalizePastedImage));
+  composerState.textContent = "";
+  addImages(normalized);
+}
+
+async function readClipboardImages() {
+  const files = [];
+  for (const item of await navigator.clipboard.read()) {
+    for (const type of item.types.filter((type) => type.startsWith("image/"))) {
+      const blob = await item.getType(type);
+      files.push(new File([blob], clipboardFilename(type, files.length), { type }));
+    }
+  }
+  return files;
+}
+
+async function normalizePastedImage(file, index) {
+  const supported = ["image/jpeg", "image/png", "image/webp", "image/gif"];
+  if (supported.includes(file.type)) {
+    return file.name
+      ? file
+      : new File([file], clipboardFilename(file.type, index), { type: file.type });
+  }
+  if (!file.type.startsWith("image/")) return file;
+  const url = URL.createObjectURL(file);
+  try {
+    const image = new Image();
+    image.src = url;
+    await image.decode();
+    const canvas = document.createElement("canvas");
+    canvas.width = image.naturalWidth;
+    canvas.height = image.naturalHeight;
+    const context = canvas.getContext("2d");
+    if (!context) throw new Error("无法转换剪贴板图片");
+    context.drawImage(image, 0, 0);
+    const blob = await new Promise((resolve, reject) => {
+      canvas.toBlob(
+        (value) => value ? resolve(value) : reject(new Error("无法转换剪贴板图片")),
+        "image/png",
+      );
+    });
+    return new File([blob], clipboardFilename("image/png", index), {
+      type: "image/png",
+    });
+  } finally {
+    URL.revokeObjectURL(url);
+  }
+}
+
+function clipboardFilename(type, index) {
+  const extension = {
+    "image/jpeg": "jpg",
+    "image/png": "png",
+    "image/webp": "webp",
+    "image/gif": "gif",
+  }[type] || "png";
+  return `clipboard-${Date.now()}-${index + 1}.${extension}`;
 }
 
 function renderAttachmentTray() {

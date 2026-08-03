@@ -33,6 +33,22 @@ fn accepts_tool_style_revision_ids_and_serializes_for_the_ui() {
     assert_eq!(serialized["revisionIds"][0], "rev_a");
 }
 
+#[test]
+fn accepts_model_proposed_page_consolidation() {
+    let proposal: ReconciliationProposal = serde_json::from_value(json!({
+        "action": "consolidate",
+        "subject": "Repeated runtime design notes",
+        "reason": "The current Pages restate one durable decision and can be replaced safely.",
+        "revision_ids": ["rev_a", "rev_b", "rev_c"]
+    }))
+    .expect("parse consolidation proposal");
+    assert!(matches!(
+        proposal.action,
+        ReconciliationProposalKind::Consolidate
+    ));
+    assert_eq!(proposal.revision_ids.len(), 3);
+}
+
 #[tokio::test]
 async fn persists_preview_and_recovers_interrupted_runs() {
     let path = temp_path("store");

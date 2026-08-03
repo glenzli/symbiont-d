@@ -118,6 +118,13 @@ fn dynamic_tools_expose_host_and_pcp_namespaces() {
     assert_eq!(specs[1]["tools"][5]["name"], "assess_validity");
     assert_eq!(specs[1]["tools"][6]["name"], "write_summary");
     assert_eq!(specs[1]["tools"][7]["name"], "write_page");
+    assert!(
+        specs[1]["tools"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|tool| tool["name"] == "consolidate_pages")
+    );
 }
 
 #[test]
@@ -170,7 +177,22 @@ fn reconciliation_preview_is_concise_and_explicitly_read_only() {
     assert!(prompt.contains("read-only preview"));
     assert!(prompt.contains("reject every Page, Summary, Relation, and validity mutation"));
     assert!(prompt.contains("Prefer no-op over cosmetic organization"));
+    assert!(prompt.contains("consolidate two or more current Pages"));
     assert!(prompt.contains("complete_reconciliation"));
+}
+
+#[test]
+fn reconciliation_apply_distinguishes_consolidation_from_aggregation() {
+    let prompt = memory_reconciliation_prompt(
+        ReconciliationMode::Apply,
+        "rec_apply",
+        r#"{"durablePages":[],"topicEpisodes":[]}"#,
+        &[],
+        "<done/>",
+    );
+    assert!(prompt.contains("pcp.consolidate_pages"));
+    assert!(prompt.contains("inputs should remain independently current"));
+    assert!(prompt.contains("`derived_from` Relations"));
 }
 
 #[test]
@@ -716,6 +738,26 @@ async fn pcp_tools_write_search_and_read_through_the_dynamic_bridge() {
             .iter()
             .any(|hit| hit["pageId"] == derived_page_id)
     );
+
+    let consolidation = json!({
+        "namespace": "pcp",
+        "tool": "consolidate_pages",
+        "arguments": {
+            "canonical_page_id": page_id,
+            "replaced_page_ids": [page_id, derived_page_id],
+            "content": "A brass telescope is the durable observatory instrument worth remembering."
+        }
+    });
+    let denied = tools
+        .execute_for_model(&consolidation, Some("test-model"), "interactive")
+        .await;
+    assert_eq!(denied.response["success"], false);
+    let approved = tools
+        .execute_for_model(&consolidation, Some("test-model"), "reconciliation_apply")
+        .await;
+    assert_eq!(approved.response["success"], true);
+    let approved_json = tool_content_json(&approved.response);
+    assert_eq!(approved_json["created"], true);
 
     let _ = tokio::fs::remove_dir_all(root).await;
 }

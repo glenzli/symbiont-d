@@ -20,6 +20,7 @@ pub enum ReconciliationMode {
 #[serde(rename_all = "snake_case")]
 pub enum ReconciliationProposalKind {
     Classify,
+    Consolidate,
     Synthesize,
     Link,
     AssessValidity,
