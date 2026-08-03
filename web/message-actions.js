@@ -78,6 +78,7 @@ export function initMessageActions({ conversation, isBusy, perform }) {
     const stateLabel = foot.querySelector(".message-state");
     const actions = foot.querySelector(".message-actions");
     const state = states.get(message) || "delivered";
+    const isDelivered = ["delivered", "settled", "reacted"].includes(state);
     const entry = entries.get(message);
     const actionBusy = message.dataset.actionBusy === "true";
     stateLabel.textContent =
@@ -87,12 +88,16 @@ export function initMessageActions({ conversation, isBusy, perform }) {
           ? "回复中断"
           : state === "stopped"
             ? "已停止"
-            : "";
+            : state === "settled"
+              ? "已读 · 对话已收束"
+              : state === "reacted"
+                ? "已回应"
+                : "";
     stateLabel.title = failures.get(message) || "";
     message.classList.toggle("message-failed", state === "failed");
     actions.replaceChildren();
 
-    if (!actionBusy && entry?.revisionId && state === "delivered") {
+    if (!actionBusy && entry?.revisionId && isDelivered) {
       actions.append(actionButton("quote"));
     }
     if (!actionBusy && String(entry?.content || "").trim()) {
@@ -105,7 +110,7 @@ export function initMessageActions({ conversation, isBusy, perform }) {
     ) {
       if (state === "failed" || state === "stopped") {
         actions.append(actionButton("retry"), actionButton("delete"));
-      } else if (state === "delivered") {
+      } else if (isDelivered) {
         actions.append(actionButton("edit"), actionButton("recall"));
       }
     }

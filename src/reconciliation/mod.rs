@@ -1,3 +1,4 @@
+mod pcp_worker;
 mod store;
 mod worker;
 

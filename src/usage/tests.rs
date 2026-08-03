@@ -193,6 +193,37 @@ async fn reconciliation_counts_toward_both_background_budgets() {
 }
 
 #[tokio::test]
+async fn pcp_runtime_observation_counts_toward_both_background_budgets() {
+    let nonce = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_nanos();
+    let path = std::env::temp_dir().join(format!("symbiont-pcp-observe-usage-{nonce}.sqlite3"));
+    let store = UsageStore::open(path.clone()).await.unwrap();
+    let timestamp = Utc::now().to_rfc3339_opts(SecondsFormat::Millis, true);
+    let mut invocation = autonomous_invocation(
+        "pcp-observe",
+        None,
+        "autonomous",
+        &timestamp,
+        &timestamp,
+        42,
+        false,
+        Vec::new(),
+        Vec::new(),
+    );
+    invocation.origin = "pcp_maintenance".to_owned();
+    store.record_all(&[invocation]).await.unwrap();
+
+    let headline = store.headline("2025-12-31T16:00:00Z").await.unwrap();
+    assert_eq!(headline.autonomous_tokens_today, 42);
+    assert_eq!(headline.reflection_tokens_today, 42);
+    assert_eq!(headline.autonomous_messages_today, 0);
+
+    std::fs::remove_file(path).unwrap();
+}
+
+#[tokio::test]
 async fn reflection_outreach_counts_as_an_attention_interruption_not_exploration_tokens() {
     let nonce = SystemTime::now()
         .duration_since(UNIX_EPOCH)

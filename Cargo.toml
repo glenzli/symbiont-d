@@ -13,6 +13,7 @@ infer = "0.19"
 pcp-client = { path = "../paged-context-protocol/crates/pcp-client" }
 pcp-core = { path = "../paged-context-protocol/crates/pcp-core" }
 pcp-rpc = { path = "../paged-context-protocol/crates/pcp-rpc" }
+pcp-runtime = { path = "../paged-context-protocol/crates/pcp-runtime" }
 pcp-sqlite = { path = "../paged-context-protocol/crates/pcp-sqlite" }
 pcp-store = { path = "../paged-context-protocol/crates/pcp-store" }
 reqwest = { version = "0.13", default-features = false, features = ["rustls"] }

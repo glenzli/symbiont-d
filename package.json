@@ -1,6 +1,7 @@
 {
   "name": "symbiont-d-web",
   "private": true,
+  "type": "module",
   "scripts": {
     "build:rich-text": "esbuild web/rich-text-source.js --bundle --format=esm --minify --loader:.woff2=dataurl --loader:.woff=dataurl --loader:.ttf=dataurl --outfile=web/rich-text.js",
     "build:icons": "esbuild web/icons-source.js --bundle --format=esm --minify --outfile=web/icons.js",

@@ -24,7 +24,7 @@ use crate::{
         HypothesisStatus, ReflectionStore,
     },
     symbiont_context::{ContextAuthor, ContextDocumentKind, SymbiontContextStore},
-    task_execution::TaskExecutionQueue,
+    task_execution::ProjectHandoffQueue,
     web_fetch::WebFetcher,
 };
 
@@ -37,7 +37,7 @@ pub(super) struct SymbiontTools {
     reflection: Arc<ReflectionStore>,
     compute_policies: Arc<ComputePolicyStore>,
     web_fetcher: Option<Arc<WebFetcher>>,
-    task_execution: Arc<TaskExecutionQueue>,
+    project_handoffs: Arc<ProjectHandoffQueue>,
     continuations: Arc<ContinuationQueue>,
     exploration_intents: Arc<ExplorationIntentQueue>,
 }
@@ -64,7 +64,7 @@ impl SymbiontTools {
         reflection: Arc<ReflectionStore>,
         compute_policies: Arc<ComputePolicyStore>,
         web_fetcher: Option<Arc<WebFetcher>>,
-        task_execution: Arc<TaskExecutionQueue>,
+        project_handoffs: Arc<ProjectHandoffQueue>,
         continuations: Arc<ContinuationQueue>,
         exploration_intents: Arc<ExplorationIntentQueue>,
     ) -> Self {
@@ -76,7 +76,7 @@ impl SymbiontTools {
             reflection,
             compute_policies,
             web_fetcher,
-            task_execution,
+            project_handoffs,
             continuations,
             exploration_intents,
         }
@@ -657,14 +657,14 @@ impl SymbiontTools {
                     },
                     {
                         "type": "function",
-                        "name": "delegate_to_selected_task",
-                        "description": "Spend the Host-issued task lease to queue one concrete repository operation in the Codex task selected by the user for this turn. Call only during interactive conversation when the user has asked for or clearly authorized an implementation, fix, test, or code change. Do not call for discussion, speculative ideas, ordinary research, or merely because changing symbiont-d could be useful. The model cannot choose or extend the task lease.",
+                        "name": "handoff_to_selected_project",
+                        "description": "Spend the Host-issued project lease to create one NEW Codex task for a concrete repository operation in the project selected by the user for this turn. Never continue or append to the Codex task used to select the project. Call only during interactive conversation when the user has asked for or clearly authorized an implementation, fix, test, or code change. Do not call for discussion, speculative ideas, ordinary research, or merely because changing symbiont-d could be useful. The model cannot choose or extend the project lease.",
                         "inputSchema": {
                             "type": "object",
                             "properties": {
                                 "instruction": {
                                     "type": "string",
-                                    "description": "Self-contained implementation request for the selected Codex task, including expected behavior and verification."
+                                    "description": "Self-contained implementation request for a new Codex task in the selected project, including expected behavior and verification."
                                 },
                                 "reason": {
                                     "type": "string",
@@ -674,7 +674,7 @@ impl SymbiontTools {
                                     "type": "array",
                                     "items": {"type": "string"},
                                     "maxItems": 4,
-                                    "description": "Exact PCP image-asset Revision IDs to inject into the selected Codex task. When the user refers to an earlier image, resolve the intended image with pcp.search_pages/read_pages first; never use a relative notion such as latest in the queued operation."
+                                    "description": "Exact PCP image-asset Revision IDs to inject into the new Codex task. When the user refers to an earlier image, resolve the intended image with pcp.search_pages/read_pages first; never use a relative notion such as latest in the queued operation."
                                 },
                                 "lane": {
                                     "type": "string",
@@ -1008,6 +1008,39 @@ impl SymbiontTools {
         specifications
     }
 
+    pub(super) fn pcp_maintenance_specifications() -> Value {
+        json!([{
+            "type": "namespace",
+            "name": "symbiont",
+            "description": "A narrow completion boundary for PCP Runtime semantic maintenance.",
+            "tools": [{
+                "type": "function",
+                "name": "complete_pcp_maintenance",
+                "description": "Return exactly one semantic maintenance decision. This tool records a proposal and cannot mutate PCP.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "decision": {
+                            "type": "string",
+                            "enum": ["write_summary", "candidate", "consolidate", "keep_separate", "no_candidate", "defer"]
+                        },
+                        "content": {"type": "string"},
+                        "page_ids": {
+                            "type": "array",
+                            "items": {"type": "string"},
+                            "maxItems": 64
+                        },
+                        "canonical_page_id": {"type": "string"},
+                        "rationale": {"type": "string"},
+                        "reason": {"type": "string"}
+                    },
+                    "required": ["decision"],
+                    "additionalProperties": false
+                }
+            }]
+        }])
+    }
+
     #[cfg(test)]
     pub(super) async fn execute(&self, params: &Value) -> ToolExecution {
         self.execute_for_model(params, None, "interactive").await
@@ -1076,6 +1109,9 @@ impl SymbiontTools {
         arguments: &Value,
         run_origin: &str,
     ) -> Result<(String, Option<EscalationRequest>)> {
+        if run_origin == "pcp_maintenance" && tool != "complete_pcp_maintenance" {
+            anyhow::bail!("{tool} is outside the PCP semantic maintenance boundary");
+        }
         if run_origin.starts_with("reconciliation_") && tool != "complete_reconciliation" {
             anyhow::bail!("{tool} is outside the dedicated durable-memory reconciliation boundary");
         }
@@ -1547,6 +1583,18 @@ impl SymbiontTools {
                     None,
                 ))
             }
+            "complete_pcp_maintenance" => {
+                if run_origin != "pcp_maintenance" {
+                    anyhow::bail!(
+                        "complete_pcp_maintenance is available only to PCP Runtime maintenance"
+                    );
+                }
+                let response = serde_json::from_value::<pcp_runtime::MaintenanceWorkerResponse>(
+                    arguments.clone(),
+                )
+                .context("invalid PCP maintenance decision")?;
+                Ok((serde_json::to_string(&response)?, None))
+            }
             "fetch_url" => {
                 let fetcher = self
                     .web_fetcher
@@ -1567,12 +1615,12 @@ impl SymbiontTools {
                     None,
                 ))
             }
-            "delegate_to_selected_task" | "delegate_to_bound_task" => {
+            "handoff_to_selected_project" => {
                 require_interactive_origin(run_origin, tool)?;
                 let lane = ComputeLane::parse(required_text(arguments, "lane")?)
                     .context("unknown selected task compute lane")?;
                 let run = self
-                    .task_execution
+                    .project_handoffs
                     .enqueue(
                         required_text(arguments, "instruction")?,
                         required_text(arguments, "reason")?,
@@ -1584,7 +1632,7 @@ impl SymbiontTools {
                     serde_json::to_string(&json!({
                         "queued": true,
                         "run": run,
-                        "notice": "The Host will execute this after the current reply releases the Codex app-server. Tell the user briefly that the concrete work has been handed to the selected task; do not claim it is complete yet."
+                        "notice": "The Host will create a new Codex task after the current reply releases the Codex app-server. Tell the user briefly that the concrete work has been handed off to the selected project; do not claim it is complete yet."
                     }))?,
                     None,
                 ))

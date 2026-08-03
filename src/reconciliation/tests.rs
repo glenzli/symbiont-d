@@ -102,3 +102,62 @@ async fn persists_preview_and_recovers_interrupted_runs() {
 
     let _ = tokio::fs::remove_file(path).await;
 }
+
+#[tokio::test]
+async fn runtime_observations_do_not_replace_the_user_reviewable_preview() {
+    let path = temp_path("runtime-observation");
+    let store = ReconciliationStore::open(path.clone()).await.unwrap();
+    let manual_id = store
+        .start_run(
+            ReconciliationMode::Preview,
+            "manual",
+            "manual-digest".to_owned(),
+            2,
+            None,
+        )
+        .await
+        .unwrap();
+    store
+        .complete_run(
+            &manual_id,
+            CompletedRun {
+                summary: Some("Manual preview".to_owned()),
+                proposals: Vec::new(),
+                actions: Vec::new(),
+                trace_id: None,
+                model: None,
+                total_tokens: 0,
+            },
+        )
+        .await
+        .unwrap();
+    let runtime_id = store
+        .start_run(
+            ReconciliationMode::Preview,
+            "pcp_runtime",
+            "runtime-digest".to_owned(),
+            12,
+            None,
+        )
+        .await
+        .unwrap();
+    store
+        .complete_run(
+            &runtime_id,
+            CompletedRun {
+                summary: Some("Runtime observation".to_owned()),
+                proposals: Vec::new(),
+                actions: Vec::new(),
+                trace_id: None,
+                model: None,
+                total_tokens: 0,
+            },
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(store.latest_preview().await.unwrap().id, manual_id);
+    assert_eq!(store.recent_runs().await[0].id, runtime_id);
+
+    let _ = tokio::fs::remove_file(path).await;
+}

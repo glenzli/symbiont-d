@@ -11,6 +11,10 @@ export function initTaskUi(state, insertIntoComposer, openSettings) {
   const targetScope = document.querySelector("#task-target-scope");
   const changeTarget = document.querySelector("#change-task-target");
   const clearTarget = document.querySelector("#clear-task-target");
+  const handoffTray = document.querySelector("#handoff-tray");
+  const handoffTitle = document.querySelector("#handoff-title");
+  const handoffStatus = document.querySelector("#handoff-status");
+  const openHandoff = document.querySelector("#open-handoff");
   let activeTaskId = null;
   let activePayload = null;
   let taskCount = 0;
@@ -31,9 +35,9 @@ export function initTaskUi(state, insertIntoComposer, openSettings) {
     const empty = document.createElement("div");
     empty.className = "task-empty";
     const title = document.createElement("strong");
-    title.textContent = "Codex 任务保持隔离";
+    title.textContent = "Codex 任务作为外部来源";
     const description = document.createElement("p");
-    description.textContent = "开启后仍只会在你点选任务时读取正文。";
+    description.textContent = "开启后只会在你点选任务时读取正文；不会续写或改变原任务。";
     const enable = document.createElement("button");
     enable.className = "primary-button";
     enable.type = "button";
@@ -120,45 +124,45 @@ export function initTaskUi(state, insertIntoComposer, openSettings) {
     const insert = document.createElement("button");
     insert.className = "secondary-button";
     insert.type = "button";
-    insert.textContent = "引用正文";
+    insert.textContent = "带入上下文";
     insert.addEventListener("click", () => {
       insertIntoComposer(formatReference(payload));
       dialog.close();
     });
     const scope = document.createElement("select");
     scope.className = "task-target-scope-select";
-    scope.setAttribute("aria-label", "任务关系持续时间");
-    scope.title = "任务关系持续时间";
+    scope.setAttribute("aria-label", "项目选择持续时间");
+    scope.title = "项目选择持续时间";
     for (const [value, label] of [
-      ["one_shot", "仅下一轮"],
+      ["one_shot", "仅本轮"],
       ["topic", "当前话题"],
-      ["pinned", "固定任务"],
+      ["pinned", "固定项目"],
     ]) {
       const option = document.createElement("option");
       option.value = value;
       option.textContent = label;
       scope.append(option);
     }
-    const activeLease = state.bridge?.activeTaskLease;
-    if (activeLease?.task?.threadId === payload.task.id) {
+    const activeLease = state.bridge?.activeProjectLease;
+    if (activeLease?.project?.cwd === payload.task.cwd) {
       scope.value = activeLease.scope;
     }
     const select = document.createElement("button");
     select.className = "primary-button";
     select.type = "button";
-    select.textContent = "关联到对话";
+    select.textContent = "使用此项目";
     select.addEventListener("click", async () => {
       select.disabled = true;
       try {
         const response = await fetch(
-          `/api/codex/tasks/${encodeURIComponent(payload.task.id)}/target`,
+          `/api/codex/tasks/${encodeURIComponent(payload.task.id)}/project`,
           {
             method: "POST",
             headers: { "Content-Type": "application/json" },
             body: JSON.stringify({ scope: scope.value }),
           },
         );
-        state.bridge = await responseJson(response, "无法选择 Codex 任务");
+        state.bridge = await responseJson(response, "无法选择 Codex 项目");
         renderTarget();
         renderStatus();
         dialog.close();
@@ -203,12 +207,17 @@ export function initTaskUi(state, insertIntoComposer, openSettings) {
 
   openButton.addEventListener("click", open);
   changeTarget.addEventListener("click", open);
+  openHandoff.addEventListener("click", async () => {
+    await open();
+    const taskId = state.projectHandoffs?.[0]?.codexTaskId;
+    if (taskId) await loadTask(taskId);
+  });
   clearTarget.addEventListener("click", async () => {
     clearTarget.disabled = true;
     try {
       state.bridge = await responseJson(
-        await fetch("/api/codex/target", { method: "DELETE" }),
-        "无法清除任务关系",
+        await fetch("/api/codex/project", { method: "DELETE" }),
+        "无法清除项目选择",
       );
       renderTarget();
       renderStatus();
@@ -223,6 +232,7 @@ export function initTaskUi(state, insertIntoComposer, openSettings) {
     open,
     configUpdated() {
       renderTarget();
+      renderHandoff();
       if (dialog.open && !state.bridge?.codexTaskAccess) renderDisabled();
       else if (dialog.open) {
         renderStatus();
@@ -231,23 +241,24 @@ export function initTaskUi(state, insertIntoComposer, openSettings) {
     },
     runtimeUpdated() {
       renderTarget();
+      renderHandoff();
       if (dialog.open) renderStatus();
     },
   };
 
   function renderStatus() {
-    const activeRun = (state.taskRuns || []).find((run) =>
+    const activeRun = (state.projectHandoffs || []).find((run) =>
       ["queued", "running"].includes(run.phase),
     );
     if (activeRun) {
       status.textContent =
         activeRun.currentActivity ||
-        `正在处理 ${activeRun.task.title}`;
+        `正在交接 ${activeRun.project.title}`;
       return;
     }
-    const lease = state.bridge?.activeTaskLease;
+    const lease = state.bridge?.activeProjectLease;
     if (lease) {
-      status.textContent = `${scopeLabel(lease.scope)} · ${lease.task.title}${state.bridge.taskExecutionEnabled ? " · 可执行" : " · 只读"}`;
+      status.textContent = `${scopeLabel(lease.scope)} · ${lease.project.title}${state.bridge.projectHandoffsEnabled ? " · 可新建任务" : " · 只读"}`;
       return;
     }
     status.textContent = taskCount
@@ -256,33 +267,51 @@ export function initTaskUi(state, insertIntoComposer, openSettings) {
   }
 
   function renderTarget() {
-    const lease = state.bridge?.activeTaskLease;
+    const lease = state.bridge?.activeProjectLease;
     targetTray.hidden = !lease;
     if (!lease) return;
-    targetTitle.textContent = lease.task.title;
+    targetTitle.textContent = lease.project.title;
     targetScope.textContent = scopeLabel(lease.scope);
     targetTray.title = lease.expiresAt
       ? `关系将在 ${new Date(lease.expiresAt).toLocaleTimeString([], {
           hour: "2-digit",
           minute: "2-digit",
         })} 前保持`
-      : "固定任务，直到手动清除";
+      : "固定项目，直到手动清除";
+  }
+
+  function renderHandoff() {
+    const handoff = state.projectHandoffs?.[0];
+    handoffTray.hidden = !handoff;
+    if (!handoff) return;
+    handoffTitle.textContent = `Codex · ${handoff.project.title}`;
+    handoffStatus.textContent = handoffStatusLabel(handoff);
+    handoffTray.title = handoff.error || handoff.currentActivity || handoff.instruction;
   }
 }
 
 function scopeLabel(scope) {
   return (
     {
-      one_shot: "仅下一轮",
+      one_shot: "仅本轮",
       topic: "当前话题",
-      pinned: "固定任务",
+      pinned: "固定项目",
     }[scope] || scope
   );
 }
 
+function handoffStatusLabel(handoff) {
+  if (handoff.phase === "queued") return "等待创建新任务";
+  if (handoff.phase === "running") return handoff.currentActivity || "正在执行";
+  if (handoff.phase === "completed") return "新 Codex 任务已完成";
+  if (handoff.phase === "failed") return handoff.error || "交接失败";
+  if (handoff.phase === "interrupted") return "交接被中断";
+  return handoff.phase || "交接记录";
+}
+
 function formatReference(payload) {
   const lines = [
-    `我想接着讨论这个 Codex 任务：${payload.task.title}`,
+    `这是我主动带入的外部 Codex 任务上下文（不会续写原任务）：${payload.task.title}`,
     payload.task.cwd ? `工作目录：${payload.task.cwd}` : "",
     "",
   ];

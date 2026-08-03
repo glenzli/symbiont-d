@@ -629,6 +629,20 @@ html[data-native-shell="macos"] .topbar {
   background: var(--user);
 }
 
+.message-reaction {
+  width: fit-content;
+  min-width: 24px;
+  margin: -6px 7px 0 auto;
+  padding: 2px 6px;
+  display: block;
+  border: 1px solid var(--border-strong);
+  border-radius: 999px;
+  background: var(--surface-raised);
+  font-size: 15px;
+  line-height: 1.2;
+  box-shadow: 0 1px 3px color-mix(in srgb, var(--text) 8%, transparent);
+}
+
 .message-quote {
   width: 100%;
   margin: 0 0 8px;
@@ -1396,6 +1410,27 @@ html[data-native-shell="macos"] .topbar {
 }
 
 .task-target-tray #task-target-scope {
+  flex: 0 0 auto;
+  color: var(--text-faint);
+  font-size: 9px;
+}
+
+.composer .handoff-tray #open-handoff {
+  min-width: 0;
+  padding: 0 5px;
+  display: flex;
+  align-items: baseline;
+  gap: 6px;
+}
+
+.handoff-tray #handoff-title {
+  overflow: hidden;
+  color: var(--text);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.handoff-tray #handoff-status {
   flex: 0 0 auto;
   color: var(--text-faint);
   font-size: 9px;

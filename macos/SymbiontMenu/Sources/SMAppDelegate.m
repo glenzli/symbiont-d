@@ -33,6 +33,7 @@ static NSString *const SMHasCompletedFirstLaunchKey = @"hasCompletedFirstLaunch"
 - (void)applicationDidFinishLaunching:(NSNotification *)notification {
     (void)notification;
     [NSApp setActivationPolicy:NSApplicationActivationPolicyAccessory];
+    [NSApp setMainMenu:[self makeMainMenu]];
     self.statusItem = [NSStatusBar.systemStatusBar statusItemWithLength:NSVariableStatusItemLength];
     self.windowController = [[SMSymbiontWindowController alloc] initWithEndpoint:self.endpoint delegate:self];
     self.contextMenu = [self makeContextMenu];
@@ -45,6 +46,41 @@ static NSString *const SMHasCompletedFirstLaunchKey = @"hasCompletedFirstLaunch"
             [self.windowController showSymbiontWindow];
         });
     }
+}
+
+- (NSMenu *)makeMainMenu {
+    NSMenu *mainMenu = [[NSMenu alloc] initWithTitle:@"symbiont-d"];
+    NSMenuItem *editItem = [[NSMenuItem alloc] initWithTitle:@"Edit"
+                                                      action:nil
+                                               keyEquivalent:@""];
+    NSMenu *editMenu = [[NSMenu alloc] initWithTitle:@"Edit"];
+    [self addFirstResponderItemWithTitle:@"Undo" action:@selector(undo:) key:@"z" toMenu:editMenu];
+    NSMenuItem *redoItem = [self firstResponderItemWithTitle:@"Redo" action:@selector(redo:) key:@"z"];
+    redoItem.keyEquivalentModifierMask = NSEventModifierFlagCommand | NSEventModifierFlagShift;
+    [editMenu addItem:redoItem];
+    [editMenu addItem:NSMenuItem.separatorItem];
+    [self addFirstResponderItemWithTitle:@"Cut" action:@selector(cut:) key:@"x" toMenu:editMenu];
+    [self addFirstResponderItemWithTitle:@"Copy" action:@selector(copy:) key:@"c" toMenu:editMenu];
+    [self addFirstResponderItemWithTitle:@"Paste" action:@selector(paste:) key:@"v" toMenu:editMenu];
+    [self addFirstResponderItemWithTitle:@"Select All" action:@selector(selectAll:) key:@"a" toMenu:editMenu];
+    editItem.submenu = editMenu;
+    [mainMenu addItem:editItem];
+    return mainMenu;
+}
+
+- (void)addFirstResponderItemWithTitle:(NSString *)title
+                                action:(SEL)action
+                                   key:(NSString *)key
+                                toMenu:(NSMenu *)menu {
+    [menu addItem:[self firstResponderItemWithTitle:title action:action key:key]];
+}
+
+- (NSMenuItem *)firstResponderItemWithTitle:(NSString *)title
+                                     action:(SEL)action
+                                        key:(NSString *)key {
+    NSMenuItem *item = [[NSMenuItem alloc] initWithTitle:title action:action keyEquivalent:key];
+    item.target = nil;
+    return item;
 }
 
 - (BOOL)applicationShouldTerminateAfterLastWindowClosed:(NSApplication *)sender {

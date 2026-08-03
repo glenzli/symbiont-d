@@ -15,6 +15,7 @@ import { initTaskUi } from "/task-ui.js";
 import { initTopbarUi } from "/topbar-ui.js";
 import { initTopicUi } from "/topic-ui.js";
 import { initTraceUi } from "/trace-ui.js";
+import { initTurnDispositionUi } from "/turn-disposition-ui.js";
 import { renderIcons } from "/icons.js";
 
 const appState = {
@@ -38,11 +39,11 @@ const appState = {
   conversation: null,
   bridge: {
     codexTaskAccess: false,
-    taskExecutionEnabled: false,
-    pinnedTask: null,
-    activeTaskLease: null,
+    projectHandoffsEnabled: false,
+    selectedProject: null,
+    activeProjectLease: null,
   },
-  taskRuns: [],
+  projectHandoffs: [],
   permissions: [],
 };
 
@@ -103,6 +104,11 @@ const messageActions = initMessageActions({
   isBusy: () => busy,
   perform: performMessageAction,
 });
+const turnDispositionUi = initTurnDispositionUi({
+  conversation,
+  messageActions,
+  notify: notifyComposer,
+});
 const quoteUi = initQuoteUi({
   conversation,
   entryFor: messageActions.entryFor,
@@ -137,7 +143,7 @@ function metadataText(metadata) {
   });
   const origin = {
     autonomous: "主动探索",
-    codex_task: "Codex 任务",
+    codex_handoff: "Codex 交接",
     continuation: "续话",
   }[metadata.origin] || "";
   return [
@@ -259,6 +265,19 @@ function applyComplete(message, entry) {
   messageActions.update(message, entry);
 }
 
+function applyCompletionProjection(event) {
+  memorySize.textContent = formatMemorySize(event.memoryChars);
+  appState.profile = event.profile;
+  appState.autonomyPermitted = event.autonomyPermitted;
+  appState.usage = event.usage;
+  appState.exploration = event.exploration;
+  appState.computePolicies = event.computePolicies || appState.computePolicies;
+  renderUsage();
+  profileUi.render();
+  settingsUi.renderAutonomy();
+  explorationUi.runtimeUpdated();
+}
+
 function renderUsage() {
   tokenTotal.textContent = formatTokens(appState.usage?.totalTokens || 0).replace(
     " tok",
@@ -277,12 +296,12 @@ function renderRuntimeStatus() {
     connectionStatus.textContent = "初始化对话中";
     return;
   }
-  const taskRun = (appState.taskRuns || []).find((run) =>
+  const handoff = (appState.projectHandoffs || []).find((run) =>
     ["queued", "running"].includes(run.phase),
   );
-  if (taskRun) {
+  if (handoff) {
     connectionStatus.textContent =
-      taskRun.currentActivity || `正在处理 ${taskRun.task.title}`;
+      handoff.currentActivity || `正在交接 ${handoff.project.title}`;
     return;
   }
   const exploration = appState.exploration;
@@ -331,7 +350,8 @@ function applyRuntime(payload) {
     payload.computePolicies || appState.computePolicies;
   appState.permissions = payload.permissions || appState.permissions;
   appState.bridge = payload.bridge || appState.bridge;
-  appState.taskRuns = payload.taskRuns || appState.taskRuns;
+  appState.projectHandoffs =
+    payload.projectHandoffs || appState.projectHandoffs;
   renderUsage();
   renderRuntimeStatus();
   identityUi.render();
@@ -341,6 +361,7 @@ function applyRuntime(payload) {
   explorationUi.runtimeUpdated();
   taskUi.runtimeUpdated();
   permissionUi.render();
+  turnDispositionUi.applyAll(payload.turnDispositions);
 }
 
 async function bootstrap() {
@@ -350,6 +371,7 @@ async function bootstrap() {
     const state = await response.json();
     Object.assign(appState, state);
     state.messages.forEach((message) => appendMessage(message));
+    turnDispositionUi.applyAll(state.turnDispositions);
     messageSync.completeBootstrap(state.messages);
     memorySize.textContent = formatMemorySize(state.memoryChars);
     renderUsage();
@@ -389,6 +411,7 @@ async function consumeStream(response, pending, outgoing) {
   let receivedText = "";
   let completed = false;
   let interrupted = false;
+  let settled = null;
 
   while (true) {
     const { value, done } = await reader.read();
@@ -421,31 +444,26 @@ async function consumeStream(response, pending, outgoing) {
         connectionStatus.textContent = "正在回应";
       } else if (event.type === "interrupted") {
         interrupted = true;
+      } else if (event.type === "settled") {
+        settled = event;
+        applyCompletionProjection(event);
       } else if (event.type === "complete") {
         completed = true;
         for (const message of activeOutgoing) {
           messageActions.update(message, null, { deliveryState: "delivered" });
         }
         applyComplete(pending, event.message);
-        memorySize.textContent = formatMemorySize(event.memoryChars);
-        appState.profile = event.profile;
-        appState.autonomyPermitted = event.autonomyPermitted;
-        appState.usage = event.usage;
-        appState.exploration = event.exploration;
-        appState.computePolicies =
-          event.computePolicies || appState.computePolicies;
-        renderUsage();
-        profileUi.render();
-        settingsUi.renderAutonomy();
-        explorationUi.runtimeUpdated();
+        applyCompletionProjection(event);
       } else if (event.type === "error") {
         throw new Error(event.error);
       }
     }
     if (done) break;
   }
-  if (!completed && !interrupted) throw new Error("回复在完成前中断。");
-  return { interrupted };
+  if (!completed && !interrupted && !settled) {
+    throw new Error("回复在完成前中断。");
+  }
+  return { interrupted, settled };
 }
 
 async function sendMessage(
@@ -492,6 +510,12 @@ async function sendMessage(
         messageActions.update(message, null, { deliveryState: "stopped" });
       }
       notifyComposer("已停止回复");
+    } else if (result.settled) {
+      pending.remove();
+      for (const message of activeOutgoing) {
+        messageActions.update(message, null, { deliveryState: "delivered" });
+      }
+      turnDispositionUi.apply(result.settled, { announce: true });
     }
   } catch (error) {
     pending.remove();
@@ -814,12 +838,20 @@ async function stopActiveResponse() {
     composerState.textContent = error.message;
   }
 }
-composer.addEventListener("paste", (event) => {
-  const images = clipboardImages(event.clipboardData);
-  const mayContainFiles = Array.from(event.clipboardData?.types || []).includes("Files");
-  if (!images.length && !mayContainFiles) return;
+input.addEventListener("paste", (event) => {
+  const clipboardData = event.clipboardData;
+  const images = clipboardImages(clipboardData);
+  if (images.length) {
+    event.preventDefault();
+    addPastedImages(images, false).catch((error) => {
+      composerState.textContent = error.message;
+    });
+    return;
+  }
+
+  if (!clipboardMayContainImageWithoutText(clipboardData)) return;
   event.preventDefault();
-  addPastedImages(images, mayContainFiles).catch((error) => {
+  addPastedImages([], true).catch((error) => {
     composerState.textContent = error.message;
   });
 });
@@ -877,6 +909,19 @@ function clipboardImages(clipboardData) {
     seen.add(key);
     return true;
   });
+}
+
+function clipboardMayContainImageWithoutText(clipboardData) {
+  if (!clipboardData || clipboardContainsText(clipboardData)) return false;
+  return Array.from(clipboardData.types || []).includes("Files");
+}
+
+function clipboardContainsText(clipboardData) {
+  const types = Array.from(clipboardData.types || []);
+  if (types.some((type) => type.startsWith("text/"))) return true;
+  return Boolean(
+    clipboardData.getData?.("text/plain") || clipboardData.getData?.("text/html"),
+  );
 }
 
 async function addPastedImages(images, mayContainFiles) {

@@ -200,7 +200,13 @@ function renderRun(run) {
   const header = document.createElement("header");
   const title = document.createElement("strong");
   const meta = document.createElement("small");
-  title.textContent = `${run.mode === "apply" ? "应用" : "检查"} · ${runStatus(run.status)}`;
+  const runKind =
+    run.trigger === "pcp_runtime"
+      ? "运行时观察"
+      : run.mode === "apply"
+        ? "应用"
+        : "检查";
+  title.textContent = `${runKind} · ${runStatus(run.status)}`;
   meta.textContent = [
     formatDate(run.startedAt),
     run.model,

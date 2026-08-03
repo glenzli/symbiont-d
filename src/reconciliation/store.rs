@@ -111,7 +111,7 @@ impl ReconciliationStore {
         run.model = completed.model;
         run.total_tokens = completed.total_tokens;
         run.error = None;
-        if run.mode == ReconciliationMode::Preview {
+        if run.mode == ReconciliationMode::Preview && run.trigger == "manual" {
             state.latest_preview_id = Some(run_id.to_owned());
         }
         drop(state);

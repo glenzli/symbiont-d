@@ -15,7 +15,7 @@ use tokio::{fs, sync::RwLock, task};
 use super::{
     ConversationEpisode, DeferredFollowUp, EpisodeInput, EpisodeState, FollowUpInput,
     HunchFeedbackTarget, HypothesisHorizon, HypothesisInput, HypothesisStatus, InteractionEvent,
-    ReflectionConfig, ReflectionRun, WorkingHypothesis,
+    ReflectionConfig, ReflectionRun, TurnDisposition, WorkingHypothesis,
 };
 use crate::memory::{MemoryEntry, MemoryRole};
 
@@ -141,6 +141,87 @@ impl ReflectionStore {
         })
         .await
         .context("join message event write")?
+    }
+
+    pub async fn record_turn_disposition(
+        &self,
+        revision_id: &str,
+        reaction: Option<&str>,
+    ) -> Result<()> {
+        if revision_id.trim().is_empty() || revision_id.len() > 128 {
+            anyhow::bail!("invalid turn disposition Revision ID");
+        }
+        let path = self.path.clone();
+        let revision_id = revision_id.to_owned();
+        let reaction = reaction.map(str::to_owned);
+        task::spawn_blocking(move || -> Result<()> {
+            let mut connection = open_connection(&path)?;
+            let transaction = connection.transaction()?;
+            transaction.execute(
+                "DELETE FROM conversation_events
+                 WHERE revision_id = ?1 AND kind IN ('turn_settled', 'turn_reaction')",
+                params![revision_id],
+            )?;
+            let kind = if reaction.is_some() {
+                "turn_reaction"
+            } else {
+                "turn_settled"
+            };
+            transaction.execute(
+                "
+                INSERT INTO conversation_events (
+                    kind, occurred_at, revision_id, role,
+                    content_chars, payload_json, retracted
+                ) VALUES (?1, ?2, ?3, 'assistant', 0, ?4, 0)
+                ",
+                params![
+                    kind,
+                    now(),
+                    revision_id,
+                    serde_json::to_string(&json!({"reaction": reaction}))?
+                ],
+            )?;
+            transaction.commit()?;
+            Ok(())
+        })
+        .await
+        .context("join turn disposition write")?
+    }
+
+    pub async fn recent_turn_dispositions(&self, limit: usize) -> Result<Vec<TurnDisposition>> {
+        let path = self.path.clone();
+        task::spawn_blocking(move || -> Result<Vec<TurnDisposition>> {
+            let connection = open_connection(&path)?;
+            let mut statement = connection.prepare(
+                "
+                SELECT revision_id, payload_json
+                FROM conversation_events
+                WHERE kind IN ('turn_settled', 'turn_reaction')
+                  AND revision_id IS NOT NULL
+                  AND retracted = 0
+                ORDER BY id DESC
+                LIMIT ?1
+                ",
+            )?;
+            statement
+                .query_map(params![limit.clamp(1, 500) as i64], |row| {
+                    let revision_id: String = row.get(0)?;
+                    let payload: String = row.get(1)?;
+                    let payload =
+                        serde_json::from_str::<Value>(&payload).unwrap_or_else(|_| json!({}));
+                    Ok(TurnDisposition {
+                        revision_id,
+                        reaction: payload
+                            .get("reaction")
+                            .and_then(Value::as_str)
+                            .map(str::to_owned),
+                    })
+                })?
+                .collect::<rusqlite::Result<Vec<_>>>()
+                .map_err(Into::into)
+        })
+        .await
+        .context("join recent turn disposition read")?
     }
 
     pub async fn record_seen(&self, revision_ids: Vec<String>, occurred_at: String) -> Result<()> {
@@ -908,6 +989,10 @@ fn initialize_database(path: &PathBuf) -> Result<()> {
               AND kind IN ('message_user', 'message_assistant', 'message_seen');
         CREATE INDEX IF NOT EXISTS conversation_event_time
             ON conversation_events(occurred_at, id);
+        CREATE UNIQUE INDEX IF NOT EXISTS conversation_turn_disposition_identity
+            ON conversation_events(revision_id)
+            WHERE revision_id IS NOT NULL
+              AND kind IN ('turn_settled', 'turn_reaction');
         CREATE TABLE IF NOT EXISTS reflection_meta (
             key TEXT PRIMARY KEY,
             value TEXT NOT NULL
@@ -1142,6 +1227,10 @@ fn actionable_prefix(
         match event.kind.as_str() {
             "message_user" => saw_user = true,
             "message_assistant" if saw_user => {
+                boundaries.push(index);
+                saw_user = false;
+            }
+            "turn_settled" | "turn_reaction" if saw_user => {
                 boundaries.push(index);
                 saw_user = false;
             }
@@ -1533,8 +1622,13 @@ fn format_event(event: &InteractionEvent) -> String {
                 .join(",")
         })
         .unwrap_or_default();
+    let reaction = event
+        .payload
+        .get("reaction")
+        .and_then(Value::as_str)
+        .unwrap_or_default();
     format!(
-        "<event id=\"{}\" kind=\"{}\" at=\"{}\" revision=\"{}\" related=\"{}\" role=\"{}\" chars=\"{}\" retracted=\"{}\" reply_timing='{}' hunch_feedback=\"{}\">{}</event>",
+        "<event id=\"{}\" kind=\"{}\" at=\"{}\" revision=\"{}\" related=\"{}\" role=\"{}\" chars=\"{}\" retracted=\"{}\" reply_timing='{}' hunch_feedback=\"{}\" reaction=\"{}\">{}</event>",
         event.id,
         event.kind,
         event.occurred_at,
@@ -1545,6 +1639,7 @@ fn format_event(event: &InteractionEvent) -> String {
         event.retracted,
         timing,
         hunch_feedback,
+        reaction,
         excerpt
     )
 }

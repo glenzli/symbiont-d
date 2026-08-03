@@ -13,7 +13,7 @@ use super::{
     },
     prompts::{
         developer_instructions, interaction_reflection_prompt, memory_reconciliation_prompt,
-        summary_maintenance_prompt,
+        pcp_maintenance_worker_prompt, summary_maintenance_prompt,
     },
     tools::SymbiontTools,
     trace::observable_item_event,
@@ -28,7 +28,7 @@ use crate::{
     reconciliation::ReconciliationMode,
     reflection::ReflectionStore,
     symbiont_context::SymbiontContextStore,
-    task_execution::TaskExecutionQueue,
+    task_execution::ProjectHandoffQueue,
     usage::{InvocationRecord, ToolTraceStep},
 };
 use pcp_sqlite::SqlitePcpStore;
@@ -87,6 +87,13 @@ fn dynamic_tools_expose_host_and_pcp_namespaces() {
             .as_array()
             .unwrap()
             .iter()
+            .any(|tool| tool["name"] == "handoff_to_selected_project")
+    );
+    assert!(
+        specs[0]["tools"]
+            .as_array()
+            .unwrap()
+            .iter()
             .any(|tool| tool["name"] == "submit_exploration_finding")
     );
     assert!(
@@ -125,6 +132,30 @@ fn dynamic_tools_expose_host_and_pcp_namespaces() {
             .iter()
             .any(|tool| tool["name"] == "consolidate_pages")
     );
+}
+
+#[test]
+fn pcp_maintenance_thread_exposes_only_its_completion_tool() {
+    let specs = SymbiontTools::pcp_maintenance_specifications();
+    assert_eq!(specs.as_array().unwrap().len(), 1);
+    assert_eq!(specs[0]["name"], "symbiont");
+    let tools = specs[0]["tools"].as_array().unwrap();
+    assert_eq!(tools.len(), 1);
+    assert_eq!(tools[0]["name"], "complete_pcp_maintenance");
+}
+
+#[test]
+fn pcp_maintenance_prompt_keeps_semantics_in_the_model_and_mutation_outside() {
+    let request = pcp_runtime::MaintenanceWorkerRequest::SelectConsolidation {
+        pages: Vec::new(),
+        max_pages: 4,
+        excluded_candidate_sets: Vec::new(),
+    };
+    let prompt = pcp_maintenance_worker_prompt(&request, "<done/>").unwrap();
+    assert!(prompt.contains("Semantic quality"));
+    assert!(prompt.contains("complete_pcp_maintenance"));
+    assert!(prompt.contains("shared vocabulary alone"));
+    assert!(prompt.contains("<done/>"));
 }
 
 #[test]
@@ -462,9 +493,9 @@ async fn orientation_tool_requires_active_calibration() {
         ),
         None,
         Arc::new(
-            TaskExecutionQueue::open(root.join("task-runs.json"))
+            ProjectHandoffQueue::open(root.join("codex-handoffs.json"))
                 .await
-                .expect("open task execution queue")
+                .expect("open project handoff queue")
                 .0,
         ),
         Arc::new(crate::continuation::ContinuationQueue::new().0),
@@ -538,9 +569,9 @@ async fn pcp_tools_write_search_and_read_through_the_dynamic_bridge() {
         ),
         None,
         Arc::new(
-            TaskExecutionQueue::open(root.join("task-runs.json"))
+            ProjectHandoffQueue::open(root.join("codex-handoffs.json"))
                 .await
-                .expect("open task execution queue")
+                .expect("open project handoff queue")
                 .0,
         ),
         Arc::new(crate::continuation::ContinuationQueue::new().0),
@@ -818,9 +849,9 @@ async fn reflection_tools_accept_recalled_conversation_revisions_outside_the_eve
         ),
         None,
         Arc::new(
-            TaskExecutionQueue::open(root.join("task-runs.json"))
+            ProjectHandoffQueue::open(root.join("codex-handoffs.json"))
                 .await
-                .expect("open task execution queue")
+                .expect("open project handoff queue")
                 .0,
         ),
         Arc::new(crate::continuation::ContinuationQueue::new().0),
@@ -942,9 +973,9 @@ async fn hunch_tools_preserve_model_owned_state_and_record_autonomous_exploratio
         ),
         None,
         Arc::new(
-            TaskExecutionQueue::open(root.join("task-runs.json"))
+            ProjectHandoffQueue::open(root.join("codex-handoffs.json"))
                 .await
-                .expect("open task execution queue")
+                .expect("open project handoff queue")
                 .0,
         ),
         Arc::new(crate::continuation::ContinuationQueue::new().0),

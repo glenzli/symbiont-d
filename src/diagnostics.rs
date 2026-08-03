@@ -60,6 +60,7 @@ pub enum TraceEventKind {
     PermissionRequest,
     PermissionResolution,
     TurnInterrupted,
+    TurnSettled,
     AgentMessage,
 }
 

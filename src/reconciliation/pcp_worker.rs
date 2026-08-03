@@ -1,0 +1,267 @@
+use std::sync::Arc;
+
+use anyhow::{Context, Result};
+use pcp_runtime::{MaintenanceWorkerRequest, MaintenanceWorkerResponse};
+use sha2::{Digest, Sha256};
+use tokio::sync::mpsc;
+
+use super::{
+    ReconciliationDependencies, ReconciliationMode, ReconciliationProposal,
+    ReconciliationProposalKind, ReconciliationStore, store::CompletedRun, worker::over_budget,
+};
+use crate::{
+    codex::{PcpMaintenanceModelRequest, RuntimeEvent},
+    profile::SetupStatus,
+};
+
+#[derive(Clone)]
+pub(super) struct PcpMaintenanceWorker {
+    store: Arc<ReconciliationStore>,
+    dependencies: ReconciliationDependencies,
+}
+
+impl PcpMaintenanceWorker {
+    pub(super) fn new(
+        store: Arc<ReconciliationStore>,
+        dependencies: ReconciliationDependencies,
+    ) -> Self {
+        Self {
+            store,
+            dependencies,
+        }
+    }
+
+    pub(super) async fn evaluate(
+        &self,
+        request: MaintenanceWorkerRequest,
+    ) -> Result<MaintenanceWorkerResponse> {
+        let profile = self.dependencies.profile.snapshot().await;
+        if profile.status != SetupStatus::Ready {
+            return Ok(MaintenanceWorkerResponse::Defer {
+                reason: Some("symbiont setup is incomplete".to_owned()),
+            });
+        }
+        if over_budget(&self.dependencies).await? {
+            return Ok(MaintenanceWorkerResponse::Defer {
+                reason: Some("background analysis token budget is exhausted".to_owned()),
+            });
+        }
+
+        let encoded = serde_json::to_vec(&request).context("encode PCP maintenance request")?;
+        let digest = format!("{:x}", Sha256::digest(&encoded));
+        let run_id = self
+            .store
+            .start_run(
+                ReconciliationMode::Preview,
+                "pcp_runtime",
+                digest,
+                request_page_count(&request),
+                None,
+            )
+            .await?;
+        let compute = self.dependencies.compute.snapshot().await;
+        let (events_tx, mut events_rx) = mpsc::channel(16);
+        let event_drain = tokio::spawn(async move {
+            while let Some(event) = events_rx.recv().await {
+                if matches!(event, RuntimeEvent::Activity { .. }) {
+                    // The full activity and model identity remain in the invocation trace.
+                }
+            }
+        });
+        let outcome = self
+            .dependencies
+            .codex
+            .lock()
+            .await
+            .evaluate_pcp_maintenance(PcpMaintenanceModelRequest {
+                request: &request,
+                compute: &compute,
+                profile: &profile,
+                input_events: self.dependencies.conversation.subscribe_input(),
+                events: events_tx,
+            })
+            .await;
+        event_drain
+            .await
+            .context("join PCP maintenance event drain")?;
+        let outcome = match outcome {
+            Ok(outcome) => outcome,
+            Err(error) => {
+                self.store.fail_run(&run_id, &error.to_string()).await?;
+                return Err(error);
+            }
+        };
+        self.dependencies
+            .usage
+            .record_all(&outcome.invocations)
+            .await?;
+        if outcome.interrupted {
+            self.store.interrupt_run(&run_id).await?;
+            return Ok(outcome.response);
+        }
+
+        let trace_id = outcome.invocations.first().map(|item| item.id.clone());
+        let model = outcome
+            .invocations
+            .last()
+            .map(|item| item.model_display_name.clone());
+        let total_tokens = outcome
+            .invocations
+            .iter()
+            .map(|item| item.total_tokens)
+            .sum();
+        let summary = response_summary(&request, &outcome.response);
+        let proposals = response_proposals(&request, &outcome.response);
+        self.store
+            .complete_run(
+                &run_id,
+                CompletedRun {
+                    summary: Some(summary),
+                    proposals,
+                    actions: Vec::new(),
+                    trace_id,
+                    model,
+                    total_tokens,
+                },
+            )
+            .await?;
+        Ok(outcome.response)
+    }
+}
+
+fn request_page_count(request: &MaintenanceWorkerRequest) -> usize {
+    match request {
+        MaintenanceWorkerRequest::SummarizePage { .. } => 1,
+        MaintenanceWorkerRequest::SelectConsolidation { pages, .. } => pages.len(),
+        MaintenanceWorkerRequest::ConsolidatePages { pages } => pages.len(),
+    }
+}
+
+fn request_page_ids(request: &MaintenanceWorkerRequest) -> Vec<String> {
+    match request {
+        MaintenanceWorkerRequest::SummarizePage { page } => vec![page.page_id.clone()],
+        MaintenanceWorkerRequest::SelectConsolidation { pages, .. } => {
+            pages.iter().map(|page| page.page_id.clone()).collect()
+        }
+        MaintenanceWorkerRequest::ConsolidatePages { pages } => {
+            pages.iter().map(|page| page.page_id.clone()).collect()
+        }
+    }
+}
+
+fn response_summary(
+    request: &MaintenanceWorkerRequest,
+    response: &MaintenanceWorkerResponse,
+) -> String {
+    let operation = match request {
+        MaintenanceWorkerRequest::SummarizePage { .. } => "摘要索引判断",
+        MaintenanceWorkerRequest::SelectConsolidation { .. } => "重复候选筛选",
+        MaintenanceWorkerRequest::ConsolidatePages { .. } => "合并内容复核",
+    };
+    let decision = match response {
+        MaintenanceWorkerResponse::WriteSummary { .. } => "建议建立 Summary",
+        MaintenanceWorkerResponse::Candidate { rationale, .. } => {
+            return format!(
+                "{operation}：发现合并候选{}",
+                optional_reason(rationale.as_deref())
+            );
+        }
+        MaintenanceWorkerResponse::Consolidate { .. } => "建议合并",
+        MaintenanceWorkerResponse::KeepSeparate { reason } => {
+            return format!(
+                "{operation}：保留现状{}",
+                optional_reason(reason.as_deref())
+            );
+        }
+        MaintenanceWorkerResponse::NoCandidate { reason } => {
+            return format!(
+                "{operation}：没有候选{}",
+                optional_reason(reason.as_deref())
+            );
+        }
+        MaintenanceWorkerResponse::Defer { reason } => {
+            return format!("{operation}：暂缓{}", optional_reason(reason.as_deref()));
+        }
+    };
+    format!("{operation}：{decision}")
+}
+
+fn optional_reason(reason: Option<&str>) -> String {
+    reason
+        .map(str::trim)
+        .filter(|reason| !reason.is_empty())
+        .map(|reason| format!("，{reason}"))
+        .unwrap_or_default()
+}
+
+fn response_proposals(
+    request: &MaintenanceWorkerRequest,
+    response: &MaintenanceWorkerResponse,
+) -> Vec<ReconciliationProposal> {
+    match response {
+        MaintenanceWorkerResponse::WriteSummary { .. } => vec![ReconciliationProposal {
+            action: ReconciliationProposalKind::Resummarize,
+            subject: "为长 Page 建立路由摘要".to_owned(),
+            reason: "模型认为该内容值得进入稀疏 Summary 索引。".to_owned(),
+            revision_ids: request_page_ids(request),
+        }],
+        MaintenanceWorkerResponse::Candidate {
+            page_ids,
+            rationale,
+        } => vec![ReconciliationProposal {
+            action: ReconciliationProposalKind::Consolidate,
+            subject: "复核潜在重复 Page".to_owned(),
+            reason: rationale
+                .clone()
+                .unwrap_or_else(|| "模型在路由索引中发现了潜在重复。".to_owned()),
+            revision_ids: page_ids.clone(),
+        }],
+        MaintenanceWorkerResponse::Consolidate { .. } => vec![ReconciliationProposal {
+            action: ReconciliationProposalKind::Consolidate,
+            subject: "以单一不可变 Page 替代重复内容".to_owned(),
+            reason: "模型读取 Detail 后仍认为合并不会丢失独立语义。".to_owned(),
+            revision_ids: request_page_ids(request),
+        }],
+        MaintenanceWorkerResponse::KeepSeparate { .. }
+        | MaintenanceWorkerResponse::NoCandidate { .. }
+        | MaintenanceWorkerResponse::Defer { .. } => Vec::new(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use pcp_runtime::MaintenanceDetailPage;
+
+    #[test]
+    fn consolidation_decision_becomes_a_bounded_visible_proposal() {
+        let request = MaintenanceWorkerRequest::ConsolidatePages {
+            pages: vec![detail("rev-a"), detail("rev-b")],
+        };
+        let response = MaintenanceWorkerResponse::Consolidate {
+            canonical_page_id: "rev-a".to_owned(),
+            content: "one durable state".to_owned(),
+        };
+
+        let proposals = response_proposals(&request, &response);
+
+        assert_eq!(proposals.len(), 1);
+        assert_eq!(proposals[0].revision_ids, vec!["rev-a", "rev-b"]);
+    }
+
+    fn detail(page_id: &str) -> MaintenanceDetailPage {
+        MaintenanceDetailPage {
+            ref_id: format!("ref-{page_id}"),
+            page_id: page_id.to_owned(),
+            namespace: "project:test".to_owned(),
+            created_at: "2026-08-04T00:00:00Z".to_owned(),
+            observed_at: None,
+            media_type: Some("text/markdown".to_owned()),
+            content: Some("detail".to_owned()),
+            summary: None,
+            facets: None,
+            source_refs: Vec::new(),
+            relations: Vec::new(),
+        }
+    }
+}

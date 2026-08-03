@@ -95,7 +95,7 @@ bootstrap_label() {
 }
 
 echo "Building symbiont-d..."
-"$CARGO_BIN" build --release --manifest-path "$PROJECT_ROOT/Cargo.toml"
+"$CARGO_BIN" build --release --bins --manifest-path "$PROJECT_ROOT/Cargo.toml"
 echo "Building PCP runtime and diagnostic client..."
 "$CARGO_BIN" build --release --manifest-path "$PCP_MANIFEST" \
   -p pcp-runtime -p pcp-cli -p pcp-console

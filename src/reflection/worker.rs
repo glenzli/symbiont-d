@@ -173,6 +173,19 @@ impl ReflectionHandle {
         Ok(())
     }
 
+    pub async fn record_turn_disposition(
+        &self,
+        revision_id: &str,
+        reaction: Option<&str>,
+    ) -> Result<()> {
+        self.store
+            .record_turn_disposition(revision_id, reaction)
+            .await?;
+        self.refresh_pending_runtime().await;
+        let _ = self.trigger.try_send(ReflectionTrigger::Conversation);
+        Ok(())
+    }
+
     pub async fn record_seen(&self, revision_ids: Vec<String>, occurred_at: String) -> Result<()> {
         self.store.record_seen(revision_ids, occurred_at).await?;
         self.refresh_pending_runtime().await;

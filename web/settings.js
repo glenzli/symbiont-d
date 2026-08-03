@@ -34,8 +34,8 @@ export function initSettings(state, triggerExploration) {
   const quotaState = document.querySelector("#quota-state");
   const bridgeForm = document.querySelector("#bridge-form");
   const codexTaskAccess = document.querySelector("#codex-task-access");
-  const codexTaskExecution = document.querySelector("#codex-task-execution");
-  const codexTaskExecutionNote = document.querySelector(
+  const codexProjectHandoffs = document.querySelector("#codex-task-execution");
+  const codexProjectHandoffsNote = document.querySelector(
     "#codex-task-execution-note",
   );
   const bridgeSaveState = document.querySelector("#bridge-save-state");
@@ -150,14 +150,14 @@ export function initSettings(state, triggerExploration) {
 
   function renderBridge() {
     codexTaskAccess.checked = state.bridge?.codexTaskAccess === true;
-    const lease = state.bridge?.activeTaskLease;
-    const task = lease?.task || state.bridge?.pinnedTask;
-    codexTaskExecution.checked =
-      state.bridge?.taskExecutionEnabled === true;
-    codexTaskExecution.disabled = !codexTaskAccess.checked;
-    codexTaskExecutionNote.textContent = task
-      ? `只对选定任务生效 · 当前 ${task.title} · ${shortPath(task.cwd)}`
-      : "只在输入区明确选择任务后生效";
+    const lease = state.bridge?.activeProjectLease;
+    const project = lease?.project || state.bridge?.selectedProject;
+    codexProjectHandoffs.checked =
+      state.bridge?.projectHandoffsEnabled === true;
+    codexProjectHandoffs.disabled = !codexTaskAccess.checked;
+    codexProjectHandoffsNote.textContent = project
+      ? `只对选定项目生效 · 当前 ${project.title} · ${shortPath(project.cwd)}`
+      : "只在输入区明确选择项目后生效";
   }
 
   function toggleQuietInputs() {
@@ -268,8 +268,8 @@ export function initSettings(state, triggerExploration) {
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({
             codexTaskAccess: codexTaskAccess.checked,
-            taskExecutionEnabled:
-              codexTaskAccess.checked && codexTaskExecution.checked,
+            projectHandoffsEnabled:
+              codexTaskAccess.checked && codexProjectHandoffs.checked,
           }),
         }),
         "保存失败",
@@ -354,7 +354,7 @@ export function initSettings(state, triggerExploration) {
           reflection: "后台理解",
           maintenance: "记忆维护",
           interactive: "对话",
-          codex_task: "Codex 任务",
+          codex_handoff: "Codex 交接",
           continuation: "续话",
         }[invocation.origin] || invocation.origin;
       recentList.append(
@@ -424,8 +424,8 @@ export function initSettings(state, triggerExploration) {
   autonomyForm.addEventListener("submit", saveAutonomy);
   bridgeForm.addEventListener("submit", saveBridge);
   codexTaskAccess.addEventListener("change", () => {
-    if (!codexTaskAccess.checked) codexTaskExecution.checked = false;
-    codexTaskExecution.disabled = !codexTaskAccess.checked;
+    if (!codexTaskAccess.checked) codexProjectHandoffs.checked = false;
+    codexProjectHandoffs.disabled = !codexTaskAccess.checked;
   });
   runExploration.addEventListener("click", runManualExploration);
   quietHoursEnabled.addEventListener("change", toggleQuietInputs);

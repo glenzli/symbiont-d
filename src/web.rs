@@ -23,7 +23,10 @@ use crate::{
     asset::{AssetStore, MAX_IMAGE_BYTES, MAX_IMAGES_PER_MESSAGE, SavedImage},
     autonomy::{AutonomyConfig, AutonomyStore},
     bridge::{BridgeContextPacket, BridgeSettingsDraft, BridgeSnapshot, CodexBridge},
-    codex::{ChatInput, CodexClient, RateLimitInfo, RuntimeEvent, import_generated_images},
+    codex::{
+        ChatDisposition, ChatInput, ChatOutcome, CodexClient, RateLimitInfo, RuntimeEvent,
+        import_generated_images,
+    },
     compute::{ComputeConfig, ComputeLane, ComputeStore, ModelInfo},
     compute_policy::{ComputePolicyStore, ComputeTopicPolicy, ComputeTopicPolicyDraft},
     continuation::ContinuationQueue,
@@ -47,12 +50,12 @@ use crate::{
     reconciliation::{ReconciliationHandle, ReconciliationRuntime, ReconciliationSnapshot},
     reflection::{
         HunchFeedbackTarget, ReflectionConfig, ReflectionHandle, ReflectionRuntime,
-        ReflectionSnapshot,
+        ReflectionSnapshot, TurnDisposition,
     },
     symbiont_context::{
         ContextAuthor, ContextDocumentKind, SymbiontContextSnapshot, SymbiontContextStore,
     },
-    task_execution::{TaskExecutionQueue, TaskLeaseScope, TaskRunSnapshot},
+    task_execution::{ProjectHandoffQueue, ProjectHandoffSnapshot, ProjectLeaseScope},
     topics::{TopicContext, TopicDetail, TopicIndex, TopicService},
     usage::{ExplorationRunSummary, TraceBundle, UsageHeadline, UsageStore, UsageSummary},
 };
@@ -75,6 +78,7 @@ const RECONCILIATION_UI_JS: &str = include_str!("../web/reconciliation-ui.js");
 const TOPIC_UI_JS: &str = include_str!("../web/topic-ui.js");
 const MESSAGE_SYNC_JS: &str = include_str!("../web/message-sync.js");
 const MESSAGE_ACTIONS_JS: &str = include_str!("../web/message-actions.js");
+const TURN_DISPOSITION_UI_JS: &str = include_str!("../web/turn-disposition-ui.js");
 const QUOTE_UI_JS: &str = include_str!("../web/quote-ui.js");
 const PERMISSION_UI_JS: &str = include_str!("../web/permission-ui.js");
 const TRACE_UI_JS: &str = include_str!("../web/trace-ui.js");
@@ -108,7 +112,7 @@ pub struct AppState {
     conversation: ConversationCoordinator,
     bridge: Arc<CodexBridge>,
     permissions: Arc<PermissionBroker>,
-    task_execution: Arc<TaskExecutionQueue>,
+    project_handoffs: Arc<ProjectHandoffQueue>,
     continuations: Arc<ContinuationQueue>,
 }
 
@@ -133,7 +137,7 @@ impl AppState {
         conversation: ConversationCoordinator,
         bridge: Arc<CodexBridge>,
         permissions: Arc<PermissionBroker>,
-        task_execution: Arc<TaskExecutionQueue>,
+        project_handoffs: Arc<ProjectHandoffQueue>,
         continuations: Arc<ContinuationQueue>,
     ) -> Self {
         let topics = Arc::new(TopicService::new(
@@ -161,7 +165,7 @@ impl AppState {
             conversation,
             bridge,
             permissions,
-            task_execution,
+            project_handoffs,
             continuations,
         }
     }
@@ -185,14 +189,15 @@ struct IncomingChatRequest {
 
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
-struct TaskTargetRequest {
-    scope: TaskLeaseScope,
+struct ProjectTargetRequest {
+    scope: ProjectLeaseScope,
 }
 
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 struct BootstrapResponse {
     messages: Vec<MemoryEntry>,
+    turn_dispositions: Vec<TurnDisposition>,
     memory_chars: usize,
     status: &'static str,
     identity: IdentitySnapshot,
@@ -211,7 +216,7 @@ struct BootstrapResponse {
     conversation: ConversationSnapshot,
     bridge: BridgeSnapshot,
     permissions: Vec<PermissionRequestView>,
-    task_runs: Vec<TaskRunSnapshot>,
+    project_handoffs: Vec<ProjectHandoffSnapshot>,
 }
 
 #[derive(Serialize)]
@@ -234,9 +239,10 @@ struct RuntimeResponse {
     conversation: ConversationSnapshot,
     compute_policies: Vec<ComputeTopicPolicy>,
     messages: Vec<MemoryEntry>,
+    turn_dispositions: Vec<TurnDisposition>,
     permissions: Vec<PermissionRequestView>,
     bridge: BridgeSnapshot,
-    task_runs: Vec<TaskRunSnapshot>,
+    project_handoffs: Vec<ProjectHandoffSnapshot>,
 }
 
 #[derive(Default, Deserialize)]
@@ -384,6 +390,16 @@ enum WireEvent {
     },
     Reset,
     Interrupted,
+    Settled {
+        revision_id: String,
+        reaction: Option<String>,
+        memory_chars: usize,
+        profile: ProfileSnapshot,
+        autonomy_permitted: bool,
+        usage: UsageHeadline,
+        exploration: ExplorationSnapshot,
+        compute_policies: Vec<ComputeTopicPolicy>,
+    },
     Complete {
         message: MemoryEntry,
         memory_chars: usize,
@@ -428,6 +444,7 @@ pub fn router(state: AppState) -> Router {
         .route("/topic-ui.js", get(topic_ui_js))
         .route("/message-sync.js", get(message_sync_js))
         .route("/message-actions.js", get(message_actions_js))
+        .route("/turn-disposition-ui.js", get(turn_disposition_ui_js))
         .route("/quote-ui.js", get(quote_ui_js))
         .route("/permission-ui.js", get(permission_ui_js))
         .route("/trace-ui.js", get(trace_ui_js))
@@ -471,6 +488,10 @@ pub fn router(state: AppState) -> Router {
         .route("/api/reflection/config", post(update_reflection))
         .route("/api/reflection/run", post(trigger_reflection))
         .route("/api/reconciliation", get(reconciliation_snapshot))
+        .route(
+            "/api/internal/pcp-maintenance/evaluate",
+            post(evaluate_pcp_maintenance),
+        )
         .route("/api/reconciliation/preview", post(preview_reconciliation))
         .route(
             "/api/reconciliation/apply/{run_id}",
@@ -483,12 +504,10 @@ pub fn router(state: AppState) -> Router {
         .route("/api/codex/tasks", get(codex_tasks))
         .route("/api/codex/tasks/{thread_id}", get(codex_task))
         .route(
-            "/api/codex/tasks/{thread_id}/target",
-            post(select_codex_task),
+            "/api/codex/tasks/{thread_id}/project",
+            post(select_project_from_codex_task),
         )
-        .route("/api/codex/target", delete(clear_codex_task_target))
-        .route("/api/codex/tasks/{thread_id}/bind", post(bind_codex_task))
-        .route("/api/codex/binding", delete(unbind_codex_task))
+        .route("/api/codex/project", delete(clear_selected_project))
         .route("/api/traces/{trace_id}", get(trace_detail))
         .layer(DefaultBodyLimit::max(MAX_CHAT_BODY_BYTES))
         .with_state(state)
@@ -624,6 +643,13 @@ async fn message_actions_js() -> impl IntoResponse {
     )
 }
 
+async fn turn_disposition_ui_js() -> impl IntoResponse {
+    (
+        [(header::CONTENT_TYPE, "text/javascript; charset=utf-8")],
+        TURN_DISPOSITION_UI_JS,
+    )
+}
+
 async fn quote_ui_js() -> impl IntoResponse {
     (
         [(header::CONTENT_TYPE, "text/javascript; charset=utf-8")],
@@ -677,6 +703,12 @@ async fn bootstrap(State(state): State<AppState>) -> Result<Json<BootstrapRespon
         .into_iter()
         .filter(|entry| matches!(entry.role, MemoryRole::User | MemoryRole::Assistant))
         .collect();
+    let turn_dispositions = state
+        .reflection
+        .store()
+        .recent_turn_dispositions(200)
+        .await
+        .map_err(ApiError::internal)?;
     let memory_chars = state
         .continuity
         .memory_chars()
@@ -697,6 +729,7 @@ async fn bootstrap(State(state): State<AppState>) -> Result<Json<BootstrapRespon
 
     Ok(Json(BootstrapResponse {
         messages,
+        turn_dispositions,
         memory_chars,
         status: "connected",
         identity: state.identity.snapshot().await,
@@ -719,7 +752,7 @@ async fn bootstrap(State(state): State<AppState>) -> Result<Json<BootstrapRespon
         conversation: state.conversation.snapshot().await,
         bridge: state.bridge.snapshot().await,
         permissions: state.permissions.snapshot().await,
-        task_runs: state.task_execution.snapshot().await,
+        project_handoffs: state.project_handoffs.snapshot().await,
     }))
 }
 
@@ -958,52 +991,27 @@ async fn codex_task(
         .map_err(ApiError::not_found)
 }
 
-async fn bind_codex_task(
+async fn select_project_from_codex_task(
     State(state): State<AppState>,
     AxumPath(thread_id): AxumPath<String>,
+    Json(request): Json<ProjectTargetRequest>,
 ) -> Result<Json<BridgeSnapshot>, ApiError> {
     require_task_access(&state).await?;
     state
         .bridge
-        .bind_task(&thread_id)
+        .select_project_from_task(&thread_id, request.scope)
         .await
         .map(Json)
         .map_err(ApiError::bad_request)
 }
 
-async fn select_codex_task(
-    State(state): State<AppState>,
-    AxumPath(thread_id): AxumPath<String>,
-    Json(request): Json<TaskTargetRequest>,
-) -> Result<Json<BridgeSnapshot>, ApiError> {
-    require_task_access(&state).await?;
-    state
-        .bridge
-        .select_task(&thread_id, request.scope)
-        .await
-        .map(Json)
-        .map_err(ApiError::bad_request)
-}
-
-async fn clear_codex_task_target(
+async fn clear_selected_project(
     State(state): State<AppState>,
 ) -> Result<Json<BridgeSnapshot>, ApiError> {
     require_task_access(&state).await?;
     state
         .bridge
-        .clear_task_target()
-        .await
-        .map(Json)
-        .map_err(ApiError::internal)
-}
-
-async fn unbind_codex_task(
-    State(state): State<AppState>,
-) -> Result<Json<BridgeSnapshot>, ApiError> {
-    require_task_access(&state).await?;
-    state
-        .bridge
-        .unbind_task()
+        .clear_selected_project()
         .await
         .map(Json)
         .map_err(ApiError::internal)
@@ -1047,6 +1055,12 @@ async fn runtime(
         .recent_messages_after(query.after_revision_id.as_deref(), 20)
         .await
         .map_err(ApiError::internal)?;
+    let turn_dispositions = state
+        .reflection
+        .store()
+        .recent_turn_dispositions(200)
+        .await
+        .map_err(ApiError::internal)?;
     Ok(Json(RuntimeResponse {
         identity: state.identity.snapshot().await,
         usage,
@@ -1057,9 +1071,10 @@ async fn runtime(
         conversation: state.conversation.snapshot().await,
         compute_policies: state.compute_policies.snapshot().await,
         messages,
+        turn_dispositions,
         permissions: state.permissions.snapshot().await,
         bridge: state.bridge.snapshot().await,
-        task_runs: state.task_execution.snapshot().await,
+        project_handoffs: state.project_handoffs.snapshot().await,
     }))
 }
 
@@ -1107,6 +1122,18 @@ async fn trigger_reflection(State(state): State<AppState>) -> Json<TriggerRespon
 
 async fn reconciliation_snapshot(State(state): State<AppState>) -> Json<ReconciliationSnapshot> {
     Json(state.reconciliation.snapshot().await)
+}
+
+async fn evaluate_pcp_maintenance(
+    State(state): State<AppState>,
+    Json(request): Json<pcp_runtime::MaintenanceWorkerRequest>,
+) -> Result<Json<pcp_runtime::MaintenanceWorkerResponse>, ApiError> {
+    state
+        .reconciliation
+        .evaluate_pcp_maintenance(request)
+        .await
+        .map(Json)
+        .map_err(ApiError::internal)
 }
 
 async fn preview_reconciliation(State(state): State<AppState>) -> Json<TriggerResponse> {
@@ -2002,7 +2029,7 @@ async fn run_chat(
                 runtime_tx.clone(),
             )
             .await;
-        state.bridge.suspend_execution().await;
+        state.bridge.suspend_handoffs().await;
         let mut outcome = match outcome_result {
             Ok(outcome) => outcome,
             Err(error) => {
@@ -2098,6 +2125,9 @@ async fn run_chat(
     drop(runtime_tx);
     runtime_forwarder.await?;
     state.usage.record_all(&outcome.invocations).await?;
+    if !outcome.disposition.produces_message() {
+        return finish_non_reply_chat(&state, outcome, last_user_revision_id, wire_tx).await;
+    }
     let generated_images =
         import_generated_images(&state.assets, &outcome.generated_images).await?;
     let mut input_revision_ids = source_revision_ids;
@@ -2164,6 +2194,68 @@ async fn run_chat(
     let _ = wire_tx
         .send(WireEvent::Complete {
             message,
+            memory_chars,
+            profile,
+            autonomy_permitted,
+            usage,
+            exploration,
+            compute_policies: state.compute_policies.snapshot().await,
+        })
+        .await;
+    Ok(())
+}
+
+async fn finish_non_reply_chat(
+    state: &AppState,
+    outcome: ChatOutcome,
+    last_user_revision_id: String,
+    wire_tx: mpsc::Sender<WireEvent>,
+) -> anyhow::Result<()> {
+    let reaction = outcome.disposition.reaction().map(str::to_owned);
+    if matches!(outcome.disposition, ChatDisposition::Reply) {
+        anyhow::bail!("reply disposition entered the non-reply completion path");
+    }
+    state
+        .reflection
+        .store()
+        .cancel_follow_ups(
+            &outcome.scheduled_follow_up_ids,
+            "turn_settled_without_visible_reply",
+        )
+        .await?;
+    state
+        .continuations
+        .cancel(&outcome.reserved_continuation_ids)
+        .await;
+    state
+        .exploration
+        .supersede_intents(
+            &outcome.requested_exploration_ids,
+            "turn_settled_without_visible_reply",
+        )
+        .await?;
+    state
+        .codex
+        .lock()
+        .await
+        .mark_interactive_revision(last_user_revision_id.clone());
+    state
+        .reflection
+        .record_turn_disposition(&last_user_revision_id, reaction.as_deref())
+        .await?;
+
+    let memory_chars = state.continuity.memory_chars().await?;
+    let profile = state.profile.snapshot().await;
+    let autonomy_permitted = state
+        .autonomy
+        .permitted(profile.status == SetupStatus::Ready)
+        .await;
+    let usage = state.usage.headline(&today_started_at()).await?;
+    let exploration = state.exploration.snapshot().await;
+    let _ = wire_tx
+        .send(WireEvent::Settled {
+            revision_id: last_user_revision_id,
+            reaction,
             memory_chars,
             profile,
             autonomy_permitted,

@@ -118,6 +118,54 @@ async fn records_interaction_facts_without_turning_them_into_scores() {
 }
 
 #[tokio::test]
+async fn records_nonverbal_turn_completion_as_local_interaction_evidence() {
+    let root = temp_root("turn-disposition");
+    let store = ReflectionStore::open(
+        root.join("reflection.sqlite3"),
+        root.join("reflection.toml"),
+    )
+    .await
+    .unwrap();
+    store
+        .record_message(
+            &message(
+                MemoryRole::User,
+                "rev_acknowledgement",
+                "嗯，你的表述更准确。",
+                &Utc::now().to_rfc3339(),
+            ),
+            None,
+            false,
+            &[],
+        )
+        .await
+        .unwrap();
+    store
+        .record_turn_disposition("rev_acknowledgement", Some("👍"))
+        .await
+        .unwrap();
+
+    let dispositions = store.recent_turn_dispositions(10).await.unwrap();
+    assert_eq!(dispositions.len(), 1);
+    assert_eq!(dispositions[0].revision_id, "rev_acknowledgement");
+    assert_eq!(dispositions[0].reaction.as_deref(), Some("👍"));
+    let batch = store.pending_batch(20).await.unwrap().unwrap();
+    assert_eq!(batch.events.len(), 2);
+    assert_eq!(batch.events[1].kind, "turn_reaction");
+    assert!(batch.source_bundle.contains("reaction=\"👍\""));
+
+    store
+        .record_turn_disposition("rev_acknowledgement", None)
+        .await
+        .unwrap();
+    let dispositions = store.recent_turn_dispositions(10).await.unwrap();
+    assert_eq!(dispositions.len(), 1);
+    assert_eq!(dispositions[0].reaction, None);
+
+    let _ = tokio::fs::remove_dir_all(root).await;
+}
+
+#[tokio::test]
 async fn maintains_revisable_episode_and_hypothesis_projections() {
     let root = temp_root("projections");
     let store = ReflectionStore::open(

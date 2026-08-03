@@ -21,9 +21,14 @@ use tracing::{debug, warn};
 use super::{
     approvals::{approval_response, automatic_server_request_response, permission_request},
     autonomous::{finding_from_invocations, review_prompt, scout_prompt},
+    interaction_output::{
+        ChatDisposition, InteractiveDeltaGate, interaction_disposition_prompt,
+        interpret_interactive_output,
+    },
     prompts::{
         additional_context_value, context_fragments, context_maintenance_prompt,
         developer_instructions, interaction_reflection_prompt, memory_reconciliation_prompt,
+        pcp_maintenance_developer_instructions, pcp_maintenance_worker_prompt,
         profile_review_prompt, summary_maintenance_prompt,
     },
     task_bridge::{CodexTaskDetail, CodexTaskSummary, parse_task_detail, parse_task_list},
@@ -38,7 +43,9 @@ use crate::{
     continuation::ContinuationQueue,
     continuity::ContinuityHost,
     curiosity::CuriosityStore,
-    diagnostics::{ContextSnapshot, ExecutionTraceEvent, NativeThreadSnapshot, TraceEventKind},
+    diagnostics::{
+        ContextFragment, ContextSnapshot, ExecutionTraceEvent, NativeThreadSnapshot, TraceEventKind,
+    },
     exploration::ExplorationIntentQueue,
     memory::{MessageMetadata, MessageRunMetadata},
     outreach::{OutreachCandidate, PROPOSE_OUTREACH_TOOL},
@@ -51,7 +58,7 @@ use crate::{
     reflection::ReflectionStore,
     rollover::{self, NativeThreadCursor, RolloverDecision, ThreadContextPressure},
     symbiont_context::SymbiontContextStore,
-    task_execution::{TaskExecutionQueue, TaskExecutionRequest},
+    task_execution::{ProjectHandoffQueue, ProjectHandoffRequest},
     usage::{InvocationRecord, ToolTraceStep},
     web_fetch::WebFetcher,
     working_context::WorkingContext,
@@ -64,6 +71,7 @@ const CONTEXT_MAINTENANCE_COMPLETE_MARKER: &str = "<symbiont-context-maintained/
 const PROFILE_REVIEW_COMPLETE_MARKER: &str = "<symbiont-profile-reviewed/>";
 const REFLECTION_COMPLETE_MARKER: &str = "<symbiont-reflected/>";
 const RECONCILIATION_COMPLETE_MARKER: &str = "<symbiont-reconciled/>";
+const PCP_MAINTENANCE_COMPLETE_MARKER: &str = "<symbiont-pcp-maintained/>";
 const CONTINUATION_SILENT_MARKER: &str = "<symbiont-no-continuation/>";
 
 #[derive(Clone)]
@@ -104,6 +112,7 @@ pub enum RuntimeEvent {
 
 pub struct ChatOutcome {
     pub text: String,
+    pub disposition: ChatDisposition,
     pub generated_images: Vec<GeneratedImageOutput>,
     pub metadata: MessageMetadata,
     pub invocations: Vec<InvocationRecord>,
@@ -112,6 +121,12 @@ pub struct ChatOutcome {
     pub reserved_continuation_ids: Vec<String>,
     pub requested_exploration_ids: Vec<String>,
     pub interrupted: bool,
+}
+
+pub struct ProjectHandoffOutcome {
+    pub task_id: String,
+    pub task_title: String,
+    pub invocations: Vec<InvocationRecord>,
 }
 
 #[derive(Clone, Debug)]
@@ -191,6 +206,20 @@ pub struct ReconciliationModelRequest<'a> {
     pub events: mpsc::Sender<RuntimeEvent>,
 }
 
+pub struct PcpMaintenanceModelRequest<'a> {
+    pub request: &'a pcp_runtime::MaintenanceWorkerRequest,
+    pub compute: &'a ComputeConfig,
+    pub profile: &'a ProfileSnapshot,
+    pub input_events: watch::Receiver<u64>,
+    pub events: mpsc::Sender<RuntimeEvent>,
+}
+
+pub struct PcpMaintenanceModelOutcome {
+    pub response: pcp_runtime::MaintenanceWorkerResponse,
+    pub invocations: Vec<InvocationRecord>,
+    pub interrupted: bool,
+}
+
 #[derive(Clone, Debug, Default)]
 struct TokenBreakdown {
     input_tokens: u64,
@@ -218,12 +247,14 @@ enum BackgroundThread {
     AutonomousScout,
     AutonomousReview,
     Maintenance,
+    PcpMaintenance,
 }
 
 #[derive(Clone, Copy)]
 enum ToolSurface {
     Full,
     AutonomousScout,
+    PcpMaintenance,
 }
 
 pub struct CodexClient {
@@ -235,6 +266,7 @@ pub struct CodexClient {
     autonomous_scout_thread_id: String,
     autonomous_review_thread_id: String,
     maintenance_thread_id: String,
+    pcp_maintenance_thread_id: String,
     workspace: PathBuf,
     continuity: Arc<ContinuityHost>,
     interactive_cursor: NativeThreadCursor,
@@ -260,7 +292,7 @@ impl CodexClient {
         compute_policies: Arc<crate::compute_policy::ComputePolicyStore>,
         permissions: Arc<PermissionBroker>,
         web_fetcher: Arc<WebFetcher>,
-        task_execution: Arc<TaskExecutionQueue>,
+        project_handoffs: Arc<ProjectHandoffQueue>,
         continuations: Arc<ContinuationQueue>,
         exploration_intents: Arc<ExplorationIntentQueue>,
     ) -> Result<Self> {
@@ -278,7 +310,7 @@ impl CodexClient {
                     Arc::clone(&compute_policies),
                     Arc::clone(&permissions),
                     Arc::clone(&web_fetcher),
-                    Arc::clone(&task_execution),
+                    Arc::clone(&project_handoffs),
                     Arc::clone(&continuations),
                     Arc::clone(&exploration_intents),
                 ),
@@ -312,7 +344,7 @@ impl CodexClient {
         compute_policies: Arc<crate::compute_policy::ComputePolicyStore>,
         permissions: Arc<PermissionBroker>,
         web_fetcher: Arc<WebFetcher>,
-        task_execution: Arc<TaskExecutionQueue>,
+        project_handoffs: Arc<ProjectHandoffQueue>,
         continuations: Arc<ContinuationQueue>,
         exploration_intents: Arc<ExplorationIntentQueue>,
     ) -> Result<Self> {
@@ -344,6 +376,7 @@ impl CodexClient {
             autonomous_scout_thread_id: String::new(),
             autonomous_review_thread_id: String::new(),
             maintenance_thread_id: String::new(),
+            pcp_maintenance_thread_id: String::new(),
             workspace: config.workspace.clone(),
             continuity: Arc::clone(&continuity),
             interactive_cursor: NativeThreadCursor::new(),
@@ -355,7 +388,7 @@ impl CodexClient {
                 reflection,
                 Arc::clone(&compute_policies),
                 Some(web_fetcher),
-                task_execution,
+                project_handoffs,
                 continuations,
                 exploration_intents,
             ),
@@ -382,6 +415,9 @@ impl CodexClient {
             .await?;
         client.maintenance_thread_id = client
             .start_thread(&config.workspace, ToolSurface::Full)
+            .await?;
+        client.pcp_maintenance_thread_id = client
+            .start_thread(&config.workspace, ToolSurface::PcpMaintenance)
             .await?;
         Ok(client)
     }
@@ -434,32 +470,22 @@ impl CodexClient {
         Ok(detail)
     }
 
-    pub async fn execute_bound_task(
+    pub async fn start_project_handoff(
         &mut self,
-        request: &TaskExecutionRequest,
+        request: &ProjectHandoffRequest,
         local_images: &[PathBuf],
         compute: &ComputeConfig,
         profile: &ProfileSnapshot,
         events: mpsc::Sender<RuntimeEvent>,
-    ) -> Result<ChatOutcome> {
-        if request.task.thread_id.trim().is_empty() || request.task.thread_id.len() > 128 {
-            anyhow::bail!("invalid bound Codex task id");
+    ) -> Result<ProjectHandoffOutcome> {
+        if request.project.id.trim().is_empty() || request.project.id.len() > 128 {
+            anyhow::bail!("invalid selected project id");
         }
-        let cwd = PathBuf::from(&request.task.cwd);
+        let cwd = PathBuf::from(&request.project.cwd);
         if !cwd.is_absolute() {
-            anyhow::bail!("bound Codex task working directory must be absolute");
+            anyhow::bail!("selected project working directory must be absolute");
         }
-        self.request(
-            "thread/resume",
-            json!({
-                "threadId": request.task.thread_id,
-                "cwd": cwd,
-                "approvalPolicy": granular_approval_policy(),
-                "sandbox": "workspace-write"
-            }),
-        )
-        .await
-        .context("resume the bound Codex task")?;
+        let task_id = self.start_project_handoff_thread(&cwd).await?;
         let image_note = if local_images.is_empty() {
             String::new()
         } else {
@@ -472,19 +498,19 @@ impl CodexClient {
             )
         };
         let prompt = format!(
-            "The user explicitly delegated this concrete repository operation from symbiont-d \
-             into this bound Codex task.\n\nRequest:\n{}\n\nWhy now:\n{}{}\n\nWork directly in \
-             the existing repository. Inspect the current worktree before editing, preserve \
+            "This is a new Codex task created by an explicit Symbiont handoff for project `{}`. \
+             It is not a continuation of the Codex task used to choose this project.\n\nRequest:\n{}\n\nWhy now:\n{}{}\n\nWork directly in \
+             the selected repository. Inspect the current worktree before editing, preserve \
              unrelated user changes, implement the request end to end, and run proportionate \
              verification. Return a concise account of the changes, verification, and any \
              unresolved limitation.",
-            request.instruction, request.reason, image_note
+            request.project.title, request.instruction, request.reason, image_note
         );
         let context = format!(
-            "Bound Codex task execution for `{}`. This is an explicitly authorized implementation \
-             handoff, not ordinary symbiont conversation. Use the task's repository context and \
-             coding tools. Do not modify symbiont memory, profile, Curiosity, or PCP from this run.",
-            request.task.title
+            "Project handoff for `{}`. This is an explicitly authorized implementation task, not \
+             ordinary Symbiont conversation. Work only in the selected project. Do not use or \
+             claim access to Symbiont memory, profile, Curiosity, or PCP from this task.",
+            request.project.title
         );
         let overrides = TurnOverrides {
             cwd: cwd.clone(),
@@ -500,10 +526,10 @@ impl CodexClient {
             self.input_items_with_local_images(&prompt, local_images, request.lane, compute)?;
         let mut turn = self
             .run_turn(
-                &request.task.thread_id,
+                &task_id,
                 input_items,
                 request.lane,
-                "codex_task",
+                "codex_handoff",
                 compute,
                 profile,
                 &context,
@@ -516,18 +542,11 @@ impl CodexClient {
             )
             .await?;
         turn.invocation.produced_message = true;
-        let generated_images = turn.generated_images;
         let invocations = vec![turn.invocation];
-        Ok(ChatOutcome {
-            text: turn.text,
-            generated_images,
-            metadata: metadata_for(&invocations, "codex_task"),
+        Ok(ProjectHandoffOutcome {
+            task_id,
+            task_title: format!("Symbiont · {}", request.project.title),
             invocations,
-            context_revision_ids: Vec::new(),
-            scheduled_follow_up_ids: Vec::new(),
-            reserved_continuation_ids: Vec::new(),
-            requested_exploration_ids: Vec::new(),
-            interrupted: false,
         })
     }
 
@@ -1123,11 +1142,72 @@ impl CodexClient {
         })
     }
 
+    pub async fn evaluate_pcp_maintenance(
+        &mut self,
+        request: PcpMaintenanceModelRequest<'_>,
+    ) -> Result<PcpMaintenanceModelOutcome> {
+        let prompt =
+            pcp_maintenance_worker_prompt(request.request, PCP_MAINTENANCE_COMPLETE_MARKER)?;
+        let thread_id = self.pcp_maintenance_thread_id.clone();
+        let outcome = self
+            .run_request(
+                thread_id.clone(),
+                text_input_items(&prompt),
+                ComputeLane::Investigate,
+                "pcp_maintenance",
+                request.compute,
+                request.profile,
+                "",
+                None,
+                None,
+                false,
+                Some(request.input_events),
+                &request.events,
+            )
+            .await?;
+        if !outcome.interrupted {
+            self.renew_background_thread(&thread_id, BackgroundThread::PcpMaintenance)
+                .await;
+        }
+        let completion = outcome
+            .invocations
+            .iter()
+            .flat_map(|invocation| &invocation.trace_steps)
+            .rev()
+            .find(|step| {
+                step.succeeded
+                    && step.namespace == "symbiont"
+                    && step.tool == "complete_pcp_maintenance"
+            });
+        let response = if outcome.interrupted {
+            pcp_runtime::MaintenanceWorkerResponse::Defer {
+                reason: Some("superseded by newer user input".to_owned()),
+            }
+        } else {
+            completion
+                .map(|step| step.arguments.clone())
+                .map(serde_json::from_value::<pcp_runtime::MaintenanceWorkerResponse>)
+                .transpose()
+                .context("parse PCP semantic maintenance decision")?
+                .context("PCP semantic maintenance completed without a decision")?
+        };
+        let mut invocations = outcome.invocations;
+        for invocation in &mut invocations {
+            invocation.produced_message = false;
+        }
+        Ok(PcpMaintenanceModelOutcome {
+            response,
+            invocations,
+            interrupted: outcome.interrupted,
+        })
+    }
+
     async fn renew_background_thread(&mut self, previous: &str, slot: BackgroundThread) {
         let workspace = self.workspace.clone();
         let tool_surface = match slot {
             BackgroundThread::AutonomousScout => ToolSurface::AutonomousScout,
             BackgroundThread::AutonomousReview | BackgroundThread::Maintenance => ToolSurface::Full,
+            BackgroundThread::PcpMaintenance => ToolSurface::PcpMaintenance,
         };
         match self.start_thread(&workspace, tool_surface).await {
             Ok(next) => {
@@ -1135,6 +1215,7 @@ impl CodexClient {
                     BackgroundThread::AutonomousScout => self.autonomous_scout_thread_id = next,
                     BackgroundThread::AutonomousReview => self.autonomous_review_thread_id = next,
                     BackgroundThread::Maintenance => self.maintenance_thread_id = next,
+                    BackgroundThread::PcpMaintenance => self.pcp_maintenance_thread_id = next,
                 }
                 self.clear_thread_state(previous);
             }
@@ -1243,6 +1324,29 @@ impl CodexClient {
             (text, generated_images)
         };
 
+        let (disposition, final_text) = if origin == "interactive" && generated_images.is_empty() {
+            interpret_interactive_output(final_text)
+        } else {
+            (ChatDisposition::Reply, final_text)
+        };
+        if let Some(invocation) = invocations.last_mut() {
+            invocation.produced_message = disposition.produces_message();
+            if !disposition.produces_message()
+                && let Some(event) = invocation
+                    .trace_events
+                    .iter_mut()
+                    .rev()
+                    .find(|event| matches!(&event.kind, TraceEventKind::AgentMessage))
+            {
+                event.kind = TraceEventKind::TurnSettled;
+                event.title = if disposition.reaction().is_some() {
+                    "Emoji reaction completed the turn".to_owned()
+                } else {
+                    "Turn settled without an assistant message".to_owned()
+                };
+                event.details = json!({"reaction": disposition.reaction()});
+            }
+        }
         let metadata = metadata_for(&invocations, origin);
         let context_revision_ids = context_revision_ids(&invocations);
         let scheduled_follow_up_ids =
@@ -1253,6 +1357,7 @@ impl CodexClient {
             successful_tool_result_ids(&invocations, "symbiont", "request_exploration", "id");
         Ok(ChatOutcome {
             text: final_text,
+            disposition,
             generated_images,
             metadata,
             invocations,
@@ -1310,19 +1415,34 @@ impl CodexClient {
                     (Vec::new(), false)
                 }
             };
-        let fragments = context_fragments(
-            lane,
-            allow_escalation,
-            profile,
-            continuity_context,
-            working_context,
-            rollover,
-        );
+        let mut fragments = if origin == "pcp_maintenance" {
+            Vec::new()
+        } else {
+            context_fragments(
+                lane,
+                allow_escalation,
+                profile,
+                continuity_context,
+                working_context,
+                rollover,
+            )
+        };
+        if origin == "interactive" {
+            fragments.push(ContextFragment {
+                source: "symbiont.interaction".to_owned(),
+                kind: "application".to_owned(),
+                value: interaction_disposition_prompt(),
+            });
+        }
         let mut context_snapshot = ContextSnapshot {
             input: input.clone(),
             fragments: fragments.clone(),
             working_context: working_context.cloned(),
-            developer_instructions: developer_instructions(),
+            developer_instructions: if origin == "pcp_maintenance" {
+                pcp_maintenance_developer_instructions().to_owned()
+            } else {
+                developer_instructions()
+            },
             native_thread: NativeThreadSnapshot {
                 thread_id: thread_id.to_owned(),
                 cursor_before: working_context.and_then(|context| context.cursor_before.clone()),
@@ -1381,6 +1501,7 @@ impl CodexClient {
         let mut effective_model = lane_config.model.clone();
         let mut interrupt_requested = false;
         let mut interrupt_sent = false;
+        let mut interactive_delta_gate = InteractiveDeltaGate::new(origin == "interactive");
 
         loop {
             let message = if interrupt_sent || input_events.is_none() {
@@ -1467,13 +1588,9 @@ impl CodexClient {
                 Some("item/agentMessage/delta") if event_matches(params, thread_id, &turn_id) => {
                     if let Some(delta) = params.get("delta").and_then(Value::as_str) {
                         response_text.push_str(delta);
-                        send_event(
-                            events,
-                            RuntimeEvent::Delta {
-                                text: delta.to_owned(),
-                            },
-                        )
-                        .await;
+                        if let Some(text) = interactive_delta_gate.push(delta) {
+                            send_event(events, RuntimeEvent::Delta { text }).await;
+                        }
                     }
                 }
                 Some("thread/tokenUsage/updated") if event_matches(params, thread_id, &turn_id) => {
@@ -1563,6 +1680,9 @@ impl CodexClient {
                     }
                     let interrupted = status == "interrupted";
                     let response_text = completed_response_text(params, &response_text);
+                    if let Some(text) = interactive_delta_gate.finish(&response_text) {
+                        send_event(events, RuntimeEvent::Delta { text }).await;
+                    }
                     if response_text.is_empty() && !interrupted {
                         anyhow::bail!("Codex completed without an assistant message");
                     }
@@ -1733,15 +1853,41 @@ impl CodexClient {
         });
     }
 
+    async fn start_project_handoff_thread(&mut self, cwd: &PathBuf) -> Result<String> {
+        let result = self
+            .request(
+                "thread/start",
+                json!({
+                    "cwd": cwd,
+                    "approvalPolicy": granular_approval_policy(),
+                    "sandbox": "workspace-write",
+                    "ephemeral": false,
+                    "serviceName": "symbiont-d",
+                    "developerInstructions": "You are a new Codex task created by an explicit Symbiont project handoff. Work only on the handoff request in this repository. Inspect the worktree before editing, preserve unrelated changes, and verify proportionately. Do not treat this as a continuation of any earlier Codex task and do not claim access to private Symbiont conversation or PCP data."
+                }),
+            )
+            .await
+            .context("start a new Codex project handoff task")?;
+        result
+            .pointer("/thread/id")
+            .and_then(Value::as_str)
+            .map(str::to_owned)
+            .context("thread/start response omitted thread.id")
+    }
+
     async fn start_thread(
         &mut self,
         workspace: &PathBuf,
         tool_surface: ToolSurface,
     ) -> Result<String> {
-        let instructions = developer_instructions();
+        let instructions = match tool_surface {
+            ToolSurface::PcpMaintenance => pcp_maintenance_developer_instructions().to_owned(),
+            ToolSurface::Full | ToolSurface::AutonomousScout => developer_instructions(),
+        };
         let dynamic_tools = match tool_surface {
             ToolSurface::Full => SymbiontTools::specifications(),
             ToolSurface::AutonomousScout => SymbiontTools::scout_specifications(),
+            ToolSurface::PcpMaintenance => SymbiontTools::pcp_maintenance_specifications(),
         };
         let result = self
             .request(
@@ -2263,9 +2409,7 @@ fn activity_label(item: Option<&Value>) -> Option<String> {
                     "upsert_compute_policy" => "正在保存话题计算规则",
                     "remove_compute_policy" => "正在移除话题计算规则",
                     "fetch_url" => "正在读取指定网页",
-                    "delegate_to_selected_task" | "delegate_to_bound_task" => {
-                        "正在把实现交给选定的 Codex 任务"
-                    }
+                    "handoff_to_selected_project" => "正在为选定项目创建新的 Codex 任务",
                     "open_hunch" => "正在留下一个待探索的问题",
                     "revise_hunch" => "正在修订探索中的问题",
                     "retire_hunch" => "正在结束一个探索问题",
@@ -2361,6 +2505,7 @@ fn metadata_for(invocations: &[InvocationRecord], origin: &str) -> MessageMetada
 fn interrupted_chat_outcome(invocations: Vec<InvocationRecord>, origin: &str) -> ChatOutcome {
     ChatOutcome {
         text: String::new(),
+        disposition: ChatDisposition::Reply,
         generated_images: Vec::new(),
         metadata: metadata_for(&invocations, origin),
         context_revision_ids: context_revision_ids(&invocations),

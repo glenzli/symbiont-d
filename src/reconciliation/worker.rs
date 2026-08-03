@@ -14,7 +14,7 @@ use tracing::warn;
 
 use super::{
     ReconciliationMode, ReconciliationPhase, ReconciliationRuntime, ReconciliationSnapshot,
-    ReconciliationStore, store::CompletedRun,
+    ReconciliationStore, pcp_worker::PcpMaintenanceWorker, store::CompletedRun,
 };
 use crate::{
     autonomy::AutonomyStore,
@@ -55,6 +55,7 @@ pub struct ReconciliationHandle {
     runtime: Arc<RwLock<ReconciliationRuntime>>,
     trigger: mpsc::Sender<ReconciliationTrigger>,
     queued_or_running: Arc<AtomicBool>,
+    pcp_worker: PcpMaintenanceWorker,
 }
 
 impl ReconciliationHandle {
@@ -65,6 +66,7 @@ impl ReconciliationHandle {
         let runtime = Arc::new(RwLock::new(ReconciliationRuntime::default()));
         let queued_or_running = Arc::new(AtomicBool::new(false));
         let (trigger, trigger_rx) = mpsc::channel(8);
+        let pcp_worker = PcpMaintenanceWorker::new(Arc::clone(&store), dependencies.clone());
         tokio::spawn(run(
             Arc::clone(&store),
             Arc::clone(&runtime),
@@ -72,13 +74,13 @@ impl ReconciliationHandle {
             Arc::clone(&queued_or_running),
             trigger_rx,
         ));
-        let handle = Self {
+        Self {
             store,
             runtime,
             trigger,
             queued_or_running,
-        };
-        handle
+            pcp_worker,
+        }
     }
 
     pub fn preview(&self) -> bool {
@@ -105,6 +107,13 @@ impl ReconciliationHandle {
             latest_preview: self.store.latest_preview().await,
             recent_runs,
         }
+    }
+
+    pub async fn evaluate_pcp_maintenance(
+        &self,
+        request: pcp_runtime::MaintenanceWorkerRequest,
+    ) -> Result<pcp_runtime::MaintenanceWorkerResponse> {
+        self.pcp_worker.evaluate(request).await
     }
 
     fn enqueue(&self, trigger: ReconciliationTrigger) -> bool {
@@ -327,7 +336,7 @@ async fn reconcile_once(
     Ok(())
 }
 
-async fn over_budget(dependencies: &ReconciliationDependencies) -> Result<bool> {
+pub(super) async fn over_budget(dependencies: &ReconciliationDependencies) -> Result<bool> {
     let headline = dependencies.usage.headline(&today_started_at()).await?;
     let autonomy_limit = dependencies.autonomy.snapshot().await.daily_token_limit;
     let reflection_limit = dependencies.reflection.config().await.daily_token_limit;

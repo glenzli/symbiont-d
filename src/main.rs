@@ -59,7 +59,7 @@ use profile::ProfileStore;
 use reconciliation::{ReconciliationDependencies, ReconciliationHandle, ReconciliationStore};
 use reflection::{ReflectionHandle, ReflectionStore};
 use symbiont_context::SymbiontContextStore;
-use task_execution::TaskExecutionQueue;
+use task_execution::ProjectHandoffQueue;
 use tokio::{net::TcpListener, sync::Mutex};
 use tracing::info;
 use tracing_subscriber::EnvFilter;
@@ -166,13 +166,14 @@ async fn main() -> Result<()> {
     );
     let permissions = Arc::new(PermissionBroker::new());
     let web_fetcher = Arc::new(WebFetcher::new(Arc::clone(&permissions))?);
-    let (task_execution, task_execution_receiver) = TaskExecutionQueue::open(resolve_data_path(
-        &workspace,
-        "SYMBIONT_TASK_EXECUTION_PATH",
-        "task-runs.json",
-    ))
-    .await?;
-    let task_execution = Arc::new(task_execution);
+    let (project_handoffs, project_handoff_receiver) =
+        ProjectHandoffQueue::open(resolve_data_path(
+            &workspace,
+            "SYMBIONT_PROJECT_HANDOFF_PATH",
+            "codex-handoffs.json",
+        ))
+        .await?;
+    let project_handoffs = Arc::new(project_handoffs);
     let (continuations, continuation_receiver) = ContinuationQueue::new();
     let continuations = Arc::new(continuations);
     let (exploration_intents, exploration_intent_receiver) =
@@ -197,7 +198,7 @@ async fn main() -> Result<()> {
         Arc::clone(&compute_policies),
         Arc::clone(&permissions),
         Arc::clone(&web_fetcher),
-        Arc::clone(&task_execution),
+        Arc::clone(&project_handoffs),
         Arc::clone(&continuations),
         Arc::clone(&exploration_intents),
     )
@@ -242,7 +243,7 @@ async fn main() -> Result<()> {
             Arc::clone(&context),
             Arc::clone(&curiosity),
             Arc::clone(&reflection_store),
-            Arc::clone(&task_execution),
+            Arc::clone(&project_handoffs),
             Arc::clone(&assets),
         )
         .await?,
@@ -290,14 +291,13 @@ async fn main() -> Result<()> {
         },
     );
     task_execution::start_worker(
-        task_execution_receiver,
-        Arc::clone(&task_execution),
+        project_handoff_receiver,
+        Arc::clone(&project_handoffs),
         Arc::clone(&codex),
         Arc::clone(&compute),
         Arc::clone(&profile),
         Arc::clone(&continuity),
         Arc::clone(&assets),
-        reflection.clone(),
         Arc::clone(&usage),
     );
     maintenance::start(
@@ -356,7 +356,7 @@ async fn main() -> Result<()> {
         conversation,
         bridge,
         permissions,
-        task_execution,
+        project_handoffs,
         continuations,
     );
     let app = web::router(state);

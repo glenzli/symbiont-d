@@ -433,7 +433,7 @@ impl UsageStore {
                         COALESCE(SUM(
                             CASE
                                 WHEN origin IN (
-                                    'autonomous', 'autonomous_scout', 'maintenance',
+                                    'autonomous', 'autonomous_scout', 'maintenance', 'pcp_maintenance',
                                     'reconciliation_preview', 'reconciliation_apply'
                                 )
                                      AND completed_at >= ?1
@@ -443,7 +443,7 @@ impl UsageStore {
                         COALESCE(SUM(
                             CASE
                                 WHEN origin IN (
-                                    'autonomous', 'autonomous_scout', 'maintenance', 'reflection',
+                                    'autonomous', 'autonomous_scout', 'maintenance', 'pcp_maintenance', 'reflection',
                                     'reconciliation_preview', 'reconciliation_apply'
                                 )
                                      AND completed_at >= ?1
@@ -454,7 +454,7 @@ impl UsageStore {
                         COALESCE(SUM(
                             CASE
                                 WHEN origin IN (
-                                    'autonomous', 'autonomous_scout', 'maintenance', 'reflection',
+                                    'autonomous', 'autonomous_scout', 'maintenance', 'pcp_maintenance', 'reflection',
                                     'reconciliation_preview', 'reconciliation_apply'
                                 )
                                      AND completed_at >= ?1
@@ -473,7 +473,7 @@ impl UsageStore {
                         COALESCE(SUM(
                             CASE
                                 WHEN origin IN (
-                                    'reflection',
+                                    'reflection', 'pcp_maintenance',
                                     'reconciliation_preview', 'reconciliation_apply'
                                 )
                                      AND completed_at >= ?1

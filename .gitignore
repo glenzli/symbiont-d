@@ -1,5 +1,6 @@
 /target
 /node_modules
+/.agent-coordination/
 /macos/SymbiontMenu/build
 /data/memory.md
 /data/compute.toml
@@ -11,6 +12,7 @@
 /data/identity.toml
 /data/codex-bridge.toml
 /data/task-runs.json
+/data/codex-handoffs.json
 /data/exploration-intents.json
 /data/*.sqlite3
 /data/*.sqlite3-shm
@@ -19,6 +21,7 @@
 /data/context.sqlite3-shm
 /data/context.sqlite3-wal
 /data/context-maintenance.json
+/data/pcp-maintenance-state.json
 /data/reconciliation.json
 /data/assets
 /data/logs

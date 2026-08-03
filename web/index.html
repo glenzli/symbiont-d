@@ -175,7 +175,7 @@
           >×</button>
         </div>
         <div id="task-target-tray" class="task-target-tray" hidden>
-          <button id="change-task-target" type="button" title="更改 Codex 任务">
+          <button id="change-task-target" type="button" title="更改 Codex 项目">
             <span id="task-target-title"></span>
             <small id="task-target-scope"></small>
           </button>
@@ -183,9 +183,15 @@
             id="clear-task-target"
             class="task-target-clear"
             type="button"
-            title="清除当前任务关系"
-            aria-label="清除当前任务关系"
+            title="清除当前项目"
+            aria-label="清除当前项目"
           ><i data-lucide="x" aria-hidden="true"></i></button>
+        </div>
+        <div id="handoff-tray" class="task-target-tray handoff-tray" hidden>
+          <button id="open-handoff" type="button" title="查看 Codex 交接记录">
+            <span id="handoff-title"></span>
+            <small id="handoff-status"></small>
+          </button>
         </div>
         <div class="composer-row">
           <label class="sr-only" for="message">消息</label>
@@ -561,8 +567,8 @@
             </label>
             <label class="toggle-row">
               <span>
-                <strong>允许向选定任务执行代码</strong>
-                <small id="codex-task-execution-note">只在输入区明确选择任务后生效</small>
+                <strong>允许在选定项目中新建 Codex 任务</strong>
+                <small id="codex-task-execution-note">只在输入区明确选择项目后生效</small>
               </span>
               <input id="codex-task-execution" type="checkbox">
             </label>

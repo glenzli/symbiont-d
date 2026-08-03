@@ -234,7 +234,7 @@ impl PermissionBroker {
 }
 
 fn origin_can_prompt(origin: &str) -> bool {
-    matches!(origin, "interactive" | "codex_task")
+    matches!(origin, "interactive" | "codex_handoff")
 }
 
 #[cfg(test)]
@@ -305,5 +305,22 @@ mod tests {
             .request(request("autonomous", Some("https:example.com")))
             .await;
         assert_eq!(reused.source, PermissionResolutionSource::SessionGrant);
+    }
+
+    #[tokio::test]
+    async fn project_handoff_can_request_an_interactive_permission() {
+        let broker = Arc::new(PermissionBroker::new());
+        let waiting = {
+            let broker = Arc::clone(&broker);
+            tokio::spawn(async move { broker.request(request("codex_handoff", None)).await })
+        };
+        tokio::task::yield_now().await;
+        let pending = broker.snapshot().await;
+        assert_eq!(pending.len(), 1);
+        broker
+            .resolve(&pending[0].id, PermissionDecision::Decline)
+            .await
+            .unwrap();
+        assert_eq!(waiting.await.unwrap().decision, PermissionDecision::Decline);
     }
 }
