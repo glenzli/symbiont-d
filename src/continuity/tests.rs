@@ -4,7 +4,10 @@ use std::{
 };
 
 use pcp_client::EmbeddedPcpClient;
-use pcp_core::{AccessPrincipal, AccessPrincipalType, AccessSession, Projection, ReadPagesRequest};
+use pcp_core::{
+    AccessPrincipal, AccessPrincipalType, AccessSession, ConsolidationInput, Projection,
+    ReadPagesRequest,
+};
 use pcp_rpc::{RemotePcpClient, serve_unix};
 use pcp_sqlite::SqlitePcpStore;
 use pcp_store::PcpStore;
@@ -136,6 +139,76 @@ async fn context_seed_exposes_the_complete_archive_boundary_and_latest_checkpoin
     assert!(seed.contains(&user.page.revision_id));
     assert!(seed.contains(&checkpoint.revision_id));
     assert!(seed.contains("native context is recent only"));
+
+    let _ = tokio::fs::remove_dir_all(root).await;
+}
+
+#[tokio::test]
+async fn consolidation_rejects_conflicting_host_stable_identities() {
+    let nonce = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .expect("clock")
+        .as_nanos();
+    let root = std::env::temp_dir().join(format!("symbiont-consolidation-identity-{nonce}"));
+    let store = Arc::new(
+        SqlitePcpStore::open(root.join("context.sqlite3"))
+            .await
+            .expect("open PCP store"),
+    );
+    let continuity = ContinuityHost::open_embedded_for_test(store)
+        .await
+        .expect("open host");
+    let project_scope = continuity.project_scope().to_owned();
+    let canonical = continuity
+        .write_model_page(
+            Some(&project_scope),
+            "First episode with a shared title.",
+            Some(json!({
+                "kind": "conversation_episode",
+                "stableKey": "reflection.episode.first",
+                "episodeId": "episode-first"
+            })),
+            Vec::new(),
+            Vec::new(),
+            Vec::new(),
+            Some("consolidation-identity:first".to_owned()),
+        )
+        .await
+        .expect("write canonical episode");
+    let distinct = continuity
+        .write_model_page(
+            Some(&project_scope),
+            "Second episode with a shared title.",
+            Some(json!({
+                "kind": "conversation_episode",
+                "stableKey": "reflection.episode.second",
+                "episodeId": "episode-second"
+            })),
+            Vec::new(),
+            Vec::new(),
+            Vec::new(),
+            Some("consolidation-identity:second".to_owned()),
+        )
+        .await
+        .expect("write distinct episode");
+
+    let error = continuity
+        .consolidate_model_pages(
+            canonical.page_id.clone(),
+            canonical.revision_id,
+            vec![ConsolidationInput {
+                page_id: distinct.page_id,
+                expected_revision_id: distinct.revision_id,
+            }],
+            "An invalid merge of two stable episodes.".to_owned(),
+            Some("test".to_owned()),
+        )
+        .await
+        .expect_err("reject conflicting stable identities");
+    assert!(
+        format!("{error:#}").contains("conflicting Host identity stableKey"),
+        "unexpected consolidation error: {error:#}"
+    );
 
     let _ = tokio::fs::remove_dir_all(root).await;
 }
@@ -406,7 +479,7 @@ async fn links_images_user_events_and_assistant_responses() {
         Some(continuation.page.revision_id.as_str())
     );
     let messages_after_user = continuity
-        .recent_messages_after(Some(&user.page.revision_id), 20)
+        .live_messages_after(Some(&user.page.revision_id), 20)
         .await
         .expect("read messages after user");
     assert_eq!(messages_after_user.len(), 2);

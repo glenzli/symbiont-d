@@ -1029,7 +1029,7 @@ async fn runtime(
         .map_err(ApiError::internal)?;
     let messages = state
         .continuity
-        .recent_messages_after(query.after_revision_id.as_deref(), 20)
+        .live_messages_after(query.after_revision_id.as_deref(), 20)
         .await
         .map_err(ApiError::internal)?;
     let turn_dispositions = state

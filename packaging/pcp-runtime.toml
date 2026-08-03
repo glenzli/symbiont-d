@@ -73,7 +73,7 @@ retry_after_seconds = 604800
 
 [maintenance.retention]
 enabled = true
-apply = true
+write_leases = true
 minimum_age_days = 30
 keep_recent_revisions_per_page = 2
 candidate_window = 24

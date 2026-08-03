@@ -28,6 +28,7 @@ use tokio::sync::RwLock;
 
 use crate::{
     asset::{ImageAttachment, SavedImage},
+    conversation_projection::ConversationProjection,
     memory::{
         MemoryEntry, MemoryRole, MemoryStore, MessageDeliveryState, MessageMetadata, MessagePart,
         MessageQuote, MessageQuoteDraft, MessageTopicReference,
@@ -98,6 +99,7 @@ pub struct ContinuityHost {
     scopes: ScopePolicy,
     event_counter: AtomicU64,
     orientation: RwLock<Option<WriteResult>>,
+    live_conversation: ConversationProjection,
 }
 
 #[derive(Clone, Debug, Default)]
@@ -185,6 +187,7 @@ impl ContinuityHost {
             scopes,
             event_counter: AtomicU64::new(0),
             orientation: RwLock::new(None),
+            live_conversation: ConversationProjection::new(),
         })
     }
 
@@ -625,6 +628,7 @@ impl ContinuityHost {
             })
             .await?;
         entry.revision_id = Some(page.revision_id.clone());
+        self.live_conversation.publish(entry.clone()).await;
         Ok(StoredMessage {
             entry,
             page,
@@ -1069,6 +1073,7 @@ impl ContinuityHost {
         }
         message_revision_ids.sort();
         message_revision_ids.dedup();
+        self.live_conversation.remove(&message_revision_ids).await;
         Ok(MessageRetractionResult {
             retracted_revision_ids,
             message_revision_ids,
@@ -1076,22 +1081,12 @@ impl ContinuityHost {
         })
     }
 
-    pub async fn recent_messages_after(
+    pub async fn live_messages_after(
         &self,
         after_revision_id: Option<&str>,
         limit: usize,
     ) -> Result<Vec<MemoryEntry>> {
-        let limit = limit.clamp(1, 50);
-        let messages = self.recent_messages(200).await?;
-        let start = after_revision_id
-            .and_then(|revision_id| {
-                messages
-                    .iter()
-                    .position(|entry| entry.revision_id.as_deref() == Some(revision_id))
-            })
-            .map(|index| index + 1)
-            .unwrap_or_else(|| messages.len().saturating_sub(limit));
-        Ok(messages.into_iter().skip(start).take(limit).collect())
+        Ok(self.live_conversation.after(after_revision_id, limit).await)
     }
 
     pub async fn latest_assistant_revision(&self) -> Result<Option<String>> {
@@ -1447,11 +1442,11 @@ impl ContinuityHost {
         if replaced_revision_ids.len() < 2 {
             anyhow::bail!("consolidation requires at least two distinct current Pages");
         }
-        let canonical = self
+        let consolidation_pages = self
             .store
             .read_pages(ReadPagesRequest {
                 page_ids: Vec::new(),
-                revision_ids: vec![expected_canonical_revision_id.clone()],
+                revision_ids: replaced_revision_ids.clone(),
                 projections: vec![
                     Projection::Manifest,
                     Projection::Sources,
@@ -1459,16 +1454,59 @@ impl ContinuityHost {
                 ],
                 max_chars: 8_000,
             })
-            .await?
-            .into_iter()
-            .next()
+            .await?;
+        let canonical = consolidation_pages
+            .iter()
+            .find(|page| page.revision.revision_id == expected_canonical_revision_id)
             .context("canonical consolidation Page is not available")?;
         if canonical.page.page_id != canonical_page_id {
             anyhow::bail!("canonical Page and expected Revision do not match");
         }
+        for replacement in &replaced_pages {
+            let replaced = consolidation_pages
+                .iter()
+                .find(|page| page.revision.revision_id == replacement.expected_revision_id)
+                .with_context(|| {
+                    format!(
+                        "replacement consolidation Revision {} is not available",
+                        replacement.expected_revision_id
+                    )
+                })?;
+            if replaced.page.page_id != replacement.page_id {
+                anyhow::bail!("replacement Page and expected Revision do not match");
+            }
+            for identity_key in ["stableKey", "episodeId"] {
+                let canonical_identity = canonical
+                    .revision
+                    .facets
+                    .as_ref()
+                    .and_then(|facets| facets.get(identity_key))
+                    .and_then(Value::as_str)
+                    .filter(|identity| !identity.trim().is_empty());
+                let replaced_identity = replaced
+                    .revision
+                    .facets
+                    .as_ref()
+                    .and_then(|facets| facets.get(identity_key))
+                    .and_then(Value::as_str)
+                    .filter(|identity| !identity.trim().is_empty());
+                if let (Some(canonical_identity), Some(replaced_identity)) =
+                    (canonical_identity, replaced_identity)
+                    && canonical_identity != replaced_identity
+                {
+                    anyhow::bail!(
+                        "consolidation cannot merge conflicting Host identity {identity_key}"
+                    );
+                }
+            }
+        }
         let actor = model_actor();
         let timestamp = now();
-        let mut facets = canonical.revision.facets.unwrap_or_else(|| json!({}));
+        let mut facets = canonical
+            .revision
+            .facets
+            .clone()
+            .unwrap_or_else(|| json!({}));
         if let Some(object) = facets.as_object_mut() {
             object
                 .entry("kind")
@@ -1495,7 +1533,7 @@ impl ContinuityHost {
                     media_type: "text/markdown".to_owned(),
                     content: content.trim().to_owned(),
                 }),
-                source_refs: canonical.revision.source_refs,
+                source_refs: canonical.revision.source_refs.clone(),
                 facets: Some(facets),
                 provenance: vec![ProvenanceEvent {
                     operation: "consolidate".to_owned(),

@@ -10,6 +10,7 @@ mod context_maintenance;
 mod continuation;
 mod continuity;
 mod conversation;
+mod conversation_projection;
 mod curiosity;
 mod diagnostics;
 mod exploration;
