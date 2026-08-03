@@ -264,6 +264,7 @@ function proposalKind(kind) {
     link: "建立关系",
     assess_validity: "检查有效性",
     resummarize: "重写索引摘要",
+    retain: "阶段性保留",
   }[kind] || kind;
 }
 

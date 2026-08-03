@@ -26,6 +26,7 @@ pub enum ReconciliationProposalKind {
     Link,
     AssessValidity,
     Resummarize,
+    Retain,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]

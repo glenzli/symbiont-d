@@ -3,9 +3,9 @@ use std::{collections::BTreeSet, sync::Arc};
 use anyhow::{Context, Result};
 use chrono::{SecondsFormat, Utc};
 use pcp_core::{
-    Actor, ActorType, LifecycleStatus, PagePayload, Projection, ProvenanceEvent, ReadPagesRequest,
-    RevisePageRequest, SearchFilters, SearchMode, SearchPagesRequest, SourceRef, WritePageRequest,
-    WriteResult,
+    Actor, ActorType, LifecycleStatus, PageMutability, PagePayload, Projection, ProvenanceEvent,
+    ReadPagesRequest, RevisePageRequest, SearchFilters, SearchMode, SearchPagesRequest, SourceRef,
+    WritePageRequest, WriteResult,
 };
 use serde::Serialize;
 use serde_json::{Map, Value, json};
@@ -152,6 +152,7 @@ impl SymbiontContextStore {
         let mut pages = self
             .continuity
             .read(ReadPagesRequest {
+                page_ids: Vec::new(),
                 revision_ids: vec![hit.revision_id],
                 projections: vec![
                     Projection::Manifest,
@@ -268,6 +269,8 @@ impl SymbiontContextStore {
                 namespace: kind.namespace(&self.continuity).to_owned(),
                 visibility: "private".to_owned(),
                 lifecycle_status: LifecycleStatus::Active,
+                kind: kind.facet_kind().to_owned(),
+                mutability: PageMutability::Revisioned,
                 created_by: actor.clone(),
                 observed_at: Some(observed_at.clone()),
                 valid_from: None,

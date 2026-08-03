@@ -31,7 +31,6 @@ use super::{
         pcp_maintenance_developer_instructions, pcp_maintenance_worker_prompt,
         profile_review_prompt, summary_maintenance_prompt,
     },
-    task_bridge::{CodexTaskDetail, CodexTaskSummary, parse_task_detail, parse_task_list},
     tool_dedup::{ToolCallPlan, TurnToolDeduplicator},
     tools::{EscalationRequest, SymbiontTools, tool_result},
     trace::{
@@ -58,7 +57,6 @@ use crate::{
     reflection::ReflectionStore,
     rollover::{self, NativeThreadCursor, RolloverDecision, ThreadContextPressure},
     symbiont_context::SymbiontContextStore,
-    task_execution::{ProjectHandoffQueue, ProjectHandoffRequest},
     usage::{InvocationRecord, ToolTraceStep},
     web_fetch::WebFetcher,
     working_context::WorkingContext,
@@ -121,12 +119,6 @@ pub struct ChatOutcome {
     pub reserved_continuation_ids: Vec<String>,
     pub requested_exploration_ids: Vec<String>,
     pub interrupted: bool,
-}
-
-pub struct ProjectHandoffOutcome {
-    pub task_id: String,
-    pub task_title: String,
-    pub invocations: Vec<InvocationRecord>,
 }
 
 #[derive(Clone, Debug)]
@@ -292,7 +284,6 @@ impl CodexClient {
         compute_policies: Arc<crate::compute_policy::ComputePolicyStore>,
         permissions: Arc<PermissionBroker>,
         web_fetcher: Arc<WebFetcher>,
-        project_handoffs: Arc<ProjectHandoffQueue>,
         continuations: Arc<ContinuationQueue>,
         exploration_intents: Arc<ExplorationIntentQueue>,
     ) -> Result<Self> {
@@ -310,7 +301,6 @@ impl CodexClient {
                     Arc::clone(&compute_policies),
                     Arc::clone(&permissions),
                     Arc::clone(&web_fetcher),
-                    Arc::clone(&project_handoffs),
                     Arc::clone(&continuations),
                     Arc::clone(&exploration_intents),
                 ),
@@ -344,7 +334,6 @@ impl CodexClient {
         compute_policies: Arc<crate::compute_policy::ComputePolicyStore>,
         permissions: Arc<PermissionBroker>,
         web_fetcher: Arc<WebFetcher>,
-        project_handoffs: Arc<ProjectHandoffQueue>,
         continuations: Arc<ContinuationQueue>,
         exploration_intents: Arc<ExplorationIntentQueue>,
     ) -> Result<Self> {
@@ -388,7 +377,6 @@ impl CodexClient {
                 reflection,
                 Arc::clone(&compute_policies),
                 Some(web_fetcher),
-                project_handoffs,
                 continuations,
                 exploration_intents,
             ),
@@ -428,126 +416,6 @@ impl CodexClient {
 
     pub fn rate_limits(&self) -> Arc<RwLock<Option<RateLimitInfo>>> {
         Arc::clone(&self.rate_limits)
-    }
-
-    pub async fn list_tasks(&mut self, limit: u32) -> Result<Vec<CodexTaskSummary>> {
-        let result = self
-            .request(
-                "thread/list",
-                json!({
-                    "limit": limit.clamp(1, 50),
-                    "sortKey": "updated_at",
-                    "sortDirection": "desc",
-                    "sourceKinds": ["cli", "vscode", "appServer"],
-                    "archived": false
-                }),
-            )
-            .await
-            .context("list interactive Codex tasks")?;
-        parse_task_list(&result)
-    }
-
-    pub async fn read_task(&mut self, thread_id: &str) -> Result<CodexTaskDetail> {
-        if thread_id.trim().is_empty() || thread_id.len() > 128 {
-            anyhow::bail!("invalid Codex task id");
-        }
-        let result = self
-            .request(
-                "thread/read",
-                json!({
-                    "threadId": thread_id,
-                    "includeTurns": true
-                }),
-            )
-            .await
-            .context("read Codex task")?;
-        let detail = parse_task_detail(&result)?;
-        if detail.task.ephemeral
-            || !matches!(detail.task.source.as_str(), "cli" | "vscode" | "appServer")
-        {
-            anyhow::bail!("only interactive Codex tasks can be read");
-        }
-        Ok(detail)
-    }
-
-    pub async fn start_project_handoff(
-        &mut self,
-        request: &ProjectHandoffRequest,
-        local_images: &[PathBuf],
-        compute: &ComputeConfig,
-        profile: &ProfileSnapshot,
-        events: mpsc::Sender<RuntimeEvent>,
-    ) -> Result<ProjectHandoffOutcome> {
-        if request.project.id.trim().is_empty() || request.project.id.len() > 128 {
-            anyhow::bail!("invalid selected project id");
-        }
-        let cwd = PathBuf::from(&request.project.cwd);
-        if !cwd.is_absolute() {
-            anyhow::bail!("selected project working directory must be absolute");
-        }
-        let task_id = self.start_project_handoff_thread(&cwd).await?;
-        let image_note = if local_images.is_empty() {
-            String::new()
-        } else {
-            format!(
-                "\n\nSelected image inputs:\n{} immutable symbiont image asset(s) are attached to \
-                 this turn as `localImage` items. They were resolved from exact PCP Revisions at \
-                 queue time. Inspect and use them as references for the request; do not substitute \
-                 a newer or similarly named image.",
-                local_images.len()
-            )
-        };
-        let prompt = format!(
-            "This is a new Codex task created by an explicit Symbiont handoff for project `{}`. \
-             It is not a continuation of the Codex task used to choose this project.\n\nRequest:\n{}\n\nWhy now:\n{}{}\n\nWork directly in \
-             the selected repository. Inspect the current worktree before editing, preserve \
-             unrelated user changes, implement the request end to end, and run proportionate \
-             verification. Return a concise account of the changes, verification, and any \
-             unresolved limitation.",
-            request.project.title, request.instruction, request.reason, image_note
-        );
-        let context = format!(
-            "Project handoff for `{}`. This is an explicitly authorized implementation task, not \
-             ordinary Symbiont conversation. Work only in the selected project. Do not use or \
-             claim access to Symbiont memory, profile, Curiosity, or PCP from this task.",
-            request.project.title
-        );
-        let overrides = TurnOverrides {
-            cwd: cwd.clone(),
-            sandbox_policy: json!({
-                "type": "workspaceWrite",
-                "writableRoots": [cwd],
-                "networkAccess": false,
-                "excludeSlashTmp": false,
-                "excludeTmpdirEnvVar": false
-            }),
-        };
-        let input_items =
-            self.input_items_with_local_images(&prompt, local_images, request.lane, compute)?;
-        let mut turn = self
-            .run_turn(
-                &task_id,
-                input_items,
-                request.lane,
-                "codex_handoff",
-                compute,
-                profile,
-                &context,
-                None,
-                None,
-                false,
-                Some(&overrides),
-                None,
-                &events,
-            )
-            .await?;
-        turn.invocation.produced_message = true;
-        let invocations = vec![turn.invocation];
-        Ok(ProjectHandoffOutcome {
-            task_id,
-            task_title: format!("Symbiont · {}", request.project.title),
-            invocations,
-        })
     }
 
     pub async fn chat(
@@ -1853,28 +1721,6 @@ impl CodexClient {
         });
     }
 
-    async fn start_project_handoff_thread(&mut self, cwd: &PathBuf) -> Result<String> {
-        let result = self
-            .request(
-                "thread/start",
-                json!({
-                    "cwd": cwd,
-                    "approvalPolicy": granular_approval_policy(),
-                    "sandbox": "workspace-write",
-                    "ephemeral": false,
-                    "serviceName": "symbiont-d",
-                    "developerInstructions": "You are a new Codex task created by an explicit Symbiont project handoff. Work only on the handoff request in this repository. Inspect the worktree before editing, preserve unrelated changes, and verify proportionately. Do not treat this as a continuation of any earlier Codex task and do not claim access to private Symbiont conversation or PCP data."
-                }),
-            )
-            .await
-            .context("start a new Codex project handoff task")?;
-        result
-            .pointer("/thread/id")
-            .and_then(Value::as_str)
-            .map(str::to_owned)
-            .context("thread/start response omitted thread.id")
-    }
-
     async fn start_thread(
         &mut self,
         workspace: &PathBuf,
@@ -2398,7 +2244,7 @@ fn activity_label(item: Option<&Value>) -> Option<String> {
                     "read_pages" => "正在读取长期上下文",
                     "write_summary" => "正在建立上下文索引",
                     "write_page" => "正在整理长期上下文",
-                    "supersede_page" => "正在更新长期上下文",
+                    "revise_page" => "正在更新长期上下文",
                     "consolidate_pages" => "正在收敛重复上下文",
                     "relate_pages" => "正在建立上下文关系",
                     "complete_orientation" => "正在整理初始画像",
@@ -2409,7 +2255,6 @@ fn activity_label(item: Option<&Value>) -> Option<String> {
                     "upsert_compute_policy" => "正在保存话题计算规则",
                     "remove_compute_policy" => "正在移除话题计算规则",
                     "fetch_url" => "正在读取指定网页",
-                    "handoff_to_selected_project" => "正在为选定项目创建新的 Codex 任务",
                     "open_hunch" => "正在留下一个待探索的问题",
                     "revise_hunch" => "正在修订探索中的问题",
                     "retire_hunch" => "正在结束一个探索问题",
@@ -2621,7 +2466,7 @@ fn reconciliation_actions(invocations: &[InvocationRecord]) -> Vec<Reconciliatio
                     "assess_validity"
                         | "write_summary"
                         | "write_page"
-                        | "supersede_page"
+                        | "revise_page"
                         | "consolidate_pages"
                         | "relate_pages"
                 )
@@ -2643,16 +2488,15 @@ fn reconciliation_actions(invocations: &[InvocationRecord]) -> Vec<Reconciliatio
                     values
                 },
                 result_page_id: result
-                    .get("refId")
-                    .or_else(|| result.get("summaryRefId"))
-                    .and_then(Value::as_str)
-                    .map(str::to_owned),
-                result_revision_id: result
                     .get("pageId")
                     .or_else(|| result.get("summaryPageId"))
                     .or_else(|| result.get("assessmentPageId"))
-                    .or_else(|| result.get("revisionId"))
+                    .and_then(Value::as_str)
+                    .map(str::to_owned),
+                result_revision_id: result
+                    .get("revisionId")
                     .or_else(|| result.get("summaryRevisionId"))
+                    .or_else(|| result.get("assessmentRevisionId"))
                     .and_then(Value::as_str)
                     .map(str::to_owned),
                 result_relation_id: result

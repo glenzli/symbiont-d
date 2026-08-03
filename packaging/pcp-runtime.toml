@@ -46,7 +46,7 @@ allowed_scopes = [
 ]
 interval_seconds = 21600
 initial_delay_seconds = 300
-max_jobs_per_cycle = 2
+max_jobs_per_cycle = 3
 principal_id = "service:pcp-maintainer"
 principal_name = "symbiont-d memory observer"
 
@@ -70,3 +70,14 @@ routing_chars_per_page = 480
 max_pages_per_candidate = 6
 max_input_chars = 64000
 retry_after_seconds = 604800
+
+[maintenance.retention]
+enabled = true
+apply = true
+minimum_age_days = 30
+keep_recent_revisions_per_page = 2
+candidate_window = 24
+routing_chars_per_page = 420
+max_revisions_per_cycle = 3
+lease_days = 120
+retry_after_seconds = 2592000

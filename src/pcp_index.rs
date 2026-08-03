@@ -3,7 +3,7 @@ use std::{collections::HashMap, sync::Arc};
 use anyhow::{Context, Result};
 use chrono::{SecondsFormat, Utc};
 use pcp_core::{
-    Actor, ActorType, InitialRelation, LifecycleStatus, PagePayload, Projection, ProvenanceEvent,
+    Actor, ActorType, LifecycleStatus, PageMutability, PagePayload, Projection, ProvenanceEvent,
     ReadPagesRequest, RevisePageRequest, SearchFilters, SearchMode, SearchPagesRequest,
     SearchTermMatch, SourceRef, WritePageRequest, WriteResult,
 };
@@ -137,7 +137,22 @@ impl PcpIndex {
         let mut source_revision_ids = episode.source_revision_ids.clone();
         source_revision_ids.sort();
         source_revision_ids.dedup();
-        let relations = episode_relations(&aggregate_targets, &source_revision_ids);
+        let relations = self
+            .continuity
+            .initial_relations_for_revision_targets(
+                aggregate_targets
+                    .iter()
+                    .cloned()
+                    .map(|revision_id| ("aggregates".to_owned(), revision_id))
+                    .chain(
+                        source_revision_ids
+                            .iter()
+                            .cloned()
+                            .map(|revision_id| ("derived_from".to_owned(), revision_id)),
+                    )
+                    .collect(),
+            )
+            .await?;
         let actor = index_actor();
         let mut provenance_inputs = aggregate_targets.clone();
         provenance_inputs.extend(source_revision_ids.iter().cloned());
@@ -210,6 +225,8 @@ impl PcpIndex {
                 namespace: self.continuity.project_scope().to_owned(),
                 visibility: "private".to_owned(),
                 lifecycle_status: LifecycleStatus::Active,
+                kind: "conversation_episode".to_owned(),
+                mutability: PageMutability::Revisioned,
                 created_by: actor,
                 observed_at: Some(episode.last_activity_at.clone()),
                 valid_from: None,
@@ -255,6 +272,7 @@ impl PcpIndex {
         Ok(self
             .continuity
             .read(ReadPagesRequest {
+                page_ids: Vec::new(),
                 revision_ids,
                 projections: vec![Projection::Facets],
                 max_chars: 16_000,
@@ -321,27 +339,6 @@ fn episode_digest(episode: &ConversationEpisode) -> Result<String> {
     });
     let encoded = serde_json::to_vec(&value).context("encode Topic Episode index digest")?;
     Ok(format!("{:x}", Sha256::digest(encoded)))
-}
-
-fn episode_relations(
-    aggregate_targets: &[String],
-    source_revision_ids: &[String],
-) -> Vec<InitialRelation> {
-    aggregate_targets
-        .iter()
-        .map(|revision_id| InitialRelation {
-            relation_type: "aggregates".to_owned(),
-            to_revision_id: revision_id.clone(),
-        })
-        .chain(
-            source_revision_ids
-                .iter()
-                .map(|revision_id| InitialRelation {
-                    relation_type: "derived_from".to_owned(),
-                    to_revision_id: revision_id.clone(),
-                }),
-        )
-        .collect()
 }
 
 fn sorted(mut values: Vec<String>) -> Vec<String> {
@@ -489,6 +486,7 @@ mod tests {
             .expect("Episode index entry");
         let page = continuity
             .read(ReadPagesRequest {
+                page_ids: Vec::new(),
                 revision_ids: vec![episode.revision_id.clone()],
                 projections: vec![Projection::Relations],
                 max_chars: 8_000,
@@ -497,8 +495,7 @@ mod tests {
             .expect("read Episode relations")
             .remove(0);
         assert!(page.relations.iter().any(|relation| {
-            relation.relation_type == "derived_from"
-                && relation.to_revision_id == user.page.revision_id
+            relation.relation_type == "derived_from" && relation.to_page_id == user.page.page_id
         }));
         assert!(
             !page

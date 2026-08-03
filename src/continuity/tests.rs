@@ -223,6 +223,7 @@ async fn quotes_multiple_excerpts_from_one_message_with_one_source_relation() {
 
     let pages = continuity
         .read(ReadPagesRequest {
+            page_ids: Vec::new(),
             revision_ids: vec![reply.page.revision_id.clone()],
             projections: vec![
                 Projection::Facets,
@@ -239,7 +240,12 @@ async fn quotes_multiple_excerpts_from_one_message_with_one_source_relation() {
         .filter(|relation| relation.relation_type == "quotes")
         .collect::<Vec<_>>();
     assert_eq!(quote_relations.len(), 1);
-    assert_eq!(quote_relations[0].to_revision_id, source.page.revision_id);
+    assert_eq!(quote_relations[0].to_page_id, source.page.page_id);
+    assert!(
+        quote_relations[0]
+            .basis_revision_ids
+            .contains(&source.page.revision_id)
+    );
     assert!(
         pages[0].revision.provenance[0]
             .input_revision_ids
@@ -302,6 +308,7 @@ async fn keeps_temporal_adjacency_out_of_the_page_graph() {
 
     let page = continuity
         .read(ReadPagesRequest {
+            page_ids: Vec::new(),
             revision_ids: vec![user.page.revision_id.clone()],
             projections: vec![Projection::Relations, Projection::Provenance],
             max_chars: 8_000,
@@ -446,6 +453,7 @@ async fn links_images_user_events_and_assistant_responses() {
     );
     let pages = continuity
         .read(ReadPagesRequest {
+            page_ids: Vec::new(),
             revision_ids: vec![
                 user.page.revision_id.clone(),
                 assistant.page.revision_id.clone(),
@@ -470,7 +478,7 @@ async fn links_images_user_events_and_assistant_responses() {
             .any(|relation| relation.relation_type == "has_attachment")
     );
     assert!(pages[1].relations.iter().any(|relation| {
-        relation.relation_type == "responds_to" && relation.to_revision_id == user.page.revision_id
+        relation.relation_type == "responds_to" && relation.to_page_id == user.page.page_id
     }));
     assert!(
         !pages[1]
@@ -479,8 +487,7 @@ async fn links_images_user_events_and_assistant_responses() {
             .any(|relation| relation.relation_type == "derived_from")
     );
     assert!(pages[2].relations.iter().any(|relation| {
-        relation.relation_type == "continues"
-            && relation.to_revision_id == assistant.page.revision_id
+        relation.relation_type == "continues" && relation.to_page_id == assistant.page.page_id
     }));
     assert!(pages[0].revision.source_refs.is_empty());
     let inputs = &pages[1].revision.provenance[0].input_revision_ids;
@@ -499,6 +506,7 @@ async fn links_images_user_events_and_assistant_responses() {
 
     let assets = continuity
         .read(ReadPagesRequest {
+            page_ids: Vec::new(),
             revision_ids: user.attachment_revision_ids.clone(),
             projections: vec![Projection::Payload, Projection::Facets, Projection::Sources],
             max_chars: 8_000,
@@ -591,6 +599,7 @@ async fn stores_generated_images_as_assistant_page_attachments() {
 
     let pages = continuity
         .read(ReadPagesRequest {
+            page_ids: Vec::new(),
             revision_ids: vec![
                 assistant.page.revision_id.clone(),
                 assistant.attachment_revision_ids[0].clone(),
@@ -608,7 +617,9 @@ async fn stores_generated_images_as_assistant_page_attachments() {
         .expect("read assistant and generated asset pages");
     assert!(pages[0].relations.iter().any(|relation| {
         relation.relation_type == "has_attachment"
-            && relation.to_revision_id == assistant.attachment_revision_ids[0]
+            && relation
+                .basis_revision_ids
+                .contains(&assistant.attachment_revision_ids[0])
     }));
     assert_eq!(
         pages[1].revision.source_refs[0].source_type,

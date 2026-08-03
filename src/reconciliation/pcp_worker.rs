@@ -134,18 +134,33 @@ fn request_page_count(request: &MaintenanceWorkerRequest) -> usize {
         MaintenanceWorkerRequest::SummarizePage { .. } => 1,
         MaintenanceWorkerRequest::SelectConsolidation { pages, .. } => pages.len(),
         MaintenanceWorkerRequest::ConsolidatePages { pages } => pages.len(),
+        MaintenanceWorkerRequest::SelectRetentionMilestones { pages, .. } => pages.len(),
     }
 }
 
-fn request_page_ids(request: &MaintenanceWorkerRequest) -> Vec<String> {
+fn request_revision_ids(request: &MaintenanceWorkerRequest) -> Vec<String> {
     match request {
-        MaintenanceWorkerRequest::SummarizePage { page } => vec![page.page_id.clone()],
+        MaintenanceWorkerRequest::SummarizePage { page } => vec![page.revision_id.clone()],
         MaintenanceWorkerRequest::SelectConsolidation { pages, .. } => {
-            pages.iter().map(|page| page.page_id.clone()).collect()
+            pages.iter().map(|page| page.revision_id.clone()).collect()
         }
         MaintenanceWorkerRequest::ConsolidatePages { pages } => {
-            pages.iter().map(|page| page.page_id.clone()).collect()
+            pages.iter().map(|page| page.revision_id.clone()).collect()
         }
+        MaintenanceWorkerRequest::SelectRetentionMilestones { pages, .. } => {
+            pages.iter().map(|page| page.revision_id.clone()).collect()
+        }
+    }
+}
+
+fn selected_revision_ids(request: &MaintenanceWorkerRequest, page_ids: &[String]) -> Vec<String> {
+    match request {
+        MaintenanceWorkerRequest::SelectConsolidation { pages, .. } => pages
+            .iter()
+            .filter(|page| page_ids.contains(&page.page_id))
+            .map(|page| page.revision_id.clone())
+            .collect(),
+        _ => request_revision_ids(request),
     }
 }
 
@@ -157,6 +172,7 @@ fn response_summary(
         MaintenanceWorkerRequest::SummarizePage { .. } => "摘要索引判断",
         MaintenanceWorkerRequest::SelectConsolidation { .. } => "重复候选筛选",
         MaintenanceWorkerRequest::ConsolidatePages { .. } => "合并内容复核",
+        MaintenanceWorkerRequest::SelectRetentionMilestones { .. } => "长期里程碑判断",
     };
     let decision = match response {
         MaintenanceWorkerResponse::WriteSummary { .. } => "建议建立 Summary",
@@ -167,6 +183,12 @@ fn response_summary(
             );
         }
         MaintenanceWorkerResponse::Consolidate { .. } => "建议合并",
+        MaintenanceWorkerResponse::Retain { milestones } => {
+            return format!(
+                "{operation}：建议阶段性保留 {} 个 Revision",
+                milestones.len()
+            );
+        }
         MaintenanceWorkerResponse::KeepSeparate { reason } => {
             return format!(
                 "{operation}：保留现状{}",
@@ -203,7 +225,7 @@ fn response_proposals(
             action: ReconciliationProposalKind::Resummarize,
             subject: "为长 Page 建立路由摘要".to_owned(),
             reason: "模型认为该内容值得进入稀疏 Summary 索引。".to_owned(),
-            revision_ids: request_page_ids(request),
+            revision_ids: request_revision_ids(request),
         }],
         MaintenanceWorkerResponse::Candidate {
             page_ids,
@@ -214,14 +236,23 @@ fn response_proposals(
             reason: rationale
                 .clone()
                 .unwrap_or_else(|| "模型在路由索引中发现了潜在重复。".to_owned()),
-            revision_ids: page_ids.clone(),
+            revision_ids: selected_revision_ids(request, page_ids),
         }],
         MaintenanceWorkerResponse::Consolidate { .. } => vec![ReconciliationProposal {
             action: ReconciliationProposalKind::Consolidate,
-            subject: "以单一不可变 Page 替代重复内容".to_owned(),
+            subject: "以单一 canonical Page 吸收重复内容".to_owned(),
             reason: "模型读取 Detail 后仍认为合并不会丢失独立语义。".to_owned(),
-            revision_ids: request_page_ids(request),
+            revision_ids: request_revision_ids(request),
         }],
+        MaintenanceWorkerResponse::Retain { milestones } => milestones
+            .iter()
+            .map(|milestone| ReconciliationProposal {
+                action: ReconciliationProposalKind::Retain,
+                subject: "阶段性保留精确 Revision".to_owned(),
+                reason: milestone.reason.clone(),
+                revision_ids: vec![milestone.revision_id.clone()],
+            })
+            .collect(),
         MaintenanceWorkerResponse::KeepSeparate { .. }
         | MaintenanceWorkerResponse::NoCandidate { .. }
         | MaintenanceWorkerResponse::Defer { .. } => Vec::new(),
@@ -251,8 +282,8 @@ mod tests {
 
     fn detail(page_id: &str) -> MaintenanceDetailPage {
         MaintenanceDetailPage {
-            ref_id: format!("ref-{page_id}"),
-            page_id: page_id.to_owned(),
+            page_id: format!("page-{page_id}"),
+            revision_id: page_id.to_owned(),
             namespace: "project:test".to_owned(),
             created_at: "2026-08-04T00:00:00Z".to_owned(),
             observed_at: None,

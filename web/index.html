@@ -54,14 +54,6 @@
             data-tooltip="立即进行一次探索"
             disabled
           ><i data-lucide="compass" aria-hidden="true"></i></button>
-          <button
-            class="top-icon-button"
-            id="open-tasks"
-            type="button"
-            title="Codex 任务"
-            aria-label="Codex 任务"
-            data-tooltip="Codex 任务"
-          ><i data-lucide="workflow" aria-hidden="true"></i></button>
           <details id="top-overflow" class="top-overflow">
             <summary
               class="top-icon-button"
@@ -90,6 +82,11 @@
                 type="button"
                 data-top-menu-action
               ><i data-lucide="settings" aria-hidden="true"></i><span>设置</span></button>
+              <button
+                id="copy-codex-context"
+                type="button"
+                data-top-menu-action
+              ><i data-lucide="copy" aria-hidden="true"></i><span>复制上下文给 Codex</span></button>
               <div class="top-menu-memory-state" title="当前本地记忆长度">
                 <span>context</span>
                 <strong id="memory-size">0</strong>
@@ -161,6 +158,7 @@
 
       <form id="composer" class="composer" hidden>
         <div id="attachment-tray" class="attachment-tray" hidden></div>
+        <div id="codex-context-tray" class="codex-context-tray" hidden></div>
         <div id="quote-tray" class="quote-tray" aria-label="待发送引用" hidden></div>
         <div id="topic-target-tray" class="topic-target-tray" hidden>
           <button id="open-selected-topic" type="button" title="查看当前主题">
@@ -174,25 +172,6 @@
             aria-label="清除主题上下文"
           >×</button>
         </div>
-        <div id="task-target-tray" class="task-target-tray" hidden>
-          <button id="change-task-target" type="button" title="更改 Codex 项目">
-            <span id="task-target-title"></span>
-            <small id="task-target-scope"></small>
-          </button>
-          <button
-            id="clear-task-target"
-            class="task-target-clear"
-            type="button"
-            title="清除当前项目"
-            aria-label="清除当前项目"
-          ><i data-lucide="x" aria-hidden="true"></i></button>
-        </div>
-        <div id="handoff-tray" class="task-target-tray handoff-tray" hidden>
-          <button id="open-handoff" type="button" title="查看 Codex 交接记录">
-            <span id="handoff-title"></span>
-            <small id="handoff-status"></small>
-          </button>
-        </div>
         <div class="composer-row">
           <label class="sr-only" for="message">消息</label>
           <textarea
@@ -204,14 +183,44 @@
             autocomplete="off"
           ></textarea>
           <div class="composer-footer">
-            <button
-              id="add-image"
-              class="composer-tool-button"
-              type="button"
-              title="添加图片"
-              aria-label="添加图片"
-              data-tooltip="添加图片"
-            ><i data-lucide="paperclip" aria-hidden="true"></i></button>
+            <div class="composer-input-tools">
+              <button
+                id="add-context"
+                class="composer-tool-button composer-context-button"
+                type="button"
+                title="添加"
+                aria-label="添加"
+                aria-expanded="false"
+                aria-controls="composer-context-menu"
+                data-tooltip="添加"
+              ><span aria-hidden="true">＋</span></button>
+              <div id="composer-context-menu" class="composer-context-menu" hidden>
+                <div id="composer-context-options" role="menu" aria-label="添加上下文">
+                  <button id="add-context-image" type="button" role="menuitem">
+                    <span>图片</span>
+                  </button>
+                  <button id="add-context-codex" type="button" role="menuitem">
+                    <span>Codex 对话</span>
+                  </button>
+                </div>
+                <section id="codex-context-picker" class="codex-context-picker" hidden>
+                  <header>
+                    <button id="codex-context-back" type="button" aria-label="返回">‹</button>
+                    <div>
+                      <strong>Codex 对话</strong>
+                      <small id="codex-context-status">最近使用</small>
+                    </div>
+                  </header>
+                  <input
+                    id="codex-context-filter"
+                    type="search"
+                    placeholder="筛选最近对话"
+                    autocomplete="off"
+                  >
+                  <div id="codex-context-list" class="codex-context-list" role="listbox"></div>
+                </section>
+              </div>
+            </div>
             <div class="composer-controls">
               <div class="compute-mode-picker">
                 <label class="sr-only" for="compute-mode">本轮计算级别</label>
@@ -251,7 +260,7 @@
                 title="发送"
                 aria-label="发送"
                 data-tooltip="发送"
-              ><i data-lucide="send-horizontal" aria-hidden="true"></i></button>
+              ><span class="composer-send-arrow" aria-hidden="true">↑</span></button>
               <button
                 id="stop-response"
                 class="composer-send-button composer-stop-button"
@@ -565,13 +574,6 @@
               </span>
               <input id="codex-task-access" type="checkbox">
             </label>
-            <label class="toggle-row">
-              <span>
-                <strong>允许在选定项目中新建 Codex 任务</strong>
-                <small id="codex-task-execution-note">只在输入区明确选择项目后生效</small>
-              </span>
-              <input id="codex-task-execution" type="checkbox">
-            </label>
           </div>
           <div class="setting-section bridge-note">
             <strong>Codex 中召唤 symbiont</strong>
@@ -780,22 +782,6 @@
         <nav id="topic-list" class="topic-list" aria-label="主题列表"></nav>
         <section id="topic-detail" class="topic-detail" aria-live="polite">
           <div class="topic-empty">选择一个主题</div>
-        </section>
-      </div>
-    </dialog>
-
-    <dialog id="task-dialog" class="panel-dialog task-dialog">
-      <header class="dialog-header">
-        <div>
-          <h2>Codex 任务</h2>
-          <p id="task-dialog-status">打开后读取任务索引</p>
-        </div>
-        <button class="icon-button" data-close="task-dialog" type="button" aria-label="关闭">×</button>
-      </header>
-      <div class="task-browser">
-        <nav id="task-list" class="task-list" aria-label="Codex 任务列表"></nav>
-        <section id="task-detail" class="task-detail" aria-live="polite">
-          <div class="task-empty">选择一个任务</div>
         </section>
       </div>
     </dialog>

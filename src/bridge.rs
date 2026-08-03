@@ -9,21 +9,16 @@ use anyhow::{Context, Result};
 use chrono::{SecondsFormat, Utc};
 use pcp_core::{Projection, SearchFilters, SearchMode, SearchPagesRequest};
 use serde::{Deserialize, Serialize};
-use sha2::{Digest, Sha256};
-use tokio::{
-    fs,
-    sync::{Mutex, RwLock},
-};
+use tokio::{fs, sync::RwLock};
 
 use crate::{
     asset::AssetStore,
-    codex::{CodexClient, CodexTaskDetail, CodexTaskSummary},
+    codex::{CodexTaskDetail, CodexTaskSources, CodexTaskSummary},
     continuity::{ContinuityHost, ImageAssetPage},
     curiosity::{CuriosityStore, HunchState},
     profile::ProfileStore,
     reflection::{HypothesisStatus, ReflectionStore},
     symbiont_context::SymbiontContextStore,
-    task_execution::{BoundProject, ProjectHandoffQueue, ProjectLease, ProjectLeaseScope},
 };
 
 const MAX_QUERY_CHARS: usize = 500;
@@ -39,28 +34,18 @@ const MAX_BRIDGE_IMAGES: usize = 4;
 pub struct BridgeConfig {
     #[serde(default)]
     pub codex_task_access: bool,
-    #[serde(default)]
-    #[serde(alias = "taskExecutionEnabled")]
-    pub project_handoffs_enabled: bool,
-    #[serde(default)]
-    pub selected_project: Option<BoundProject>,
 }
 
 #[derive(Clone, Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct BridgeSnapshot {
     pub codex_task_access: bool,
-    pub project_handoffs_enabled: bool,
-    pub selected_project: Option<BoundProject>,
-    pub active_project_lease: Option<ProjectLease>,
 }
 
 #[derive(Clone, Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct BridgeSettingsDraft {
     pub codex_task_access: bool,
-    #[serde(alias = "taskExecutionEnabled")]
-    pub project_handoffs_enabled: bool,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -117,27 +102,24 @@ pub struct BridgeContextPacket {
 pub struct CodexBridge {
     path: PathBuf,
     config: RwLock<BridgeConfig>,
-    active_project_lease: RwLock<Option<ProjectLease>>,
-    codex: Arc<Mutex<CodexClient>>,
+    task_sources: Arc<CodexTaskSources>,
     continuity: Arc<ContinuityHost>,
     profile: Arc<ProfileStore>,
     context: Arc<SymbiontContextStore>,
     curiosity: Arc<CuriosityStore>,
     reflection: Arc<ReflectionStore>,
-    project_handoffs: Arc<ProjectHandoffQueue>,
     assets: Arc<AssetStore>,
 }
 
 impl CodexBridge {
     pub async fn open(
         path: PathBuf,
-        codex: Arc<Mutex<CodexClient>>,
+        task_sources: Arc<CodexTaskSources>,
         continuity: Arc<ContinuityHost>,
         profile: Arc<ProfileStore>,
         context: Arc<SymbiontContextStore>,
         curiosity: Arc<CuriosityStore>,
         reflection: Arc<ReflectionStore>,
-        project_handoffs: Arc<ProjectHandoffQueue>,
         assets: Arc<AssetStore>,
     ) -> Result<Self> {
         let config = match fs::read_to_string(&path).await {
@@ -149,52 +131,34 @@ impl CodexBridge {
                     .with_context(|| format!("read Codex bridge config {}", path.display()));
             }
         };
-        let active_project_lease = config
-            .selected_project
-            .clone()
-            .map(|project| ProjectLease::new(project, ProjectLeaseScope::Pinned));
         let bridge = Self {
             path,
             config: RwLock::new(config),
-            active_project_lease: RwLock::new(active_project_lease),
-            codex,
+            task_sources,
             continuity,
             profile,
             context,
             curiosity,
             reflection,
-            project_handoffs,
             assets,
         };
         bridge.persist().await?;
-        bridge.suspend_handoffs().await;
         Ok(bridge)
     }
 
     pub async fn snapshot(&self) -> BridgeSnapshot {
         let config = self.config.read().await.clone();
-        let active_project_lease = if config.codex_task_access {
-            self.effective_project_lease(&config).await
-        } else {
-            None
-        };
         BridgeSnapshot {
             codex_task_access: config.codex_task_access,
-            project_handoffs_enabled: config.project_handoffs_enabled,
-            selected_project: config.selected_project,
-            active_project_lease,
         }
     }
 
     pub async fn update_settings(&self, draft: BridgeSettingsDraft) -> Result<BridgeSnapshot> {
         let mut config = self.config.read().await.clone();
         config.codex_task_access = draft.codex_task_access;
-        config.project_handoffs_enabled =
-            draft.project_handoffs_enabled && config.codex_task_access;
         let content = toml::to_string_pretty(&config).context("encode Codex bridge config")?;
         persist(&self.path, &content).await?;
         *self.config.write().await = config.clone();
-        self.suspend_handoffs().await;
         Ok(self.snapshot().await)
     }
 
@@ -203,131 +167,18 @@ impl CodexBridge {
     }
 
     pub async fn prompt(&self) -> String {
-        let snapshot = self.snapshot().await;
-        match (
-            &snapshot.active_project_lease,
-            snapshot.project_handoffs_enabled,
-        ) {
-            (Some(lease), true) => format!(
-                "Host Codex bridge: the user selected project `{}` at `{}` for this turn with a `{}` \
-                 lease. `handoff_to_selected_project` can spend that lease once by creating a new \
-                 Codex task in this project. Never resume or append to the task used to select the \
-                 project. Delegate only \
-                 concrete repository work the user asked for or clearly authorized; discussion \
-                 alone is not authorization.",
-                lease.project.title,
-                lease.project.cwd,
-                scope_name(lease.scope)
-            ),
-            (Some(lease), false) => format!(
-                "Host Codex bridge: project `{}` is selected, but new Codex handoffs are disabled. \
-                 Existing Codex tasks are read-only sources; do not delegate code execution.",
-                lease.project.title
-            ),
-            (None, _) => {
-                "Host Codex bridge: no project is selected for this turn. Existing Codex tasks may be read as external context, but do not delegate code execution."
-                    .to_owned()
-            }
-        }
+        "Host Codex bridge: Codex tasks are optional read-only external sources. Do not create, \
+         resume, bind, or execute Codex tasks from Symbiont. The user may explicitly copy a \
+         context packet into Codex when they want to act on this discussion."
+            .to_owned()
     }
 
-    pub async fn list_tasks(&self, limit: u32) -> Result<Vec<CodexTaskSummary>> {
-        self.codex.lock().await.list_tasks(limit).await
+    pub async fn list_tasks(&self, refresh: bool) -> Result<Vec<CodexTaskSummary>> {
+        self.task_sources.list(refresh).await
     }
 
     pub async fn read_task(&self, thread_id: &str) -> Result<CodexTaskDetail> {
-        self.codex.lock().await.read_task(thread_id).await
-    }
-
-    pub async fn select_project_from_task(
-        &self,
-        thread_id: &str,
-        scope: ProjectLeaseScope,
-    ) -> Result<BridgeSnapshot> {
-        if !self.task_access_enabled().await {
-            anyhow::bail!("Codex task access is disabled");
-        }
-        let detail = self.read_task(thread_id).await?;
-        if detail.task.cwd.trim().is_empty() {
-            anyhow::bail!("the selected Codex task does not expose a working directory");
-        }
-        let cwd = PathBuf::from(&detail.task.cwd);
-        if !cwd.is_absolute() {
-            anyhow::bail!("the selected Codex task has a non-absolute working directory");
-        }
-        let project = BoundProject {
-            id: project_id(&detail.task.cwd),
-            title: project_title(&cwd),
-            cwd: detail.task.cwd,
-            selected_at: Utc::now().to_rfc3339_opts(SecondsFormat::Secs, true),
-        };
-        if scope == ProjectLeaseScope::Pinned {
-            let mut config = self.config.read().await.clone();
-            config.selected_project = Some(project.clone());
-            let content = toml::to_string_pretty(&config).context("encode Codex bridge config")?;
-            persist(&self.path, &content).await?;
-            *self.config.write().await = config;
-        }
-        *self.active_project_lease.write().await = Some(ProjectLease::new(project, scope));
-        self.suspend_handoffs().await;
-        Ok(self.snapshot().await)
-    }
-
-    pub async fn clear_selected_project(&self) -> Result<BridgeSnapshot> {
-        let active_scope = self
-            .active_project_lease
-            .read()
-            .await
-            .as_ref()
-            .map(|lease| lease.scope);
-        *self.active_project_lease.write().await = None;
-        if active_scope == Some(ProjectLeaseScope::Pinned) {
-            let mut config = self.config.read().await.clone();
-            config.selected_project = None;
-            let content = toml::to_string_pretty(&config).context("encode Codex bridge config")?;
-            persist(&self.path, &content).await?;
-            *self.config.write().await = config;
-        }
-        self.suspend_handoffs().await;
-        Ok(self.snapshot().await)
-    }
-
-    pub async fn begin_interactive_turn(&self, source_revision_id: &str) {
-        let config = self.config.read().await.clone();
-        let Some(lease) = self.effective_project_lease(&config).await else {
-            self.suspend_handoffs().await;
-            return;
-        };
-        let lease = lease.for_turn(source_revision_id);
-        *self.active_project_lease.write().await = Some(lease.clone());
-        self.project_handoffs
-            .configure(
-                config.codex_task_access && config.project_handoffs_enabled,
-                Some(lease),
-            )
-            .await;
-    }
-
-    pub async fn suspend_handoffs(&self) {
-        self.project_handoffs.configure(false, None).await;
-    }
-
-    pub async fn finish_interactive_turn(&self, source_revision_id: &str) {
-        self.suspend_handoffs().await;
-        let should_clear = self
-            .active_project_lease
-            .read()
-            .await
-            .as_ref()
-            .is_some_and(|lease| {
-                lease.scope == ProjectLeaseScope::OneShot
-                    && lease.source_revision_id.as_deref() == Some(source_revision_id)
-            });
-        if should_clear {
-            *self.active_project_lease.write().await = None;
-        }
-        let config = self.config.read().await.clone();
-        let _ = self.effective_project_lease(&config).await;
+        self.task_sources.read(thread_id).await
     }
 
     pub async fn context_packet(&self, query: Option<&str>) -> Result<BridgeContextPacket> {
@@ -489,40 +340,6 @@ impl CodexBridge {
             .context("encode Codex bridge config")?;
         persist(&self.path, &content).await
     }
-
-    async fn effective_project_lease(&self, config: &BridgeConfig) -> Option<ProjectLease> {
-        let mut active = self.active_project_lease.write().await;
-        if active.as_ref().is_some_and(ProjectLease::is_expired) {
-            *active = None;
-        }
-        if active.is_none() {
-            *active = config
-                .selected_project
-                .clone()
-                .map(|project| ProjectLease::new(project, ProjectLeaseScope::Pinned));
-        }
-        active.clone()
-    }
-}
-
-fn scope_name(scope: ProjectLeaseScope) -> &'static str {
-    match scope {
-        ProjectLeaseScope::OneShot => "one_shot",
-        ProjectLeaseScope::Topic => "topic",
-        ProjectLeaseScope::Pinned => "pinned",
-    }
-}
-
-fn project_id(cwd: &str) -> String {
-    format!("project_{:x}", Sha256::digest(cwd.as_bytes()))
-}
-
-fn project_title(cwd: &PathBuf) -> String {
-    cwd.file_name()
-        .and_then(|name| name.to_str())
-        .filter(|name| !name.trim().is_empty())
-        .unwrap_or_else(|| cwd.as_os_str().to_str().unwrap_or("project"))
-        .to_owned()
 }
 
 fn truncate(value: &str, max_chars: usize) -> String {

@@ -23,6 +23,18 @@ const TYPING_GRACE: Duration = Duration::from_millis(2_500);
 const MAX_SETTLE: Duration = Duration::from_secs(8);
 static CONVERSATION_ID: AtomicU64 = AtomicU64::new(1);
 
+/// An external source deliberately attached to one conversational turn.
+///
+/// It is transient model context: unlike the user's own message, the source
+/// payload is not copied into the local conversation archive.
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ExternalContext {
+    pub source: String,
+    pub title: String,
+    pub content: String,
+}
+
 #[derive(Clone, Debug)]
 pub struct QueuedUserMessage {
     pub text: String,
@@ -31,6 +43,7 @@ pub struct QueuedUserMessage {
     pub reply_to_revision_id: Option<String>,
     pub quotes: Vec<MessageQuote>,
     pub topic: Option<TopicContext>,
+    pub external_contexts: Vec<ExternalContext>,
     pub minimum_lane: Option<ComputeLane>,
 }
 
@@ -356,6 +369,7 @@ mod tests {
             reply_to_revision_id: None,
             quotes: Vec::new(),
             topic: None,
+            external_contexts: Vec::new(),
             minimum_lane: None,
         }
     }

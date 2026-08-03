@@ -28,7 +28,6 @@ use crate::{
     reconciliation::ReconciliationMode,
     reflection::ReflectionStore,
     symbiont_context::SymbiontContextStore,
-    task_execution::ProjectHandoffQueue,
     usage::{InvocationRecord, ToolTraceStep},
 };
 use pcp_sqlite::SqlitePcpStore;
@@ -83,7 +82,7 @@ fn dynamic_tools_expose_host_and_pcp_namespaces() {
             .any(|tool| tool["name"] == "reserve_continuation")
     );
     assert!(
-        specs[0]["tools"]
+        !specs[0]["tools"]
             .as_array()
             .unwrap()
             .iter()
@@ -492,12 +491,6 @@ async fn orientation_tool_requires_active_calibration() {
                 .expect("open compute policies"),
         ),
         None,
-        Arc::new(
-            ProjectHandoffQueue::open(root.join("codex-handoffs.json"))
-                .await
-                .expect("open project handoff queue")
-                .0,
-        ),
         Arc::new(crate::continuation::ContinuationQueue::new().0),
         exploration_intents,
     );
@@ -568,12 +561,6 @@ async fn pcp_tools_write_search_and_read_through_the_dynamic_bridge() {
                 .expect("open compute policies"),
         ),
         None,
-        Arc::new(
-            ProjectHandoffQueue::open(root.join("codex-handoffs.json"))
-                .await
-                .expect("open project handoff queue")
-                .0,
-        ),
         Arc::new(crate::continuation::ContinuationQueue::new().0),
         exploration_intents,
     );
@@ -604,19 +591,25 @@ async fn pcp_tools_write_search_and_read_through_the_dynamic_bridge() {
     assert_eq!(written.response["success"], true);
     let written_json = tool_content_json(&written.response);
     let page_id = written_json["pageId"].as_str().expect("written Page ID");
+    let revision_id = written_json["revisionId"]
+        .as_str()
+        .expect("written Revision ID");
     let derived = tools
         .execute(&json!({
             "namespace": "pcp",
             "tool": "write_page",
             "arguments": {
                 "content": "The telescope is worth remembering.",
-                "based_on_page_ids": [page_id]
+                "based_on_revision_ids": [revision_id]
             }
         }))
         .await;
     assert_eq!(derived.response["success"], true);
     let derived_json = tool_content_json(&derived.response);
     let derived_page_id = derived_json["pageId"].as_str().expect("derived Page ID");
+    let derived_revision_id = derived_json["revisionId"]
+        .as_str()
+        .expect("derived Revision ID");
     let assessed = tools
         .execute_for_model(
             &json!({
@@ -624,9 +617,10 @@ async fn pcp_tools_write_search_and_read_through_the_dynamic_bridge() {
                 "tool": "assess_validity",
                 "arguments": {
                     "target_page_id": page_id,
+                    "target_revision_id": revision_id,
                     "standing": "qualified",
                     "rationale": "The derived Page narrows why this detail remains useful.",
-                    "evidence_page_ids": [derived_page_id]
+                    "evidence_revision_ids": [derived_revision_id]
                 }
             }),
             Some("test-model"),
@@ -640,8 +634,9 @@ async fn pcp_tools_write_search_and_read_through_the_dynamic_bridge() {
             "tool": "write_summary",
             "arguments": {
                 "target_page_id": page_id,
+                "target_revision_id": revision_id,
                 "content": "A semantic observatory instrument used to test Summary routing.",
-                "based_on_page_ids": [derived_page_id]
+                "based_on_revision_ids": [derived_revision_id]
             }
         }))
         .await;
@@ -696,7 +691,7 @@ async fn pcp_tools_write_search_and_read_through_the_dynamic_bridge() {
     assert_eq!(read.response["success"], true);
     let read_json = tool_content_json(&read.response);
     assert_eq!(
-        read_json["pages"][0]["page"]["payload"]["content"],
+        read_json["pages"][0]["revision"]["payload"]["content"],
         "The PCP bridge remembers a brass telescope."
     );
     assert!(
@@ -706,11 +701,19 @@ async fn pcp_tools_write_search_and_read_through_the_dynamic_bridge() {
             .contains("semantic observatory")
     );
     assert_eq!(
-        read_json["pages"][0]["validity"]["basisPageIds"][0],
-        derived_page_id
+        read_json["pages"][0]["validity"]["basisRevisionIds"][0],
+        derived_revision_id
     );
-    assert!(read_json["pages"][0]["page"].get("sourceRefs").is_none());
-    assert!(read_json["pages"][0]["page"].get("provenance").is_none());
+    assert!(
+        read_json["pages"][0]["revision"]
+            .get("sourceRefs")
+            .is_none()
+    );
+    assert!(
+        read_json["pages"][0]["revision"]
+            .get("provenance")
+            .is_none()
+    );
 
     let traced = tools
         .execute(&json!({
@@ -725,6 +728,10 @@ async fn pcp_tools_write_search_and_read_through_the_dynamic_bridge() {
     assert_eq!(traced.response["success"], true);
     let traced_json = tool_content_json(&traced.response);
     assert_eq!(traced_json["pages"][0]["page"]["pageId"], page_id);
+    assert_eq!(
+        traced_json["pages"][0]["revision"]["revisionId"],
+        revision_id
+    );
 
     let derived_trace = tools
         .execute(&json!({
@@ -739,8 +746,8 @@ async fn pcp_tools_write_search_and_read_through_the_dynamic_bridge() {
     assert_eq!(derived_trace.response["success"], true);
     let derived_trace_json = tool_content_json(&derived_trace.response);
     assert_eq!(
-        derived_trace_json["pages"][0]["page"]["provenance"][0]["inputPageIds"][0],
-        page_id
+        derived_trace_json["pages"][0]["revision"]["provenance"][0]["inputRevisionIds"][0],
+        revision_id
     );
     assert!(
         derived_trace_json["pages"][0]["relations"]
@@ -775,7 +782,11 @@ async fn pcp_tools_write_search_and_read_through_the_dynamic_bridge() {
         "tool": "consolidate_pages",
         "arguments": {
             "canonical_page_id": page_id,
-            "replaced_page_ids": [page_id, derived_page_id],
+            "expected_canonical_revision_id": revision_id,
+            "replaced_pages": [{
+                "page_id": derived_page_id,
+                "expected_revision_id": derived_revision_id
+            }],
             "content": "A brass telescope is the durable observatory instrument worth remembering."
         }
     });
@@ -786,7 +797,7 @@ async fn pcp_tools_write_search_and_read_through_the_dynamic_bridge() {
     let approved = tools
         .execute_for_model(&consolidation, Some("test-model"), "reconciliation_apply")
         .await;
-    assert_eq!(approved.response["success"], true);
+    assert_eq!(approved.response["success"], true, "{}", approved.response);
     let approved_json = tool_content_json(&approved.response);
     assert_eq!(approved_json["created"], true);
 
@@ -848,12 +859,6 @@ async fn reflection_tools_accept_recalled_conversation_revisions_outside_the_eve
                 .expect("open compute policies"),
         ),
         None,
-        Arc::new(
-            ProjectHandoffQueue::open(root.join("codex-handoffs.json"))
-                .await
-                .expect("open project handoff queue")
-                .0,
-        ),
         Arc::new(crate::continuation::ContinuationQueue::new().0),
         Arc::clone(&exploration_intents),
     );
@@ -972,12 +977,6 @@ async fn hunch_tools_preserve_model_owned_state_and_record_autonomous_exploratio
                 .expect("open compute policies"),
         ),
         None,
-        Arc::new(
-            ProjectHandoffQueue::open(root.join("codex-handoffs.json"))
-                .await
-                .expect("open project handoff queue")
-                .0,
-        ),
         Arc::new(crate::continuation::ContinuationQueue::new().0),
         exploration_intents,
     );

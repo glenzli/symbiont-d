@@ -14,11 +14,11 @@ use pcp_client::EmbeddedPcpClient;
 use pcp_client::{DurablePageInventoryItem, PcpApi};
 use pcp_core::{
     AccessPrincipal, AccessPrincipalType, AccessSession, Actor, ActorType,
-    AssessPageValidityRequest, ConsolidatePagesRequest, CreateScopeRequest, InitialRelation,
-    LifecycleStatus, LinkPagesRequest, PagePayload, Projection, ProvenanceEvent, ReadPage,
-    ReadPagesRequest, Relation, RevisePageRequest, Scope, SearchFilters, SearchMode,
-    SearchPagesRequest, SearchResult, SourceRef, ValidityStanding, WritePageRequest, WriteResult,
-    WriteSummaryRequest, WriteSummaryResult, WriteValidityResult,
+    AssessPageValidityRequest, ConsolidatePagesRequest, ConsolidationInput, CreateScopeRequest,
+    InitialRelation, LifecycleStatus, LinkPagesRequest, PageMutability, PagePayload, Projection,
+    ProvenanceEvent, ReadPage, ReadPagesRequest, Relation, RevisePageRequest, Scope, SearchFilters,
+    SearchMode, SearchPagesRequest, SearchResult, SourceRef, ValidityStanding, WritePageRequest,
+    WriteResult, WriteSummaryRequest, WriteSummaryResult, WriteValidityResult,
 };
 #[cfg(test)]
 use pcp_store::PcpStore;
@@ -298,6 +298,8 @@ impl ContinuityHost {
                     namespace: self.scopes.conversation.clone(),
                     visibility: "private".to_owned(),
                     lifecycle_status: LifecycleStatus::Active,
+                    kind: "conversation_event".to_owned(),
+                    mutability: PageMutability::Sealed,
                     created_by: actor.clone(),
                     observed_at: Some(entry.at.clone()),
                     valid_from: None,
@@ -353,6 +355,8 @@ impl ContinuityHost {
                 namespace: self.scopes.user.clone(),
                 visibility: "private".to_owned(),
                 lifecycle_status: LifecycleStatus::Active,
+                kind: "user_orientation".to_owned(),
+                mutability: PageMutability::Revisioned,
                 created_by: actor.clone(),
                 observed_at: profile.updated_at.clone(),
                 valid_from: None,
@@ -389,6 +393,7 @@ impl ContinuityHost {
         let current = self
             .store
             .read_pages(ReadPagesRequest {
+                page_ids: Vec::new(),
                 revision_ids: vec![current_revision.clone()],
                 projections: vec![Projection::Payload],
                 max_chars: 64_000,
@@ -520,31 +525,26 @@ impl ContinuityHost {
             delivery_state: None,
         };
         let event_key = self.next_event_key();
-        let mut initial_relations = Vec::new();
+        let mut relation_targets = Vec::new();
         if let Some(revision_id) = links.responds_to.as_ref() {
-            initial_relations.push(InitialRelation {
-                relation_type: "responds_to".to_owned(),
-                to_revision_id: revision_id.clone(),
-            });
+            relation_targets.push(("responds_to".to_owned(), revision_id.clone()));
         }
         if let Some(revision_id) = links.continues_from.as_ref() {
-            initial_relations.push(InitialRelation {
-                relation_type: "continues".to_owned(),
-                to_revision_id: revision_id.clone(),
-            });
+            relation_targets.push(("continues".to_owned(), revision_id.clone()));
         }
-        initial_relations.extend(links.surfaced_hunch_revision_ids.iter().map(|revision_id| {
-            InitialRelation {
-                relation_type: "surfaces_hunch".to_owned(),
-                to_revision_id: revision_id.clone(),
-            }
-        }));
-        initial_relations.extend(attachment_revision_ids.iter().map(|revision_id| {
-            InitialRelation {
-                relation_type: "has_attachment".to_owned(),
-                to_revision_id: revision_id.clone(),
-            }
-        }));
+        relation_targets.extend(
+            links
+                .surfaced_hunch_revision_ids
+                .iter()
+                .cloned()
+                .map(|revision_id| ("surfaces_hunch".to_owned(), revision_id)),
+        );
+        relation_targets.extend(
+            attachment_revision_ids
+                .iter()
+                .cloned()
+                .map(|revision_id| ("has_attachment".to_owned(), revision_id)),
+        );
         let mut quoted_revision_ids = links
             .quotes
             .iter()
@@ -552,14 +552,15 @@ impl ContinuityHost {
             .collect::<Vec<_>>();
         quoted_revision_ids.sort();
         quoted_revision_ids.dedup();
-        initial_relations.extend(
+        relation_targets.extend(
             quoted_revision_ids
                 .iter()
-                .map(|revision_id| InitialRelation {
-                    relation_type: "quotes".to_owned(),
-                    to_revision_id: revision_id.clone(),
-                }),
+                .cloned()
+                .map(|revision_id| ("quotes".to_owned(), revision_id)),
         );
+        let initial_relations = self
+            .initial_relations_for_revision_targets(relation_targets)
+            .await?;
         let mut provenance_inputs = links.input_revision_ids;
         provenance_inputs.extend(links.surfaced_hunch_revision_ids);
         provenance_inputs.extend(quoted_revision_ids);
@@ -600,6 +601,8 @@ impl ContinuityHost {
                 namespace: self.scopes.conversation.clone(),
                 visibility: "private".to_owned(),
                 lifecycle_status: LifecycleStatus::Active,
+                kind: "conversation_event".to_owned(),
+                mutability: PageMutability::Sealed,
                 created_by: actor.clone(),
                 observed_at: Some(entry.at.clone()),
                 valid_from: None,
@@ -646,6 +649,8 @@ impl ContinuityHost {
                     namespace: self.scopes.conversation.clone(),
                     visibility: "private".to_owned(),
                     lifecycle_status: LifecycleStatus::Active,
+                    kind: "image_asset".to_owned(),
+                    mutability: PageMutability::Sealed,
                     created_by: actor.clone(),
                     observed_at: Some(observed_at.to_owned()),
                     valid_from: None,
@@ -714,6 +719,7 @@ impl ContinuityHost {
         }
         let pages = self
             .read(ReadPagesRequest {
+                page_ids: Vec::new(),
                 revision_ids: revision_ids.to_vec(),
                 projections: vec![
                     Projection::Payload,
@@ -782,6 +788,7 @@ impl ContinuityHost {
         revision_ids.dedup();
         let pages = self
             .read(ReadPagesRequest {
+                page_ids: Vec::new(),
                 revision_ids,
                 projections: vec![Projection::Payload, Projection::Facets],
                 max_chars: (MAX_QUOTES_PER_MESSAGE * (MAX_QUOTE_TEXT_CHARS + 2_000)) as u32,
@@ -847,26 +854,44 @@ impl ContinuityHost {
         }
         let pages = self
             .read(ReadPagesRequest {
+                page_ids: Vec::new(),
                 revision_ids: message_revision_ids.to_vec(),
                 projections: vec![Projection::Relations],
                 max_chars: 16_000,
             })
             .await?;
-        let message_revisions = message_revision_ids
+        let message_page_ids = pages
             .iter()
-            .map(String::as_str)
+            .map(|page| page.page.page_id.clone())
             .collect::<HashSet<_>>();
-        let mut seen = HashSet::new();
-        let mut image_revisions = Vec::new();
+        let mut image_page_ids = Vec::new();
         for relation in pages.into_iter().flat_map(|page| page.relations) {
             if relation.relation_type == "has_attachment"
-                && message_revisions.contains(relation.from_revision_id.as_str())
-                && seen.insert(relation.to_revision_id.clone())
+                && message_page_ids.contains(&relation.from_page_id)
+                && !image_page_ids.contains(&relation.to_page_id)
             {
-                image_revisions.push(relation.to_revision_id);
+                image_page_ids.push(relation.to_page_id);
             }
         }
-        Ok(image_revisions)
+        if image_page_ids.is_empty() {
+            return Ok(Vec::new());
+        }
+        let image_pages = self
+            .read(ReadPagesRequest {
+                page_ids: image_page_ids.clone(),
+                revision_ids: Vec::new(),
+                projections: vec![Projection::Manifest],
+                max_chars: 256,
+            })
+            .await?;
+        let by_page = image_pages
+            .into_iter()
+            .map(|page| (page.page.page_id, page.revision.revision_id))
+            .collect::<HashMap<_, _>>();
+        Ok(image_page_ids
+            .into_iter()
+            .filter_map(|page_id| by_page.get(&page_id).cloned())
+            .collect())
     }
 
     pub async fn recent_messages(&self, limit: usize) -> Result<Vec<MemoryEntry>> {
@@ -897,6 +922,7 @@ impl ContinuityHost {
         for chunk in revision_ids.chunks(20) {
             pages.extend(
                 self.read(ReadPagesRequest {
+                    page_ids: Vec::new(),
                     revision_ids: chunk.to_vec(),
                     projections: vec![
                         Projection::Payload,
@@ -908,19 +934,23 @@ impl ContinuityHost {
                 .await?,
             );
         }
-        let active_assistant_revisions = pages
+        let revision_page_ids = pages
+            .iter()
+            .map(|page| (page.revision.revision_id.clone(), page.page.page_id.clone()))
+            .collect::<HashMap<_, _>>();
+        let active_assistant_page_ids = pages
             .iter()
             .filter(|page| page_message_role(page) == Some(MemoryRole::Assistant))
-            .map(|page| page.revision.revision_id.clone())
+            .map(|page| page.page.page_id.clone())
             .collect::<std::collections::HashSet<_>>();
-        let replied_to_revisions = pages
+        let replied_to_page_ids = pages
             .iter()
             .flat_map(|page| page.relations.iter())
             .filter(|relation| {
                 relation.relation_type == "responds_to"
-                    && active_assistant_revisions.contains(&relation.from_revision_id)
+                    && active_assistant_page_ids.contains(&relation.from_page_id)
             })
-            .map(|relation| relation.to_revision_id.clone())
+            .map(|relation| relation.to_page_id.clone())
             .collect::<std::collections::HashSet<_>>();
         let mut entries = Vec::with_capacity(pages.len());
         for page in pages {
@@ -943,7 +973,8 @@ impl ContinuityHost {
             && latest_user
                 .revision_id
                 .as_ref()
-                .is_some_and(|revision| !replied_to_revisions.contains(revision))
+                .and_then(|revision| revision_page_ids.get(revision))
+                .is_some_and(|page_id| !replied_to_page_ids.contains(page_id))
         {
             latest_user.delivery_state = Some(MessageDeliveryState::Failed);
         }
@@ -967,6 +998,7 @@ impl ContinuityHost {
         for chunk in unique.chunks(20) {
             let pages = self
                 .read(ReadPagesRequest {
+                    page_ids: Vec::new(),
                     revision_ids: chunk.to_vec(),
                     projections: vec![Projection::Payload, Projection::Facets],
                     max_chars: 128_000,
@@ -1018,6 +1050,7 @@ impl ContinuityHost {
         for chunk in retracted_revision_ids.chunks(20) {
             let pages = self
                 .read(ReadPagesRequest {
+                    page_ids: Vec::new(),
                     revision_ids: chunk.to_vec(),
                     projections: vec![Projection::Facets],
                     max_chars: 16_000,
@@ -1134,26 +1167,98 @@ impl ContinuityHost {
         self.store.current_revision_id(page_id.to_owned()).await
     }
 
+    pub async fn page_ids_for_revisions(
+        &self,
+        revision_ids: &[String],
+    ) -> Result<HashMap<String, String>> {
+        let mut unique = revision_ids.to_vec();
+        unique.sort();
+        unique.dedup();
+        let mut resolved = HashMap::with_capacity(unique.len());
+        for chunk in unique.chunks(20) {
+            let pages = self
+                .read(ReadPagesRequest {
+                    page_ids: Vec::new(),
+                    revision_ids: chunk.to_vec(),
+                    projections: vec![Projection::Manifest],
+                    max_chars: 256,
+                })
+                .await?;
+            for page in pages {
+                resolved.insert(page.revision.revision_id, page.page.page_id);
+            }
+        }
+        if resolved.len() != unique.len() {
+            let missing = unique
+                .into_iter()
+                .filter(|revision_id| !resolved.contains_key(revision_id))
+                .collect::<Vec<_>>();
+            anyhow::bail!("PCP Revisions were not found: {}", missing.join(", "));
+        }
+        Ok(resolved)
+    }
+
+    pub async fn initial_relations_for_revision_targets(
+        &self,
+        targets: Vec<(String, String)>,
+    ) -> Result<Vec<InitialRelation>> {
+        let revision_ids = targets
+            .iter()
+            .map(|(_, revision_id)| revision_id.clone())
+            .collect::<Vec<_>>();
+        let page_ids = self.page_ids_for_revisions(&revision_ids).await?;
+        targets
+            .into_iter()
+            .map(|(relation_type, revision_id)| {
+                Ok(InitialRelation {
+                    relation_type,
+                    to_page_id: page_ids
+                        .get(&revision_id)
+                        .context("resolved PCP Revision lost its Page identity")?
+                        .clone(),
+                    basis_revision_ids: vec![revision_id],
+                })
+            })
+            .collect()
+    }
+
     pub async fn surfaced_hunch_revisions(&self, message_revision_id: &str) -> Result<Vec<String>> {
-        let pages = self
+        let mut pages = self
             .read(ReadPagesRequest {
+                page_ids: Vec::new(),
                 revision_ids: vec![message_revision_id.to_owned()],
                 projections: vec![Projection::Relations],
                 max_chars: 8_000,
             })
             .await?;
-        let mut revision_ids = pages
+        let Some(message) = pages.pop() else {
+            return Ok(Vec::new());
+        };
+        let mut page_ids = message
+            .relations
             .into_iter()
-            .flat_map(|page| page.relations)
             .filter(|relation| {
-                relation.from_revision_id == message_revision_id
+                relation.from_page_id == message.page.page_id
                     && relation.relation_type == "surfaces_hunch"
             })
-            .map(|relation| relation.to_revision_id)
+            .map(|relation| relation.to_page_id)
             .collect::<Vec<_>>();
-        revision_ids.sort();
-        revision_ids.dedup();
-        Ok(revision_ids)
+        page_ids.sort();
+        page_ids.dedup();
+        if page_ids.is_empty() {
+            return Ok(Vec::new());
+        }
+        Ok(self
+            .read(ReadPagesRequest {
+                page_ids,
+                revision_ids: Vec::new(),
+                projections: vec![Projection::Manifest],
+                max_chars: 256,
+            })
+            .await?
+            .into_iter()
+            .map(|page| page.revision.revision_id)
+            .collect())
     }
 
     pub async fn next_summary_candidate(&self, minimum_chars: usize) -> Result<Option<String>> {
@@ -1196,23 +1301,32 @@ impl ContinuityHost {
         self.resolve_scopes(&[namespace.to_owned()])?;
         let actor = model_actor();
         let mut relations = relations;
-        for source_page_id in &source_revision_ids {
+        let source_relations = self
+            .initial_relations_for_revision_targets(
+                source_revision_ids
+                    .iter()
+                    .cloned()
+                    .map(|revision_id| ("derived_from".to_owned(), revision_id))
+                    .collect(),
+            )
+            .await?;
+        for source_relation in source_relations {
             if !relations.iter().any(|relation| {
-                relation.relation_type == "derived_from"
-                    && relation.to_revision_id == *source_page_id
+                relation.relation_type == source_relation.relation_type
+                    && relation.to_page_id == source_relation.to_page_id
             }) {
-                relations.push(InitialRelation {
-                    relation_type: "derived_from".to_owned(),
-                    to_revision_id: source_page_id.clone(),
-                });
+                relations.push(source_relation);
             }
         }
+        let kind = page_kind(facets.as_ref(), "memory_synthesis");
         self.store
             .write_page(WritePageRequest {
                 owner_id: self.store.owner_id().to_owned(),
                 namespace: namespace.to_owned(),
                 visibility: "private".to_owned(),
                 lifecycle_status: LifecycleStatus::Active,
+                kind,
+                mutability: PageMutability::Revisioned,
                 created_by: actor.clone(),
                 observed_at: Some(now()),
                 valid_from: None,
@@ -1238,6 +1352,7 @@ impl ContinuityHost {
 
     pub async fn write_model_summary(
         &self,
+        target_page_id: String,
         target_revision_id: String,
         expected_summary_revision_id: Option<String>,
         content: String,
@@ -1256,6 +1371,7 @@ impl ContinuityHost {
         }
         self.store
             .write_summary(WriteSummaryRequest {
+                target_page_id,
                 target_revision_id,
                 expected_summary_revision_id,
                 content,
@@ -1273,31 +1389,36 @@ impl ContinuityHost {
             .await
     }
 
-    pub async fn supersede_model_page(
+    pub async fn revise_current_model_page(
         &self,
         target_page_id: String,
+        expected_revision_id: String,
         content: String,
-        source_page_ids: Vec<String>,
+        source_revision_ids: Vec<String>,
     ) -> Result<WriteResult> {
         let target = self
             .store
             .read_pages(ReadPagesRequest {
-                revision_ids: vec![target_page_id.clone()],
+                page_ids: Vec::new(),
+                revision_ids: vec![expected_revision_id.clone()],
                 projections: vec![Projection::Manifest, Projection::Facets],
                 max_chars: 256,
             })
             .await?
             .into_iter()
             .next()
-            .context("supersede target Page is not available")?;
+            .context("revision target is not available")?;
+        if target.page.page_id != target_page_id {
+            anyhow::bail!("target Page and expected Revision do not match");
+        }
         self.revise_model_page(
-            target.revision.page_id,
             target_page_id,
+            expected_revision_id,
             content,
             target.revision.facets,
             Vec::new(),
             LifecycleStatus::Active,
-            source_page_ids,
+            source_revision_ids,
             None,
         )
         .await
@@ -1305,8 +1426,9 @@ impl ContinuityHost {
 
     pub async fn consolidate_model_pages(
         &self,
-        canonical_revision_id: String,
-        mut replaced_revision_ids: Vec<String>,
+        canonical_page_id: String,
+        expected_canonical_revision_id: String,
+        replaced_pages: Vec<ConsolidationInput>,
         content: String,
         tool_or_model: Option<String>,
     ) -> Result<WriteResult> {
@@ -1315,7 +1437,11 @@ impl ContinuityHost {
                 "consolidated Page content must contain 1-{MAX_MODEL_WRITE_CHARS} characters"
             );
         }
-        replaced_revision_ids.push(canonical_revision_id.clone());
+        let mut replaced_revision_ids = replaced_pages
+            .iter()
+            .map(|input| input.expected_revision_id.clone())
+            .collect::<Vec<_>>();
+        replaced_revision_ids.push(expected_canonical_revision_id.clone());
         replaced_revision_ids.sort();
         replaced_revision_ids.dedup();
         if replaced_revision_ids.len() < 2 {
@@ -1324,7 +1450,8 @@ impl ContinuityHost {
         let canonical = self
             .store
             .read_pages(ReadPagesRequest {
-                revision_ids: vec![canonical_revision_id.clone()],
+                page_ids: Vec::new(),
+                revision_ids: vec![expected_canonical_revision_id.clone()],
                 projections: vec![
                     Projection::Manifest,
                     Projection::Sources,
@@ -1336,6 +1463,9 @@ impl ContinuityHost {
             .into_iter()
             .next()
             .context("canonical consolidation Page is not available")?;
+        if canonical.page.page_id != canonical_page_id {
+            anyhow::bail!("canonical Page and expected Revision do not match");
+        }
         let actor = model_actor();
         let timestamp = now();
         let mut facets = canonical.revision.facets.unwrap_or_else(|| json!({}));
@@ -1353,8 +1483,9 @@ impl ContinuityHost {
         let idempotency_key = format!("model-consolidation:{:x}", digest.finalize());
         self.store
             .consolidate_pages(ConsolidatePagesRequest {
-                canonical_revision_id,
-                replaced_revision_ids: replaced_revision_ids.clone(),
+                canonical_page_id,
+                expected_canonical_revision_id,
+                replaced_pages,
                 created_by: actor.clone(),
                 lifecycle_status: LifecycleStatus::Active,
                 observed_at: Some(timestamp.clone()),
@@ -1381,6 +1512,7 @@ impl ContinuityHost {
     #[allow(clippy::too_many_arguments)]
     pub async fn assess_model_page_validity(
         &self,
+        target_page_id: String,
         target_revision_id: String,
         expected_assessment_id: Option<String>,
         standing: ValidityStanding,
@@ -1394,8 +1526,9 @@ impl ContinuityHost {
         basis_revision_ids.dedup();
         self.store
             .assess_page_validity(AssessPageValidityRequest {
+                target_page_id,
                 target_revision_id,
-                expected_assessment_id,
+                expected_assessment_revision_id: expected_assessment_id,
                 standing,
                 rationale,
                 scope,
@@ -1426,13 +1559,6 @@ impl ContinuityHost {
         let mut provenance_inputs = Vec::with_capacity(source_revision_ids.len() + 1);
         provenance_inputs.push(expected_revision_id.clone());
         provenance_inputs.extend(source_revision_ids.iter().cloned());
-        let initial_relations = source_revision_ids
-            .into_iter()
-            .map(|to_revision_id| InitialRelation {
-                relation_type: "derived_from".to_owned(),
-                to_revision_id,
-            })
-            .collect();
         self.store
             .revise_page(RevisePageRequest {
                 page_id,
@@ -1455,7 +1581,7 @@ impl ContinuityHost {
                     input_revision_ids: provenance_inputs,
                     tool_or_model: Some("Codex".to_owned()),
                 }],
-                initial_relations,
+                initial_relations: Vec::new(),
                 idempotency_key,
             })
             .await
@@ -1463,16 +1589,18 @@ impl ContinuityHost {
 
     pub async fn link_model_pages(
         &self,
-        from_revision_id: String,
+        from_page_id: String,
         relation_type: String,
-        to_revision_id: String,
+        to_page_id: String,
+        basis_revision_ids: Vec<String>,
         idempotency_key: Option<String>,
     ) -> Result<Relation> {
         self.store
             .link_pages(LinkPagesRequest {
-                from_revision_id,
+                from_page_id,
                 relation_type,
-                to_revision_id,
+                to_page_id,
+                basis_revision_ids,
                 created_by: model_actor(),
                 idempotency_key,
             })
@@ -1539,6 +1667,15 @@ fn owned_page_kinds(kinds: &[&str]) -> Vec<String> {
     kinds.iter().map(|kind| (*kind).to_owned()).collect()
 }
 
+fn page_kind(facets: Option<&Value>, fallback: &str) -> String {
+    facets
+        .and_then(|facets| facets.get("kind"))
+        .and_then(Value::as_str)
+        .filter(|kind| !kind.trim().is_empty())
+        .unwrap_or(fallback)
+        .to_owned()
+}
+
 fn message_facets(entry: &MemoryEntry) -> Value {
     json!({
         "kind": "conversation_event",
@@ -1592,6 +1729,7 @@ fn memory_entry_from_page(page: ReadPage) -> Option<MemoryEntry> {
 }
 
 fn image_asset_from_page(page: ReadPage) -> Option<ImageAssetPage> {
+    let page_id = page.page.page_id;
     let revision = page.revision;
     if revision
         .facets
@@ -1611,10 +1749,15 @@ fn image_asset_from_page(page: ReadPage) -> Option<ImageAssetPage> {
         .relations
         .iter()
         .find(|relation| {
-            relation.relation_type == "has_attachment"
-                && relation.to_revision_id == revision.revision_id
+            relation.relation_type == "has_attachment" && relation.to_page_id == page_id
         })
-        .map(|relation| relation.from_revision_id.clone());
+        .and_then(|relation| {
+            relation
+                .basis_revision_ids
+                .iter()
+                .find(|basis_revision_id| *basis_revision_id != &revision.revision_id)
+                .cloned()
+        });
     let source_type = revision
         .source_refs
         .first()

@@ -5,6 +5,8 @@ mod images;
 mod interaction_output;
 mod prompts;
 mod task_bridge;
+mod task_source_client;
+mod task_sources;
 mod tool_dedup;
 mod tools;
 mod trace;
@@ -15,7 +17,10 @@ pub use client::{
 };
 pub use images::import_generated_images;
 pub use interaction_output::ChatDisposition;
+#[cfg(test)]
+pub use task_bridge::CodexTaskMessage;
 pub use task_bridge::{CodexTaskDetail, CodexTaskSummary};
+pub use task_sources::CodexTaskSources;
 
 #[cfg(test)]
 #[path = "tests.rs"]

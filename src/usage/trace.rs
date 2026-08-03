@@ -167,7 +167,7 @@ fn is_pcp_write(step: &ToolTraceStep) -> bool {
             "assess_validity"
                 | "write_summary"
                 | "write_page"
-                | "supersede_page"
+                | "revise_page"
                 | "consolidate_pages"
                 | "relate_pages"
         )

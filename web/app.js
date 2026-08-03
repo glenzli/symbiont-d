@@ -6,12 +6,13 @@ import { renderMessageContent, renderRichText } from "/rich-text.js";
 import { initExplorationUi } from "/exploration-ui.js";
 import { initIdentityUi } from "/identity-ui.js";
 import { initComputeModeUi } from "/compute-mode-ui.js";
+import { initComposerContextUi } from "/composer-context-ui.js";
+import { initCodexContextUi } from "/codex-context-ui.js";
 import { initMessageActions } from "/message-actions.js";
 import { initMessageSync } from "/message-sync.js";
 import { initPermissionUi } from "/permission-ui.js";
 import { initQuoteUi } from "/quote-ui.js";
 import { initSettings } from "/settings.js";
-import { initTaskUi } from "/task-ui.js";
 import { initTopbarUi } from "/topbar-ui.js";
 import { initTopicUi } from "/topic-ui.js";
 import { initTraceUi } from "/trace-ui.js";
@@ -39,11 +40,7 @@ const appState = {
   conversation: null,
   bridge: {
     codexTaskAccess: false,
-    projectHandoffsEnabled: false,
-    selectedProject: null,
-    activeProjectLease: null,
   },
-  projectHandoffs: [],
   permissions: [],
 };
 
@@ -54,7 +51,6 @@ const input = document.querySelector("#message");
 const computeMode = document.querySelector("#compute-mode");
 const sendButton = document.querySelector("#send");
 const stopResponseButton = document.querySelector("#stop-response");
-const addImageButton = document.querySelector("#add-image");
 const imageInput = document.querySelector("#image-input");
 const attachmentTray = document.querySelector("#attachment-tray");
 const composerState = document.querySelector("#composer-state");
@@ -80,15 +76,13 @@ const explorationUi = initExplorationUi(appState);
 const settingsUi = initSettings(appState, explorationUi.trigger);
 const identityUi = initIdentityUi(appState);
 const permissionUi = initPermissionUi(appState);
-const taskUi = initTaskUi(
-  appState,
-  (text) => {
-    input.value = text;
-    resizeComposer();
-    input.focus();
-  },
-  settingsUi.open,
-);
+const composerContextUi = initComposerContextUi({
+  state: appState,
+  chooseImage: () => imageInput.click(),
+  notify: notifyComposer,
+  openSettings: settingsUi.open,
+});
+initCodexContextUi(() => input.value, notifyComposer);
 const reflectionUi = initReflectionUi(appState);
 const reconciliationUi = initReconciliationUi(appState);
 const profileUi = initProfileUi(appState, sendMessage);
@@ -143,7 +137,6 @@ function metadataText(metadata) {
   });
   const origin = {
     autonomous: "主动探索",
-    codex_handoff: "Codex 交接",
     continuation: "续话",
   }[metadata.origin] || "";
   return [
@@ -296,14 +289,6 @@ function renderRuntimeStatus() {
     connectionStatus.textContent = "初始化对话中";
     return;
   }
-  const handoff = (appState.projectHandoffs || []).find((run) =>
-    ["queued", "running"].includes(run.phase),
-  );
-  if (handoff) {
-    connectionStatus.textContent =
-      handoff.currentActivity || `正在交接 ${handoff.project.title}`;
-    return;
-  }
   const exploration = appState.exploration;
   const phase = exploration?.phase;
   if (phase === "exploring") {
@@ -350,8 +335,6 @@ function applyRuntime(payload) {
     payload.computePolicies || appState.computePolicies;
   appState.permissions = payload.permissions || appState.permissions;
   appState.bridge = payload.bridge || appState.bridge;
-  appState.projectHandoffs =
-    payload.projectHandoffs || appState.projectHandoffs;
   renderUsage();
   renderRuntimeStatus();
   identityUi.render();
@@ -359,7 +342,7 @@ function applyRuntime(payload) {
   reflectionUi.renderRuntime();
   reconciliationUi.runtimeUpdated();
   explorationUi.runtimeUpdated();
-  taskUi.runtimeUpdated();
+  composerContextUi.configUpdated();
   permissionUi.render();
   turnDispositionUi.applyAll(payload.turnDispositions);
 }
@@ -379,7 +362,8 @@ async function bootstrap() {
     identityUi.render();
     settingsUi.render();
     explorationUi.runtimeUpdated();
-    taskUi.runtimeUpdated();
+    composerContextUi.configUpdated();
+    composerContextUi.warm();
     reflectionUi.render();
     reconciliationUi.render();
     profileUi.render();
@@ -472,10 +456,18 @@ async function sendMessage(
   minimumLane = "auto",
   quotes = [],
   topic = null,
+  codexTaskIds = [],
 ) {
-  if (!text.trim() && !images.length && !quotes.length) return;
+  if (!text.trim() && !images.length && !quotes.length && !codexTaskIds.length) return;
   if (busy) {
-    await appendToActiveResponse(text, images, minimumLane, quotes, topic);
+    await appendToActiveResponse(
+      text,
+      images,
+      minimumLane,
+      quotes,
+      topic,
+      codexTaskIds,
+    );
     return;
   }
   const localEntry = localUserEntry(text, images, quotes, topic);
@@ -501,7 +493,7 @@ async function sendMessage(
   try {
     const response = await fetch("/api/chat", {
       method: "POST",
-      body: chatBody(text, images, minimumLane, quotes, topic),
+      body: chatBody(text, images, minimumLane, quotes, topic, codexTaskIds),
     });
     const result = await consumeStream(response, pending, outgoing);
     if (result.interrupted) {
@@ -534,7 +526,14 @@ async function sendMessage(
   }
 }
 
-async function appendToActiveResponse(text, images, minimumLane, quotes, topic) {
+async function appendToActiveResponse(
+  text,
+  images,
+  minimumLane,
+  quotes,
+  topic,
+  codexTaskIds = [],
+) {
   const outgoing = appendMessage(localUserEntry(text, images, quotes, topic), {
     deliveryState: "pending",
   });
@@ -547,7 +546,7 @@ async function appendToActiveResponse(text, images, minimumLane, quotes, topic) 
   try {
     const response = await fetch("/api/chat/append", {
       method: "POST",
-      body: chatBody(text, images, minimumLane, quotes, topic),
+      body: chatBody(text, images, minimumLane, quotes, topic, codexTaskIds),
     });
     const entry = await response.json();
     if (!response.ok) throw new Error(entry.error || "无法追加消息。");
@@ -617,6 +616,7 @@ function chatBody(
   minimumLane = "auto",
   quotes = [],
   topic = null,
+  codexTaskIds = [],
 ) {
   const body = new FormData();
   body.append("message", text);
@@ -624,6 +624,7 @@ function chatBody(
   if (topic?.id) body.append("topicId", topic.id);
   for (const quote of quotes) body.append("quote", JSON.stringify(quote));
   for (const image of images) body.append("image", image.file, image.file.name);
+  for (const taskId of codexTaskIds) body.append("codexTaskId", taskId);
   return body;
 }
 
@@ -786,8 +787,10 @@ composer.addEventListener("submit", (event) => {
   const text = input.value.trim();
   const images = selectedImages;
   const quotes = quoteUi.drafts();
+  const codexTaskIds = composerContextUi.consume();
   const minimumLane = computeMode.value;
-  if (!text && !images.length && !quotes.length) return;
+  if (codexTaskIds === null) return;
+  if (!text && !images.length && !quotes.length && !codexTaskIds.length) return;
   const topic = topicUi.consume();
   input.value = "";
   selectedImages = [];
@@ -797,7 +800,7 @@ composer.addEventListener("submit", (event) => {
   renderAttachmentTray();
   resizeComposer();
   signalTyping(false);
-  sendMessage(text, images, minimumLane, quotes, topic);
+  sendMessage(text, images, minimumLane, quotes, topic, codexTaskIds);
 });
 
 input.addEventListener("input", () => {
@@ -811,7 +814,6 @@ input.addEventListener("keydown", (event) => {
   }
 });
 
-addImageButton.addEventListener("click", () => imageInput.click());
 stopResponseButton.addEventListener("click", () => {
   stopActiveResponse();
 });

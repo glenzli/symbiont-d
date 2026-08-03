@@ -28,11 +28,10 @@ user's attention into a feed.
   and per-domain permission boundaries.
 - Explicit `$symbiont` skill for bringing a bounded live context packet into
   any Codex task without starting another model run.
-- Opt-in Codex task browser: listing reads metadata only, and task content is
-  fetched only after a user selects it.
-- Explicit project handoffs: an existing Codex task can identify a project, then
-  symbiont-d creates a new Codex task for each user-authorized repository
-  change. It never resumes or appends to the source task.
+- Opt-in Codex conversation sources: the composer adds a chosen Task as
+  bounded, read-only context for one turn; it never resumes or modifies it.
+- Explicit context export: Symbiont can copy an information packet for the user
+  to paste into any Codex task; it never creates, binds, or executes a task.
 - Live model catalog and configurable compute lanes.
 - Per-message compute constraints plus visible persistent topic rules. A matched
   rule starts directly in its configured minimum lane; the model can still
@@ -238,23 +237,18 @@ images attached to matched Pages before recent images; Codex inspects the chosen
 local asset only when it matters. This does not start a second model run.
 
 The reverse direction is disabled by default. Enable **读取 Codex 任务** under
-Settings → 连接, then open **任务**. The list endpoint reads task metadata only.
-Selecting a task performs a read-only `thread/read`; **带入对话** places a
-bounded transcript in the composer for review and does not send or store it
-automatically.
+Settings → 连接. In the composer, use **＋ → Codex 对话** to add a recent Task as
+an attachment-like source for this one turn. The compact picker shows only
+metadata; selecting it reads a bounded transcript in the background and shows
+a removable context chip. The transcript is supplied to the model only for
+that turn and is not copied into Symbiont's PCP conversation archive.
 
-The selected task can identify a project, but remains a read-only source. Enable
-**允许在选定项目中新建 Codex 任务** separately to permit code handoffs. Once both
-controls are active, the interactive symbiont model may queue concrete
-implementation work the user has requested. Every handoff starts a new,
-non-ephemeral Codex task in that project's working directory with a
-workspace-write sandbox; network access, sandbox escapes, and other elevated
-operations still pass through the Permission Broker. The composer displays a
-visible handoff record and status; it does not copy the result into the normal
-symbiont conversation or PCP. Image handoffs freeze exact PCP image Revision
-IDs before queuing and inject their content-addressed files as Codex
-`localImage` inputs. Discussion or speculative improvement ideas do not
-authorize a run.
+Use **复制上下文给 Codex** from the top menu to copy a bounded packet of the
+current focus, Current Map, Open Loops, active Hunches, working hypotheses,
+relevant PCP references, and explicitly selected local image references. Paste
+it into an existing or new Codex task yourself. Symbiont does not create,
+resume, bind, poll, or execute Codex tasks; Codex remains the sole owner of
+execution, approval, progress, and task history.
 
 ### Run as a macOS service
 
@@ -339,8 +333,7 @@ data/reflection.toml   background interpretation policy and limits
 data/compute.toml      model and reasoning-lane configuration
 data/compute-policies.toml
                        user-owned persistent topic compute rules
-data/codex-bridge.toml explicit Codex task-source and project-handoff permission
-data/codex-handoffs.json recent project-handoff journal
+data/codex-bridge.toml explicit Codex task-source permission
 ```
 
 The prototype does not silently import Codex task history. Conversation and
@@ -376,7 +369,7 @@ PCP_STORE_PATH=data/context.sqlite3 cargo run \
 ## Source Layout
 
 ```text
-src/bridge.rs       read-only Codex task sources and project handoff bridge
+src/bridge.rs       read-only Codex task sources and context-packet bridge
 src/codex/          Codex app-server client, prompts, tools, traces
 src/continuation.rs short conversational continuation lifecycle
 src/continuity.rs   conversation ingestion and PCP-facing context policy
@@ -387,7 +380,6 @@ src/identity.rs     local presentation identity and avatar selection
 src/pcp_connection.rs embedded development or fail-closed runtime composition
 src/permission.rs   pending approval lifecycle and session grants
 src/reflection/     time-aware interaction analysis and projections
-src/task_execution.rs project-handoff queue, lifecycle, and task record publication
 src/web_fetch.rs    permission-gated exact-page retrieval
 src/web.rs          local HTTP API
 web/                embedded browser interface

@@ -263,13 +263,24 @@ pub(super) fn pcp_maintenance_worker_prompt(
 ) -> anyhow::Result<String> {
     let instruction = match request {
         pcp_runtime::MaintenanceWorkerRequest::SummarizePage { .. } => {
-            "Judge whether this immutable Page is long and semantically dense enough to deserve a reusable routing Summary. If it is, return `write_summary` with a compact abstract that preserves discriminating concepts, decisions, uncertainty, names, and searchable aliases. It should help a later model decide whether to read Detail, not retell the payload. Otherwise return `keep_separate`; use `defer` only when the supplied Detail is insufficient."
+            "Judge whether this exact Page Revision is long and semantically dense enough to deserve a reusable routing Summary. If it is, return `write_summary` with a compact abstract that preserves discriminating concepts, decisions, uncertainty, names, and searchable aliases. It should help a later model decide whether to read Detail, not retell the payload. Otherwise return `keep_separate`; use `defer` only when the supplied Detail is insufficient."
         }
         pcp_runtime::MaintenanceWorkerRequest::SelectConsolidation { .. } => {
             "Inspect only the supplied routing index. Select two or more Pages only when they redundantly represent one durable subject and a single self-contained Page could replace all of them without erasing a meaningful disagreement, temporal change, or independent source. Return `candidate`, `no_candidate`, or `defer`. Never infer a relation from temporal adjacency or shared vocabulary alone."
         }
         pcp_runtime::MaintenanceWorkerRequest::ConsolidatePages { .. } => {
-            "Read the supplied Details and make the final semantic decision. Return `consolidate` only when one immutable replacement can preserve every durable fact, decision, qualification, disagreement, and useful provenance represented by the inputs. Choose one offered Revision as canonical and write a self-contained Markdown payload. Otherwise return `keep_separate`; use `defer` only when evidence is missing."
+            "Read the supplied Details and make the final semantic decision. Return `consolidate` only when one revised canonical Page can preserve every durable fact, decision, qualification, disagreement, and useful provenance represented by the inputs. Choose one offered Page as canonical and write a self-contained Markdown payload. Otherwise return `keep_separate`; use `defer` only when evidence is missing."
+        }
+        pcp_runtime::MaintenanceWorkerRequest::SelectRetentionMilestones {
+            max_revisions,
+            lease_days,
+            ..
+        } => {
+            return Ok(format!(
+                "Evaluate one bounded PCP Runtime retention request. This is internal memory work, not conversation or web research. Do not use any capability except `symbiont.complete_pcp_maintenance`. Select at most {max_revisions} exact Revisions only when the present state records a consequential decision, correction, conceptual turning point, or independently valuable evidence whose exact form may still matter after later revisions. Routine current state, restatements, summaries, and merely recent content are not milestones. A selection creates a renewable {lease_days}-day retention lease, not permanent memory. Return `retain`, `no_candidate`, or `defer`. Give each selected Revision one concise reason.\n\nCall `symbiont.complete_pcp_maintenance` exactly once with the decision, then return exactly `{completion_marker}`.\n\n<maintenance-request>\n{}\n</maintenance-request>",
+                serde_json::to_string(request)
+                    .context("encode PCP semantic retention request for Codex")?
+            ));
         }
     };
     let payload = serde_json::to_string(request)

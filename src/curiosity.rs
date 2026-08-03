@@ -202,6 +202,7 @@ impl CuriosityStore {
         let pages = self
             .continuity
             .read(ReadPagesRequest {
+                page_ids: Vec::new(),
                 revision_ids: hits
                     .hits
                     .iter()
@@ -540,6 +541,7 @@ impl CuriosityStore {
         let mut pages = self
             .continuity
             .read(ReadPagesRequest {
+                page_ids: Vec::new(),
                 revision_ids: vec![revision_id.to_owned()],
                 projections: vec![
                     Projection::Manifest,
@@ -921,7 +923,7 @@ mod tests {
                 .surfaced_hunch_revisions(&surfaced.page.revision_id)
                 .await
                 .expect("read surfaced relation"),
-            vec![created.revision_id.clone()]
+            vec![awaiting.revision_id.clone()]
         );
 
         let feedback = continuity

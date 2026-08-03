@@ -25,7 +25,6 @@ mod reconciliation;
 mod reflection;
 mod rollover;
 mod symbiont_context;
-mod task_execution;
 mod topics;
 mod usage;
 mod web;
@@ -43,7 +42,7 @@ use anyhow::{Context, Result};
 use asset::AssetStore;
 use autonomy::AutonomyStore;
 use bridge::CodexBridge;
-use codex::{CodexClient, CodexConfig};
+use codex::{CodexClient, CodexConfig, CodexTaskSources};
 use compute::ComputeStore;
 use compute_policy::ComputePolicyStore;
 use continuation::ContinuationQueue;
@@ -59,7 +58,6 @@ use profile::ProfileStore;
 use reconciliation::{ReconciliationDependencies, ReconciliationHandle, ReconciliationStore};
 use reflection::{ReflectionHandle, ReflectionStore};
 use symbiont_context::SymbiontContextStore;
-use task_execution::ProjectHandoffQueue;
 use tokio::{net::TcpListener, sync::Mutex};
 use tracing::info;
 use tracing_subscriber::EnvFilter;
@@ -166,14 +164,6 @@ async fn main() -> Result<()> {
     );
     let permissions = Arc::new(PermissionBroker::new());
     let web_fetcher = Arc::new(WebFetcher::new(Arc::clone(&permissions))?);
-    let (project_handoffs, project_handoff_receiver) =
-        ProjectHandoffQueue::open(resolve_data_path(
-            &workspace,
-            "SYMBIONT_PROJECT_HANDOFF_PATH",
-            "codex-handoffs.json",
-        ))
-        .await?;
-    let project_handoffs = Arc::new(project_handoffs);
     let (continuations, continuation_receiver) = ContinuationQueue::new();
     let continuations = Arc::new(continuations);
     let (exploration_intents, exploration_intent_receiver) =
@@ -185,11 +175,12 @@ async fn main() -> Result<()> {
         .await?;
     let exploration_intents = Arc::new(exploration_intents);
 
+    let codex_config = CodexConfig {
+        binary: env::var("CODEX_BIN").unwrap_or_else(|_| "codex".to_owned()),
+        workspace: workspace.clone(),
+    };
     let codex = CodexClient::start(
-        CodexConfig {
-            binary: env::var("CODEX_BIN").unwrap_or_else(|_| "codex".to_owned()),
-            workspace: workspace.clone(),
-        },
+        codex_config.clone(),
         Arc::clone(&continuity),
         Arc::clone(&profile),
         Arc::clone(&context),
@@ -198,7 +189,6 @@ async fn main() -> Result<()> {
         Arc::clone(&compute_policies),
         Arc::clone(&permissions),
         Arc::clone(&web_fetcher),
-        Arc::clone(&project_handoffs),
         Arc::clone(&continuations),
         Arc::clone(&exploration_intents),
     )
@@ -230,6 +220,7 @@ async fn main() -> Result<()> {
     );
     let rate_limits = codex.rate_limits();
     let codex = Arc::new(Mutex::new(codex));
+    let task_sources = Arc::new(CodexTaskSources::new(codex_config));
     let bridge = Arc::new(
         CodexBridge::open(
             resolve_data_path(
@@ -237,13 +228,12 @@ async fn main() -> Result<()> {
                 "SYMBIONT_CODEX_BRIDGE_PATH",
                 "codex-bridge.toml",
             ),
-            Arc::clone(&codex),
+            Arc::clone(&task_sources),
             Arc::clone(&continuity),
             Arc::clone(&profile),
             Arc::clone(&context),
             Arc::clone(&curiosity),
             Arc::clone(&reflection_store),
-            Arc::clone(&project_handoffs),
             Arc::clone(&assets),
         )
         .await?,
@@ -289,16 +279,6 @@ async fn main() -> Result<()> {
             usage: Arc::clone(&usage),
             conversation: conversation.clone(),
         },
-    );
-    task_execution::start_worker(
-        project_handoff_receiver,
-        Arc::clone(&project_handoffs),
-        Arc::clone(&codex),
-        Arc::clone(&compute),
-        Arc::clone(&profile),
-        Arc::clone(&continuity),
-        Arc::clone(&assets),
-        Arc::clone(&usage),
     );
     maintenance::start(
         Arc::clone(&autonomy),
@@ -356,7 +336,6 @@ async fn main() -> Result<()> {
         conversation,
         bridge,
         permissions,
-        project_handoffs,
         continuations,
     );
     let app = web::router(state);
