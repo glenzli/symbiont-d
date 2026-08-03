@@ -24,7 +24,7 @@ use pcp_core::{
 use pcp_store::PcpStore;
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
-use tokio::sync::{Mutex, RwLock};
+use tokio::sync::RwLock;
 
 use crate::{
     asset::{ImageAttachment, SavedImage},
@@ -98,7 +98,6 @@ pub struct ContinuityHost {
     scopes: ScopePolicy,
     event_counter: AtomicU64,
     orientation: RwLock<Option<WriteResult>>,
-    last_event_revision: Mutex<Option<String>>,
 }
 
 #[derive(Clone, Debug, Default)]
@@ -155,7 +154,6 @@ impl ContinuityHost {
             CreateScopeRequest {
                 owner_id: owner_id.clone(),
                 namespace: scopes.user.clone(),
-                scope_type: "user".to_owned(),
                 display_name: USER_SCOPE_LABEL.to_owned(),
                 description: Some("Long-lived context explicitly owned by the user.".to_owned()),
                 parent_namespace: None,
@@ -164,7 +162,6 @@ impl ContinuityHost {
             CreateScopeRequest {
                 owner_id: owner_id.clone(),
                 namespace: scopes.project.clone(),
-                scope_type: "project".to_owned(),
                 display_name: "symbiont-d".to_owned(),
                 description: Some("Project-level context for symbiont-d.".to_owned()),
                 parent_namespace: Some(scopes.user.clone()),
@@ -173,7 +170,6 @@ impl ContinuityHost {
             CreateScopeRequest {
                 owner_id,
                 namespace: scopes.conversation.clone(),
-                scope_type: "conversation".to_owned(),
                 display_name: "symbiont-d main conversation".to_owned(),
                 description: Some(
                     "Raw user, assistant, and tool events from this companion.".to_owned(),
@@ -189,7 +185,6 @@ impl ContinuityHost {
             scopes,
             event_counter: AtomicU64::new(0),
             orientation: RwLock::new(None),
-            last_event_revision: Mutex::new(None),
         })
     }
 
@@ -292,18 +287,10 @@ impl ContinuityHost {
         profile: &ProfileSnapshot,
     ) -> Result<MigrationSummary> {
         let entries = memory.all_entries().await?;
-        let mut previous_revision: Option<String> = None;
         let mut migrated_messages = 0_u64;
         let mut source_revisions = Vec::new();
         for (index, entry) in entries.into_iter().enumerate() {
             let actor = actor_for_role(&entry.role);
-            let mut initial_relations = Vec::new();
-            if let Some(previous_revision) = previous_revision.as_ref() {
-                initial_relations.push(InitialRelation {
-                    relation_type: "follows".to_owned(),
-                    to_revision_id: previous_revision.clone(),
-                });
-            }
             let result = self
                 .store
                 .write_page(WritePageRequest {
@@ -333,11 +320,10 @@ impl ContinuityHost {
                         input_revision_ids: Vec::new(),
                         tool_or_model: Some("symbiont legacy importer".to_owned()),
                     }],
-                    initial_relations,
+                    initial_relations: Vec::new(),
                     idempotency_key: Some(format!("legacy-memory:{}:{index}", entry.at)),
                 })
                 .await?;
-            previous_revision = Some(result.revision_id.clone());
             source_revisions.push(result.revision_id);
             migrated_messages += u64::from(result.created);
         }
@@ -345,13 +331,6 @@ impl ContinuityHost {
             .sync_orientation(profile, source_revisions)
             .await
             .context("migrate visible orientation into PCP")?;
-        let latest_revision = self
-            .recent_source_revisions(1)
-            .await?
-            .into_iter()
-            .next()
-            .or(previous_revision);
-        *self.last_event_revision.lock().await = latest_revision;
         Ok(MigrationSummary {
             migrated_messages,
             orientation,
@@ -541,16 +520,7 @@ impl ContinuityHost {
             delivery_state: None,
         };
         let event_key = self.next_event_key();
-        let mut last_event_revision = self.last_event_revision.lock().await;
-        let mut initial_relations = last_event_revision
-            .as_ref()
-            .map(|revision_id| {
-                vec![InitialRelation {
-                    relation_type: "follows".to_owned(),
-                    to_revision_id: revision_id.clone(),
-                }]
-            })
-            .unwrap_or_default();
+        let mut initial_relations = Vec::new();
         if let Some(revision_id) = links.responds_to.as_ref() {
             initial_relations.push(InitialRelation {
                 relation_type: "responds_to".to_owned(),
@@ -652,7 +622,6 @@ impl ContinuityHost {
             })
             .await?;
         entry.revision_id = Some(page.revision_id.clone());
-        *last_event_revision = Some(page.revision_id.clone());
         Ok(StoredMessage {
             entry,
             page,
@@ -1058,8 +1027,6 @@ impl ContinuityHost {
                 .then_some(page.revision.revision_id)
             }));
         }
-        *self.last_event_revision.lock().await =
-            self.recent_source_revisions(1).await?.into_iter().next();
         Ok(MessageRetractionResult {
             retracted_revision_ids: cascade.retracted_revision_ids,
             message_revision_ids,
@@ -1219,6 +1186,18 @@ impl ContinuityHost {
         let namespace = namespace.unwrap_or(&self.scopes.user);
         self.resolve_scopes(&[namespace.to_owned()])?;
         let actor = model_actor();
+        let mut relations = relations;
+        for source_page_id in &source_revision_ids {
+            if !relations.iter().any(|relation| {
+                relation.relation_type == "derived_from"
+                    && relation.to_revision_id == *source_page_id
+            }) {
+                relations.push(InitialRelation {
+                    relation_type: "derived_from".to_owned(),
+                    to_revision_id: source_page_id.clone(),
+                });
+            }
+        }
         self.store
             .write_page(WritePageRequest {
                 owner_id: self.store.owner_id().to_owned(),
@@ -1285,6 +1264,36 @@ impl ContinuityHost {
             .await
     }
 
+    pub async fn supersede_model_page(
+        &self,
+        target_page_id: String,
+        content: String,
+        source_page_ids: Vec<String>,
+    ) -> Result<WriteResult> {
+        let target = self
+            .store
+            .read_pages(ReadPagesRequest {
+                revision_ids: vec![target_page_id.clone()],
+                projections: vec![Projection::Manifest, Projection::Facets],
+                max_chars: 256,
+            })
+            .await?
+            .into_iter()
+            .next()
+            .context("supersede target Page is not available")?;
+        self.revise_model_page(
+            target.revision.page_id,
+            target_page_id,
+            content,
+            target.revision.facets,
+            Vec::new(),
+            LifecycleStatus::Active,
+            source_page_ids,
+            None,
+        )
+        .await
+    }
+
     #[allow(clippy::too_many_arguments)]
     pub async fn assess_model_page_validity(
         &self,
@@ -1332,7 +1341,14 @@ impl ContinuityHost {
         let actor = model_actor();
         let mut provenance_inputs = Vec::with_capacity(source_revision_ids.len() + 1);
         provenance_inputs.push(expected_revision_id.clone());
-        provenance_inputs.extend(source_revision_ids);
+        provenance_inputs.extend(source_revision_ids.iter().cloned());
+        let initial_relations = source_revision_ids
+            .into_iter()
+            .map(|to_revision_id| InitialRelation {
+                relation_type: "derived_from".to_owned(),
+                to_revision_id,
+            })
+            .collect();
         self.store
             .revise_page(RevisePageRequest {
                 page_id,
@@ -1355,7 +1371,7 @@ impl ContinuityHost {
                     input_revision_ids: provenance_inputs,
                     tool_or_model: Some("Codex".to_owned()),
                 }],
-                initial_relations: Vec::new(),
+                initial_relations,
                 idempotency_key,
             })
             .await

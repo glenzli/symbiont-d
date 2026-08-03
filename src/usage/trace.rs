@@ -164,7 +164,7 @@ fn is_pcp_write(step: &ToolTraceStep) -> bool {
     step.namespace == "pcp"
         && matches!(
             step.tool.as_str(),
-            "assess_validity" | "write_summary" | "write_page" | "revise_page" | "link_pages"
+            "assess_validity" | "write_summary" | "write_page" | "supersede_page" | "relate_pages"
         )
 }
 

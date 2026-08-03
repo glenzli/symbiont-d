@@ -108,24 +108,24 @@ pub(super) fn interaction_reflection_prompt(
     completion_marker: &str,
 ) -> String {
     format!(
-        "Reflect on bounded interaction evidence. This is private background, not a user response. \
-         Do not search the web. Separate observed facts from inference; timing, length, correction, \
+        "Reflect on bounded interaction evidence. Private background: do not answer the user or \
+         search the web. Separate observed facts from inference; timing, length, correction, \
          continuation, and silence are contextual evidence, never ratings. Keep alternative \
-         explanations. Prefer no durable change when evidence is weak, and never promote temporary \
+         explanations. Prefer no durable change when evidence is weak; never promote temporary \
          behavior directly into the user orientation.\n\n\
-         Maintain the smallest useful set of overlapping, user-visible Topic Episodes with \
+         Maintain the smallest useful set of overlapping user-visible Topic Episodes with \
          `symbiont.upsert_episode`. Create or revise one only for a sustained line likely to help \
          future thinking; skip one-off questions, passing news, incidental terms, and routine events. \
-         Make a semantic judgment without scores or fixed message thresholds. The same Revision may \
-         contribute to several Topics. Keep `source_revision_ids` as compact summary evidence; put \
-         the Topic's original messages in `message_revision_ids`, its visible timeline. Use directed \
-         parents only for continuation or consolidation; do not force a tree. Maintain only useful \
-         provisional interpretations with `symbiont.upsert_interaction_hypothesis`; revise existing \
-         IDs, mark contradictions or supersession, and treat stable_candidate only as a proposal for \
-         later critical review.\n\n\
+         Judge without scores or fixed message thresholds. Adjacency is not Topic evidence; never \
+         group a topic switch only because Pages are consecutive. The same Page may contribute to \
+         several Topics. `source_revision_ids` are compact evidence; `message_revision_ids` are the \
+         exact original messages in its visible timeline. Use parents only for continuation or \
+         consolidation; do not force a tree. Keep only useful provisional interpretations with \
+         `symbiont.upsert_interaction_hypothesis`; revise IDs, mark contradiction or supersession, \
+         and reserve stable_candidate for later critical review.\n\n\
          Do not write Current Map, Open Loops, or orientation; maintenance owns them. Schedule a \
-         follow-up only when waiting could change value, never as a reminder. The later autonomous \
-         publication gate will still decide whether to speak.\n\n\
+         follow-up only when waiting could change value. The publication gate will still decide \
+         whether to speak.\n\n\
          At most one proactive act: `symbiont.request_exploration` for a question needing evidence, \
          or `symbiont.propose_proactive_message` for a ready thought. Use `intervention` only when \
          a live decision, risk, timing, or shared question should be raised now. Use `note` for a \
@@ -135,18 +135,18 @@ pub(super) fn interaction_reflection_prompt(
          When new evidence materially corrects, limits, disputes, replaces, or retracts a durable \
          earlier Page, find and read the exact candidate, then call `pcp.assess_validity`. Assess \
          only consequential claims or state, not ordinary messages. Anchor the judgment to exact \
-         evidence Revisions, preserve partial scope and uncertainty, and do not cascade a whole \
+         evidence Pages, preserve uncertainty, and do not cascade a whole \
          Page or its descendants automatically. Absence of contradiction does not require a live \
          assessment.\n\n\
          An event with `hunch_feedback` is a user reply to a message that surfaced those exact \
-         Hunches. Read the exact Revision through PCP if it is not present in Curiosity Map. \
+         Hunches. Read the exact Page through PCP if it is not present in Curiosity Map. \
          Reconcile every listed current Hunch: revise it when the reply changes the \
          question, rationale, test, or maturity; retire it when resolved or explicitly unwanted; \
-         otherwise call `symbiont.acknowledge_hunch_feedback` with the exact user Revision. Do not \
+         otherwise call `symbiont.acknowledge_hunch_feedback` with the exact user Page. Do not \
          infer resolution from silence, and do not open a duplicate Hunch for a changed version of \
          the same question.\n\n\
          Finish by calling `symbiont.complete_reflection` exactly once with a concise, human-visible \
-         account of what changed or why nothing changed, plus exact source Revisions. Then return \
+         account of what changed or why nothing changed, plus exact source Pages. Then return \
          exactly `{completion_marker}`.\n\n\
          <reflection-source-bundle>\n{source_bundle}\n</reflection-source-bundle>"
     )
@@ -161,9 +161,9 @@ pub(super) fn context_maintenance_prompt(source_bundle: &str, completion_marker:
          `symbiont.update_current_map` only when their semantic account of active work, changing \
          emphasis, or near-term attention should change. Call `symbiont.update_open_loops` only \
          when unresolved questions, decisions, tensions, or follow-ups should change. Do not write \
-         a new Revision merely to attach the newest source or rephrase equivalent content. Preserve \
+         a new Page merely to attach the newest source or rephrase equivalent content. Preserve \
          ambiguity and distinguish user statements from assistant hypotheses. Include exact \
-         supporting Revision IDs in any update. Do not modify the long-term orientation, record a \
+         supporting Page IDs in any update. Do not modify the long-term orientation, record a \
          profile review, or alter Hunches. After assessing both projections, return exactly \
          `{completion_marker}`.\n\n\
          <source-bundle>\n{source_bundle}\n</source-bundle>"
@@ -194,8 +194,8 @@ pub(super) fn summary_maintenance_prompt(
 ) -> String {
     format!(
         "Maintain the sparse PCP Summary index for exactly `{target_revision_id}`. Read that \
-         Revision's payload and facets. Decide whether its length and semantic density justify a \
-         reusable routing Summary. If yes, call `pcp.write_summary` for that exact Revision with a \
+         Page's content. Decide whether its length and semantic density justify a reusable routing \
+         Summary. If yes, call `pcp.write_summary` with `target_page_id` set to that exact Page and a \
          120-600 character routing abstract that preserves discriminating concepts, decisions, \
          uncertainty, names, and searchable aliases. It must help a later model decide whether to \
          read Detail; it is not evidence, a retelling, or a shorter copy of the payload. If the \

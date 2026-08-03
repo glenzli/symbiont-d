@@ -118,7 +118,9 @@ another Host; symbiont-d does not register it globally or expose private Scopes
 to unrelated tasks by default.
 
 Set `SYMBIONT_PCP_RUNTIME_SOCKET` to use a running endpoint instead of opening
-SQLite in-process. The endpoint must be bound to `host:symbiont-d`, use `admin`
+SQLite in-process. Once this variable is present, startup waits up to 30 seconds
+for that endpoint and fails explicitly rather than falling back to embedded
+SQLite. The endpoint must be bound to `host:symbiont-d`, use `admin`
 access with explicit cross-Scope derivation, and grant the user Scope plus
 `project:symbiont-d` and `conversation:symbiont-d-main`. One possible launch is:
 
@@ -262,9 +264,14 @@ outside the terminal that started it:
 ./scripts/service-install.sh
 ```
 
-The installer builds the release binary, starts it at login, and configures
-`launchd` to restart it after an unexpected exit. Re-run the installer after
-changing the source.
+The installer builds three independently supervised services: an identity-bound
+PCP runtime, the read-only PCP Console, and the symbiont-d Host connected through
+its private Unix socket.
+On the first embedded-to-runtime switch it stops the old Host and writes an
+integrity-checked `data/context.pre-runtime.sqlite3` backup before opening the
+same `data/context.sqlite3` Store in the runtime. No Page export or reimport is
+required. `launchd` restarts either service after an unexpected exit. Re-run the
+installer after changing either repository.
 
 ```bash
 ./scripts/service-status.sh
@@ -272,7 +279,10 @@ changing the source.
 ```
 
 Service logs are written to `data/logs/`. Uninstalling the service preserves
-all local data.
+all local data. The PCP Console is available at
+[http://127.0.0.1:4318](http://127.0.0.1:4318). It uses a separate
+`operator:local` audit endpoint that can inspect Pages and access events but
+cannot mutate the Store.
 
 ### Add the macOS menu-bar client
 
@@ -288,7 +298,7 @@ Install it as a login item after installing the daemon:
 ```
 
 Click the message icon in the macOS menu bar to open the window. Right-click it
-for reload, browser, and quit commands.
+for reload, browser, PCP Console, and quit commands.
 
 ```bash
 ./scripts/menu-status.sh
@@ -372,6 +382,7 @@ src/conversation.rs in-flight message burst coordination
 src/curiosity.rs    Hunch storage and Curiosity Map
 src/exploration.rs  autonomous scheduling, budgets, and publication
 src/identity.rs     local presentation identity and avatar selection
+src/pcp_connection.rs embedded development or fail-closed runtime composition
 src/permission.rs   pending approval lifecycle and session grants
 src/reflection/     time-aware interaction analysis and projections
 src/task_execution.rs bound-task queue, lifecycle, and result publication

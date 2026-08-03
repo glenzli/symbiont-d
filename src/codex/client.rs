@@ -823,10 +823,7 @@ impl CodexClient {
                 step.namespace == "pcp"
                     && step.tool == "write_summary"
                     && step.succeeded
-                    && step
-                        .arguments
-                        .get("target_revision_id")
-                        .and_then(Value::as_str)
+                    && step.arguments.get("target_page_id").and_then(Value::as_str)
                         == Some(target_revision_id)
             })
         });
@@ -2255,8 +2252,8 @@ fn activity_label(item: Option<&Value>) -> Option<String> {
                     "read_pages" => "正在读取长期上下文",
                     "write_summary" => "正在建立上下文索引",
                     "write_page" => "正在整理长期上下文",
-                    "revise_page" => "正在修订长期上下文",
-                    "link_pages" => "正在建立上下文关系",
+                    "supersede_page" => "正在更新长期上下文",
+                    "relate_pages" => "正在建立上下文关系",
                     "complete_orientation" => "正在整理初始画像",
                     "revise_orientation" => "正在修订长期画像",
                     "update_current_map" => "正在整理近期脉络",
@@ -2478,8 +2475,8 @@ fn reconciliation_actions(invocations: &[InvocationRecord]) -> Vec<Reconciliatio
                     "assess_validity"
                         | "write_summary"
                         | "write_page"
-                        | "revise_page"
-                        | "link_pages"
+                        | "supersede_page"
+                        | "relate_pages"
                 )
         })
         .map(|step| {
@@ -2499,11 +2496,15 @@ fn reconciliation_actions(invocations: &[InvocationRecord]) -> Vec<Reconciliatio
                     values
                 },
                 result_page_id: result
-                    .get("pageId")
+                    .get("refId")
+                    .or_else(|| result.get("summaryRefId"))
                     .and_then(Value::as_str)
                     .map(str::to_owned),
                 result_revision_id: result
-                    .get("revisionId")
+                    .get("pageId")
+                    .or_else(|| result.get("summaryPageId"))
+                    .or_else(|| result.get("assessmentPageId"))
+                    .or_else(|| result.get("revisionId"))
                     .or_else(|| result.get("summaryRevisionId"))
                     .and_then(Value::as_str)
                     .map(str::to_owned),
@@ -2595,7 +2596,7 @@ pub(super) fn context_revision_ids(invocations: &[InvocationRecord]) -> Vec<Stri
 
 fn collect_revision_ids(value: &Value, revisions: &mut HashSet<String>) {
     match value {
-        Value::String(value) if is_canonical_revision_id(value) => {
+        Value::String(value) if is_canonical_page_id(value) => {
             revisions.insert(value.clone());
         }
         Value::Array(values) => {
@@ -2612,10 +2613,13 @@ fn collect_revision_ids(value: &Value, revisions: &mut HashSet<String>) {
     }
 }
 
-fn is_canonical_revision_id(value: &str) -> bool {
-    value.strip_prefix("rev_").is_some_and(|suffix| {
-        suffix.len() == 32 && suffix.bytes().all(|byte| byte.is_ascii_hexdigit())
-    })
+fn is_canonical_page_id(value: &str) -> bool {
+    ["rev_", "sumrev_", "valid_"]
+        .into_iter()
+        .find_map(|prefix| value.strip_prefix(prefix))
+        .is_some_and(|suffix| {
+            suffix.len() == 32 && suffix.bytes().all(|byte| byte.is_ascii_hexdigit())
+        })
 }
 
 fn normalize_trace_arguments(arguments: Option<&Value>) -> Value {

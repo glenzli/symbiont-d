@@ -264,6 +264,66 @@ async fn quotes_multiple_excerpts_from_one_message_with_one_source_relation() {
 }
 
 #[tokio::test]
+async fn keeps_temporal_adjacency_out_of_the_page_graph() {
+    let nonce = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .expect("clock")
+        .as_nanos();
+    let root = std::env::temp_dir().join(format!("symbiont-continuity-order-{nonce}"));
+    let store = Arc::new(
+        SqlitePcpStore::open(root.join("context.sqlite3"))
+            .await
+            .expect("open PCP store"),
+    );
+    let continuity = ContinuityHost::open_embedded_for_test(store)
+        .await
+        .expect("open host");
+
+    let assistant = continuity
+        .ingest_message(
+            MemoryRole::Assistant,
+            "A finished discussion about deployment.",
+            Vec::new(),
+            None,
+            MessageLinks::default(),
+        )
+        .await
+        .expect("ingest prior assistant event");
+    let user = continuity
+        .ingest_message(
+            MemoryRole::User,
+            "A new and unrelated question about photography.",
+            Vec::new(),
+            None,
+            MessageLinks::default(),
+        )
+        .await
+        .expect("ingest unrelated user event");
+
+    let page = continuity
+        .read(ReadPagesRequest {
+            revision_ids: vec![user.page.revision_id.clone()],
+            projections: vec![Projection::Relations, Projection::Provenance],
+            max_chars: 8_000,
+        })
+        .await
+        .expect("read unrelated user event")
+        .remove(0);
+    assert!(page.relations.is_empty());
+    assert!(page.revision.provenance[0].input_revision_ids.is_empty());
+
+    let recent = continuity
+        .recent_messages(10)
+        .await
+        .expect("read chronological conversation");
+    assert_eq!(recent.len(), 2);
+    assert_eq!(recent[0].revision_id, Some(assistant.page.revision_id));
+    assert_eq!(recent[1].revision_id, Some(user.page.revision_id));
+
+    let _ = tokio::fs::remove_dir_all(root).await;
+}
+
+#[tokio::test]
 async fn links_images_user_events_and_assistant_responses() {
     let nonce = SystemTime::now()
         .duration_since(UNIX_EPOCH)

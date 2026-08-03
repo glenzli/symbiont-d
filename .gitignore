@@ -22,4 +22,5 @@
 /data/reconciliation.json
 /data/assets
 /data/logs
+/data/run
 .DS_Store

@@ -1840,7 +1840,7 @@ async fn store_user_message(
             request.images,
             None,
             MessageLinks {
-                responds_to: reply_to_revision_id.clone(),
+                responds_to: None,
                 continues_from: None,
                 input_revision_ids: Vec::new(),
                 surfaced_hunch_revision_ids: Vec::new(),

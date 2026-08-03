@@ -4,30 +4,24 @@
 <plist version="1.0">
 <dict>
   <key>Label</key>
-  <string>com.glenzli.symbiont-d</string>
+  <string>com.glenzli.symbiont-d.pcp</string>
 
   <key>ProgramArguments</key>
   <array>
-    <string>@BINARY@</string>
+    <string>@PCP_BINARY@</string>
+    <string>--config</string>
+    <string>@PCP_CONFIG@</string>
   </array>
 
   <key>WorkingDirectory</key>
-  <string>@PROJECT_ROOT@</string>
+  <string>@PCP_PROJECT_ROOT@</string>
 
   <key>EnvironmentVariables</key>
   <dict>
-    <key>CODEX_BIN</key>
-    <string>@CODEX_BIN@</string>
     <key>HOME</key>
     <string>@HOME@</string>
     <key>PATH</key>
     <string>@PATH@</string>
-    <key>RUST_LOG</key>
-    <string>symbiont_d=info</string>
-    <key>SYMBIONT_PCP_CONNECT_TIMEOUT_MS</key>
-    <string>30000</string>
-    <key>SYMBIONT_PCP_RUNTIME_SOCKET</key>
-    <string>@PCP_SOCKET@</string>
   </dict>
 
   <key>RunAtLoad</key>
@@ -40,8 +34,8 @@
   <integer>10</integer>
 
   <key>StandardOutPath</key>
-  <string>@LOG_DIR@/stdout.log</string>
+  <string>@LOG_DIR@/pcp-runtime-stdout.log</string>
   <key>StandardErrorPath</key>
-  <string>@LOG_DIR@/stderr.log</string>
+  <string>@LOG_DIR@/pcp-runtime-stderr.log</string>
 </dict>
 </plist>

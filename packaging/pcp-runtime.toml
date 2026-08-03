@@ -1,0 +1,26 @@
+store_path = "../data/context.sqlite3"
+
+[[endpoints]]
+socket_path = "../data/run/pcp-symbiont.sock"
+client_id = "host:symbiont-d"
+client_type = "host"
+client_name = "symbiont-d"
+access_mode = "admin"
+allowed_scopes = [
+  "user:{owner_id}",
+  "project:symbiont-d",
+  "conversation:symbiont-d-main",
+]
+allow_cross_scope_derivation = true
+
+[[endpoints]]
+socket_path = "../data/run/pcp-operator.sock"
+client_id = "operator:local"
+client_type = "service"
+client_name = "PCP Console"
+access_mode = "audit"
+allowed_scopes = [
+  "user:{owner_id}",
+  "project:symbiont-d",
+  "conversation:symbiont-d-main",
+]
