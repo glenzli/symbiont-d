@@ -11,6 +11,7 @@ use serde::Serialize;
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 use tokio::sync::{Mutex, RwLock};
+use tracing::warn;
 
 use crate::{
     continuity::ContinuityHost,
@@ -36,6 +37,7 @@ pub struct PcpIndexSnapshot {
     pub created_pages: u64,
     pub revised_pages: u64,
     pub unchanged_pages: u64,
+    pub skipped_episode_pages: u64,
     pub last_sync_at: Option<String>,
     pub last_error: Option<String>,
 }
@@ -106,15 +108,32 @@ impl PcpIndex {
                 .iter()
                 .filter_map(|id| indexed_revisions.get(id).cloned())
                 .collect::<Vec<_>>();
-            let outcome = self
-                .sync_episode(&episode, &parent_revision_ids)
-                .await
-                .with_context(|| format!("sync PCP Topic Episode {}", episode.id))?;
-            indexed_revisions.insert(episode.id.clone(), outcome.page.revision_id.clone());
-            match outcome.kind {
-                SyncKind::Created => snapshot.created_pages += 1,
-                SyncKind::Revised => snapshot.revised_pages += 1,
-                SyncKind::Unchanged => snapshot.unchanged_pages += 1,
+            match self.sync_episode(&episode, &parent_revision_ids).await {
+                Ok(outcome) => {
+                    indexed_revisions.insert(episode.id.clone(), outcome.page.revision_id.clone());
+                    match outcome.kind {
+                        SyncKind::Created => snapshot.created_pages += 1,
+                        SyncKind::Revised => snapshot.revised_pages += 1,
+                        SyncKind::Unchanged => snapshot.unchanged_pages += 1,
+                    }
+                }
+                Err(error) if is_derivation_cycle_error(&error) => {
+                    snapshot.skipped_episode_pages += 1;
+                    warn!(
+                        episode_id = %episode.id,
+                        "skipping PCP Topic Episode index update because its historical derivation would form a cycle"
+                    );
+                    if let Some(current) = self
+                        .current_episode_page(&format!("reflection.episode.{}", episode.id))
+                        .await?
+                    {
+                        indexed_revisions.insert(episode.id.clone(), current.revision.revision_id);
+                    }
+                }
+                Err(error) => {
+                    return Err(error)
+                        .with_context(|| format!("sync PCP Topic Episode {}", episode.id));
+                }
             }
         }
         for alias in aliases {
@@ -460,6 +479,14 @@ fn sorted(mut values: Vec<String>) -> Vec<String> {
     values
 }
 
+fn is_derivation_cycle_error(error: &anyhow::Error) -> bool {
+    error.chain().any(|cause| {
+        cause
+            .to_string()
+            .contains("relation would introduce a cycle in the PCP derivation DAG")
+    })
+}
+
 fn index_actor() -> Actor {
     Actor {
         actor_type: ActorType::System,
@@ -803,7 +830,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn paired_answer_that_used_topic_context_does_not_form_a_derivation_cycle() {
+    async fn paired_answer_that_used_topic_context_does_not_block_index_recovery() {
         let nonce = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .expect("clock")
@@ -887,6 +914,7 @@ mod tests {
             .await
             .expect("read refreshed Episode Page")
             .expect("refreshed Episode Page exists");
+        let preserved_topic_revision_id = topic.revision.revision_id.clone();
         let topic = continuity
             .read(ReadPagesRequest {
                 page_ids: Vec::new(),
@@ -900,6 +928,34 @@ mod tests {
         assert!(topic.relations.iter().any(|relation| {
             relation.relation_type == "includes" && relation.to_page_id == assistant.page.page_id
         }));
+
+        index
+            .reflection
+            .upsert_episode(EpisodeInput {
+                id: Some(episode.id.clone()),
+                title: "Context-aware topic".to_owned(),
+                summary: "The topic now cites an answer that used its earlier projection."
+                    .to_owned(),
+                state: EpisodeState::Active,
+                source_revision_ids: vec![
+                    user.page.revision_id.clone(),
+                    assistant.page.revision_id.clone(),
+                ],
+                parent_episode_ids: Vec::new(),
+            })
+            .await
+            .expect("record cyclic historical evidence");
+        let recovered = index
+            .sync_all()
+            .await
+            .expect("skip one cyclic Episode projection instead of blocking the index");
+        assert_eq!(recovered.skipped_episode_pages, 1);
+        let preserved = index
+            .current_episode_page(&format!("reflection.episode.{}", episode.id))
+            .await
+            .expect("read preserved Episode Page")
+            .expect("preserved Episode Page exists");
+        assert_eq!(preserved.revision.revision_id, preserved_topic_revision_id);
 
         let _ = tokio::fs::remove_dir_all(root).await;
     }
