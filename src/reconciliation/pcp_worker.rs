@@ -46,6 +46,21 @@ impl PcpMaintenanceWorker {
                 reason: Some("background analysis token budget is exhausted".to_owned()),
             });
         }
+        let Some(input_events) = self
+            .dependencies
+            .conversation
+            .subscribe_background_input()
+            .await
+        else {
+            return Ok(MaintenanceWorkerResponse::Defer {
+                reason: Some("a user conversation is active".to_owned()),
+            });
+        };
+        let Ok(mut client) = self.dependencies.codex.try_lock() else {
+            return Ok(MaintenanceWorkerResponse::Defer {
+                reason: Some("another model operation is active".to_owned()),
+            });
+        };
 
         let encoded = serde_json::to_vec(&request).context("encode PCP maintenance request")?;
         let digest = format!("{:x}", Sha256::digest(&encoded));
@@ -68,19 +83,16 @@ impl PcpMaintenanceWorker {
                 }
             }
         });
-        let outcome = self
-            .dependencies
-            .codex
-            .lock()
-            .await
+        let outcome = client
             .evaluate_pcp_maintenance(PcpMaintenanceModelRequest {
                 request: &request,
                 compute: &compute,
                 profile: &profile,
-                input_events: self.dependencies.conversation.subscribe_input(),
+                input_events,
                 events: events_tx,
             })
             .await;
+        drop(client);
         event_drain
             .await
             .context("join PCP maintenance event drain")?;

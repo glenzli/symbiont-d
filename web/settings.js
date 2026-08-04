@@ -452,7 +452,7 @@ function explorationStatusText(exploration, usage, autonomy) {
   }
   if (phase === "error") return exploration.lastError || "探索运行出错";
   const candidates = exploration.pendingCandidateCount
-    ? `候选池待复核 ${exploration.pendingCandidateCount} 条 · `
+    ? `最近候选 ${exploration.pendingCandidateCount} 条 · `
     : "";
   return exploration.nextRunAt
     ? `${candidates}下次感知 ${formatNext(exploration.nextRunAt)}`

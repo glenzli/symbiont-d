@@ -574,6 +574,39 @@ html[data-native-shell="macos"] .topbar {
   font-size: 9px;
 }
 
+.conversation-notice.connection-recovery {
+  min-height: 44px;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 6px 8px;
+  margin-top: 2px;
+  padding: 7px 0;
+  color: var(--danger-text);
+}
+
+.conversation-notice.connection-recovery::before,
+.conversation-notice.connection-recovery::after {
+  flex-basis: 12px;
+}
+
+.connection-recovery-actions {
+  display: inline-flex;
+  flex: 0 0 auto;
+  gap: 5px;
+}
+
+.connection-recovery-actions .secondary-button {
+  height: 25px;
+  padding: 0 8px;
+  border-radius: 999px;
+  font-size: 10px;
+}
+
+.connection-recovery-actions .secondary-button:disabled {
+  cursor: wait;
+  opacity: 0.6;
+}
+
 .message[data-role="user"] {
   margin-left: auto;
 }
@@ -2374,6 +2407,87 @@ html[data-native-shell="macos"] .topbar {
 
 .exploration-error {
   color: var(--danger-text);
+}
+
+.exploration-candidate-pool {
+  padding: 12px 0;
+  border-bottom: 1px solid var(--border);
+}
+
+.exploration-candidate-pool > header {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.exploration-candidate-pool > header strong {
+  font-size: 11px;
+}
+
+.exploration-candidate-pool > header span {
+  color: var(--text-faint);
+  font-size: 9px;
+  text-align: right;
+}
+
+.exploration-candidate-pool ol {
+  margin: 8px 0 0;
+  padding: 0;
+  list-style: none;
+}
+
+.exploration-candidate-pool li {
+  padding: 10px 0;
+  border-top: 1px solid var(--border);
+}
+
+.exploration-candidate-pool li > header {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.exploration-candidate-pool li > header strong {
+  font-size: 11px;
+}
+
+.exploration-candidate-pool li > header span {
+  flex: 0 0 auto;
+  color: var(--text-faint);
+  font-size: 9px;
+}
+
+.exploration-candidate-pool li > p {
+  margin: 5px 0 0;
+  color: var(--text-soft);
+  font-size: 10px;
+  line-height: 1.5;
+}
+
+.exploration-candidate-pool li > .candidate-connection {
+  color: var(--text);
+}
+
+.candidate-sources {
+  margin: 6px 0 0;
+  padding: 0;
+  list-style: none;
+}
+
+.exploration-candidate-pool .candidate-sources li {
+  padding: 2px 0;
+  border: 0;
+  color: var(--text-faint);
+  font-size: 9px;
+  line-height: 1.4;
+}
+
+.candidate-sources a {
+  color: var(--text-soft);
+  text-decoration: underline;
+  text-underline-offset: 2px;
 }
 
 .exploration-intent-log {

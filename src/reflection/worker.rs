@@ -383,7 +383,13 @@ async fn reflect_once(
             return Ok(ReflectState::Idle);
         }
     };
-    let input_epoch = conversation.current_input_epoch();
+    let Some(input_events) = conversation.subscribe_background_input().await else {
+        let mut current = runtime.write().await;
+        current.phase = ReflectionPhase::Waiting;
+        current.current_activity = None;
+        return Ok(ReflectState::Busy);
+    };
+    let input_epoch = *input_events.borrow();
     let Ok(mut client) = codex.try_lock() else {
         runtime.write().await.current_activity = Some("等待当前模型调用完成".to_owned());
         return Ok(ReflectState::Busy);
@@ -431,7 +437,7 @@ async fn reflect_once(
             &compute,
             &profile_snapshot,
             &continuity_context,
-            conversation.subscribe_input(),
+            input_events,
             events_tx,
         )
         .await;

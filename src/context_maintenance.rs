@@ -286,6 +286,9 @@ async fn maintain_operational_context(
     profile: &crate::profile::ProfileSnapshot,
     source_bundle: &str,
 ) -> Result<MaintenanceState> {
+    let Some(input_events) = conversation.subscribe_background_input().await else {
+        return Ok(MaintenanceState::Busy);
+    };
     let Ok(mut client) = codex.try_lock() else {
         return Ok(MaintenanceState::Busy);
     };
@@ -299,7 +302,7 @@ async fn maintain_operational_context(
             &compute,
             profile,
             &continuity_context,
-            conversation.subscribe_input(),
+            input_events,
             events_tx,
         )
         .await;
@@ -338,6 +341,9 @@ async fn review_profile(
     profile: &crate::profile::ProfileSnapshot,
     source_bundle: &str,
 ) -> Result<MaintenanceState> {
+    let Some(input_events) = conversation.subscribe_background_input().await else {
+        return Ok(MaintenanceState::Busy);
+    };
     let Ok(mut client) = codex.try_lock() else {
         return Ok(MaintenanceState::Busy);
     };
@@ -351,7 +357,7 @@ async fn review_profile(
             &compute,
             profile,
             &continuity_context,
-            conversation.subscribe_input(),
+            input_events,
             events_tx,
         )
         .await;

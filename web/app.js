@@ -67,6 +67,8 @@ let activeOutgoing = [];
 let activePending = null;
 let typingSignalTimer = null;
 let composerNoticeTimer = null;
+let responseWaitTimer = null;
+let responseDelayTimer = null;
 let stoppingResponse = false;
 const manualExplorationReceiptIds = new Set();
 
@@ -226,6 +228,88 @@ function appendManualExplorationReceipt(receipt) {
   conversation.scrollTop = conversation.scrollHeight;
 }
 
+function clearResponseWaitIndicators() {
+  clearTimeout(responseWaitTimer);
+  clearTimeout(responseDelayTimer);
+  responseWaitTimer = null;
+  responseDelayTimer = null;
+}
+
+function beginResponseWait(pending) {
+  clearResponseWaitIndicators();
+  responseWaitTimer = window.setTimeout(() => {
+    if (!busy || activePending !== pending || !pending.isConnected) return;
+    pending.querySelector(".message-body").textContent = "正在优先处理你的消息…";
+    connectionStatus.textContent = "正在优先处理你的消息";
+  }, 1400);
+  responseDelayTimer = window.setTimeout(() => {
+    if (!busy || activePending !== pending || !pending.isConnected) return;
+    pending.querySelector(".message-body").textContent =
+      "仍在连接 Codex；可以停止回复。若通信异常，将自动重建连接。";
+    connectionStatus.textContent = "仍在等待 Codex";
+  }, 12000);
+}
+
+function appendConnectionRecoveryNotice(error, retry) {
+  const notice = document.createElement("article");
+  notice.className = "conversation-notice connection-recovery";
+  notice.setAttribute("role", "status");
+
+  const label = document.createElement("strong");
+  label.textContent = "回复未完成";
+  const message = document.createElement("span");
+  message.textContent = error.message || "与 Codex 的通信中断。";
+  const actions = document.createElement("div");
+  actions.className = "connection-recovery-actions";
+  const retryButton = document.createElement("button");
+  retryButton.type = "button";
+  retryButton.className = "secondary-button";
+  retryButton.textContent = "重试";
+  const restartButton = document.createElement("button");
+  restartButton.type = "button";
+  restartButton.className = "secondary-button";
+  restartButton.textContent = "重启连接";
+
+  retryButton.addEventListener("click", async () => {
+    retryButton.disabled = true;
+    restartButton.disabled = true;
+    message.textContent = "正在重新发送…";
+    try {
+      await retry();
+      notice.remove();
+    } catch (retryError) {
+      message.textContent = retryError.message || "重试失败。";
+      retryButton.disabled = false;
+      restartButton.disabled = false;
+    }
+  });
+  restartButton.addEventListener("click", async () => {
+    retryButton.disabled = true;
+    restartButton.disabled = true;
+    message.textContent = "正在重建 Codex 连接…";
+    try {
+      const response = await fetch("/api/runtime/recover", { method: "POST" });
+      const payload = await response.json().catch(() => ({}));
+      if (!response.ok) {
+        throw new Error(payload.error || "无法重建 Codex 连接。");
+      }
+      message.textContent = "连接已重建。现在可以重试刚才的消息。";
+      retryButton.disabled = false;
+      restartButton.remove();
+      notifyComposer("Codex 连接已重建");
+    } catch (restartError) {
+      message.textContent = restartError.message || "重建连接失败。";
+      retryButton.disabled = false;
+      restartButton.disabled = false;
+    }
+  });
+
+  actions.append(retryButton, restartButton);
+  notice.append(label, message, actions);
+  conversation.append(notice);
+  conversation.scrollTop = conversation.scrollHeight;
+}
+
 function resizeComposer() {
   input.style.height = "auto";
   input.style.height = `${Math.min(input.scrollHeight, 140)}px`;
@@ -243,10 +327,12 @@ function setBusy(nextBusy) {
     renderRuntimeStatus();
     clearInterval(activityTimer);
     activityTimer = null;
+    clearResponseWaitIndicators();
   }
 }
 
 function setActivity(message, event) {
+  clearResponseWaitIndicators();
   const body = message.querySelector(".message-body");
   const foot = message.querySelector(".message-foot");
   const runtime = foot.querySelector(".message-runtime");
@@ -277,6 +363,7 @@ function applyAccepted(message, entry) {
 }
 
 function applyComplete(message, entry) {
+  clearResponseWaitIndicators();
   clearInterval(activityTimer);
   activityTimer = null;
   message.classList.remove("pending", "streaming", "response-placeholder");
@@ -333,7 +420,7 @@ function renderRuntimeStatus() {
     connectionStatus.textContent = "在线 · 探索运行异常";
   } else if (phase === "waiting" && exploration.nextRunAt) {
     const candidates = exploration.pendingCandidateCount
-      ? ` · ${exploration.pendingCandidateCount} 条候选待复核`
+      ? ` · 最近候选 ${exploration.pendingCandidateCount} 条`
       : "";
     connectionStatus.textContent = `在线 · 下次感知 ${new Date(
       exploration.nextRunAt,
@@ -509,7 +596,7 @@ async function sendMessage(
     {
       role: "assistant",
       at: new Date().toISOString(),
-      content: "",
+      content: "正在为你的消息准备回复…",
     },
     { pending: true },
   );
@@ -521,6 +608,7 @@ async function sendMessage(
   activityStartedAt = Date.now();
   setBusy(true);
   connectionStatus.textContent = "正在回应";
+  beginResponseWait(pending);
 
   try {
     const response = await fetch("/api/chat", {
@@ -543,12 +631,35 @@ async function sendMessage(
     }
   } catch (error) {
     pending.remove();
-    for (const message of activeOutgoing) {
+    const failedOutgoing = [...activeOutgoing];
+    for (const message of failedOutgoing) {
       messageActions.update(message, null, {
         deliveryState: "failed",
         failureReason: error.message,
       });
     }
+    appendConnectionRecoveryNotice(error, async () => {
+      const messages = await Promise.all(
+        failedOutgoing.map(async (message) => ({
+          message,
+          entry: messageActions.entryFor(message),
+        })),
+      );
+      const first = messages[0]?.entry;
+      if (!first) throw new Error("找不到可重试的消息。");
+      for (const { message, entry } of messages) {
+        if (entry?.revisionId) await retractMessage(message, entry);
+        else message.remove();
+      }
+      await sendMessage(
+        first.content || "",
+        await recoverImages(first),
+        minimumLane,
+        extractQuotes(first),
+        extractTopic(first),
+        codexTaskIds,
+      );
+    });
   } finally {
     activeOutgoing = [];
     activePending = null;

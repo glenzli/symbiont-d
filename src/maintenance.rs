@@ -111,6 +111,9 @@ async fn maintain_one(
     else {
         return Ok(MaintenanceState::Idle);
     };
+    let Some(input_events) = conversation.subscribe_background_input().await else {
+        return Ok(MaintenanceState::Busy);
+    };
     let Ok(mut client) = codex.try_lock() else {
         return Ok(MaintenanceState::Busy);
     };
@@ -125,7 +128,7 @@ async fn maintain_one(
             &compute,
             &profile,
             &continuity_context,
-            conversation.subscribe_input(),
+            input_events,
             events_tx,
         )
         .await;

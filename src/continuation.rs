@@ -268,7 +268,10 @@ async fn run_continuation(
         return Ok(());
     }
 
-    let mut input_events = conversation.subscribe_input();
+    let Some(mut input_events) = conversation.subscribe_background_input().await else {
+        queue.complete(&job.id).await;
+        return Ok(());
+    };
     input_events.borrow_and_update();
     if conversation.current_input_epoch() != job.input_epoch {
         queue.complete(&job.id).await;
@@ -278,11 +281,13 @@ async fn run_continuation(
     let profile = profile.snapshot().await;
     let continuity_context = "This is a short continuation of the immediately preceding conversation. Use the native \
          thread or the supplied exact working-context bridge; do not perform broad recall.";
+    let Ok(mut client) = codex.try_lock() else {
+        queue.complete(&job.id).await;
+        return Ok(());
+    };
     let (events, mut runtime_events) = mpsc::channel::<RuntimeEvent>(64);
     let event_drain = tokio::spawn(async move { while runtime_events.recv().await.is_some() {} });
-    let mut outcome = codex
-        .lock()
-        .await
+    let mut outcome = client
         .continue_conversation(
             &job.reason,
             &compute,
@@ -292,6 +297,7 @@ async fn run_continuation(
             events,
         )
         .await?;
+    drop(client);
     event_drain.await?;
 
     let publish = !outcome.interrupted

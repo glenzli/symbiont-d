@@ -231,6 +231,18 @@ async fn reconcile_once(
             (ReconciliationMode::Apply, "manual", Some(preview))
         }
     };
+    let Some(input_events) = dependencies.conversation.subscribe_background_input().await else {
+        let mut current = runtime.write().await;
+        current.phase = ReconciliationPhase::Idle;
+        current.current_activity = None;
+        return Ok(());
+    };
+    let Ok(mut client) = dependencies.codex.try_lock() else {
+        let mut current = runtime.write().await;
+        current.phase = ReconciliationPhase::Idle;
+        current.current_activity = None;
+        return Ok(());
+    };
     let run_id = store
         .start_run(
             mode,
@@ -267,10 +279,7 @@ async fn reconcile_once(
             }
         }
     });
-    let outcome = dependencies
-        .codex
-        .lock()
-        .await
+    let outcome = client
         .reconcile_memory(ReconciliationModelRequest {
             mode,
             run_id: &run_id,
@@ -279,10 +288,11 @@ async fn reconcile_once(
             compute: &compute,
             profile: &profile,
             continuity_context: &continuity_context,
-            input_events: dependencies.conversation.subscribe_input(),
+            input_events,
             events: events_tx,
         })
         .await;
+    drop(client);
     event_drain
         .await
         .context("join Reconciliation event drain")?;

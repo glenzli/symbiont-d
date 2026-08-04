@@ -52,6 +52,7 @@ use crate::{
         HunchFeedbackTarget, ReflectionConfig, ReflectionHandle, ReflectionRuntime,
         ReflectionSnapshot, TurnDisposition,
     },
+    sensing::{SensingCandidate, SensingSource},
     symbiont_context::{
         ContextAuthor, ContextDocumentKind, SymbiontContextSnapshot, SymbiontContextStore,
     },
@@ -245,6 +246,13 @@ struct RuntimeResponse {
     bridge: BridgeSnapshot,
 }
 
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct RuntimeRecoveryResponse {
+    restarted: bool,
+    message: String,
+}
+
 #[derive(Default, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct RuntimeQuery {
@@ -262,6 +270,35 @@ struct ExplorationHistoryResponse {
     exploration: ExplorationSnapshot,
     runs: Vec<ExplorationRunSummary>,
     intents: Vec<crate::exploration::ExplorationIntent>,
+    candidates: Vec<SensingCandidateResponse>,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct SensingCandidateResponse {
+    id: String,
+    title: String,
+    summary: String,
+    source_class: String,
+    possible_connection: Option<String>,
+    sources: Vec<SensingSource>,
+    observed_at: String,
+    expires_at: String,
+}
+
+impl From<SensingCandidate> for SensingCandidateResponse {
+    fn from(candidate: SensingCandidate) -> Self {
+        Self {
+            id: candidate.id,
+            title: candidate.title,
+            summary: candidate.summary,
+            source_class: candidate.source_class.as_str().to_owned(),
+            possible_connection: candidate.possible_connection,
+            sources: candidate.sources,
+            observed_at: candidate.observed_at,
+            expires_at: candidate.expires_at,
+        }
+    }
 }
 
 #[derive(Serialize)]
@@ -486,6 +523,7 @@ pub fn router(state: AppState) -> Router {
         .route("/api/compute/policies", post(update_compute_policies))
         .route("/api/stats", get(stats))
         .route("/api/runtime", get(runtime))
+        .route("/api/runtime/recover", post(recover_runtime))
         .route("/api/reflection", get(reflection_snapshot))
         .route("/api/reflection/config", post(update_reflection))
         .route("/api/reflection/run", post(trigger_reflection))
@@ -1063,6 +1101,26 @@ async fn runtime(
     }))
 }
 
+async fn recover_runtime(
+    State(state): State<AppState>,
+) -> Result<Json<RuntimeRecoveryResponse>, ApiError> {
+    // Stop any active turn before replacing the single Codex transport. The
+    // interrupted chat stream will settle as stopped rather than remain pending.
+    state.conversation.interrupt().await;
+    state.continuations.cancel_all().await;
+    state
+        .codex
+        .lock()
+        .await
+        .restart_app_server()
+        .await
+        .map_err(ApiError::internal)?;
+    Ok(Json(RuntimeRecoveryResponse {
+        restarted: true,
+        message: "Codex 通信连接已重建，现在可以重试消息。".to_owned(),
+    }))
+}
+
 async fn resolve_permission(
     State(state): State<AppState>,
     AxumPath(permission_id): AxumPath<String>,
@@ -1286,10 +1344,19 @@ async fn recent_explorations(
         .recent_explorations(12)
         .await
         .map_err(ApiError::internal)?;
+    let candidates = state
+        .exploration
+        .candidates()
+        .await
+        .map_err(ApiError::internal)?
+        .into_iter()
+        .map(SensingCandidateResponse::from)
+        .collect();
     Ok(Json(ExplorationHistoryResponse {
         exploration: state.exploration.snapshot().await,
         runs,
         intents: state.exploration.recent_intents(20).await,
+        candidates,
     }))
 }
 

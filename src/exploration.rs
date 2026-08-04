@@ -153,6 +153,7 @@ pub struct ExplorationHandle {
     state: Arc<RwLock<ExplorationSnapshot>>,
     trigger: mpsc::Sender<ExplorationTrigger>,
     intents: Arc<ExplorationIntentQueue>,
+    sensing: Arc<SensingStore>,
 }
 
 impl ExplorationHandle {
@@ -212,7 +213,7 @@ impl ExplorationHandle {
             curiosity,
             reflection,
             usage,
-            sensing,
+            Arc::clone(&sensing),
             conversation,
             Arc::clone(&intents),
             trigger_rx,
@@ -221,11 +222,16 @@ impl ExplorationHandle {
             state,
             trigger,
             intents,
+            sensing,
         }
     }
 
     pub async fn snapshot(&self) -> ExplorationSnapshot {
         self.state.read().await.clone()
+    }
+
+    pub async fn candidates(&self) -> Result<Vec<SensingCandidate>> {
+        self.sensing.candidates().await
     }
 
     pub fn trigger(&self, bypass_token_limit: bool) -> bool {
@@ -294,8 +300,10 @@ async fn run_scheduler(
             .unwrap_or_else(|| {
                 started_at + chrono::Duration::minutes(config.interval_minutes as i64)
             });
-        let conversation_busy =
-            !pending_triggers.is_empty() && conversation.snapshot().await.active;
+        // Interactive conversation owns the single Codex transport. Keep every
+        // background trigger queued while the user is waiting, rather than only
+        // delaying triggers that happened to be queued first.
+        let conversation_busy = conversation.snapshot().await.active;
         let effective_scheduled_at = if conversation_busy {
             now + chrono::Duration::seconds(2)
         } else {
@@ -569,7 +577,23 @@ async fn run_once(
         }
     });
 
-    let input_epoch = conversation.current_input_epoch();
+    let Some(input_events) = conversation.subscribe_background_input().await else {
+        let pending_candidate_count = sensing.count().await.unwrap_or_default();
+        stop_activity_relay(runtime_tx, activity_task).await?;
+        settle_sensing_only(
+            &state,
+            ExplorationIntentStatus::Superseded,
+            "superseded",
+            pending_candidate_count,
+        )
+        .await;
+        return Ok(ExplorationRunCompletion {
+            status: ExplorationIntentStatus::Superseded,
+            trace_id: None,
+            result_revision_id: None,
+        });
+    };
+    let input_epoch = *input_events.borrow();
     let mut reviewed_candidates = Vec::new();
     if scheduled {
         let intake_brief = match sensing.next_intake_brief().await {
@@ -579,17 +603,33 @@ async fn run_once(
                 return Err(error);
             }
         };
-        let sensing_outcome = codex
-            .lock()
-            .await
+        let Ok(mut client) = codex.try_lock() else {
+            let pending_candidate_count = sensing.count().await.unwrap_or_default();
+            sleep(Duration::from_secs(2)).await;
+            stop_activity_relay(runtime_tx, activity_task).await?;
+            settle_sensing_only(
+                &state,
+                ExplorationIntentStatus::Superseded,
+                "superseded",
+                pending_candidate_count,
+            )
+            .await;
+            return Ok(ExplorationRunCompletion {
+                status: ExplorationIntentStatus::Superseded,
+                trace_id: None,
+                result_revision_id: None,
+            });
+        };
+        let sensing_outcome = client
             .sense(
                 &compute,
                 &profile,
                 &ambient_sensing_context(&recent_messages, &intake_brief),
-                conversation.subscribe_input(),
+                input_events.clone(),
                 runtime_tx.clone(),
             )
             .await;
+        drop(client);
         let sensing_outcome = match sensing_outcome {
             Ok(outcome) => outcome,
             Err(error) => {
@@ -606,7 +646,7 @@ async fn run_once(
             return Err(error);
         }
         if !sensing_outcome.interrupted {
-            if let Err(error) = sensing.append(sensing_outcome.candidates).await {
+            if let Err(error) = sensing.replace(sensing_outcome.candidates).await {
                 stop_activity_relay(runtime_tx, activity_task).await?;
                 return Err(error);
             }
@@ -713,28 +753,53 @@ async fn run_once(
             return Err(error);
         }
     };
-    let outcome = codex
-        .lock()
-        .await
+    if conversation.current_input_epoch() != input_epoch || conversation.snapshot().await.active {
+        let pending_candidate_count = sensing.count().await.unwrap_or_default();
+        stop_activity_relay(runtime_tx, activity_task).await?;
+        settle_sensing_only(
+            &state,
+            ExplorationIntentStatus::Superseded,
+            "superseded",
+            pending_candidate_count,
+        )
+        .await;
+        return Ok(ExplorationRunCompletion {
+            status: ExplorationIntentStatus::Superseded,
+            trace_id: None,
+            result_revision_id: None,
+        });
+    }
+    let Ok(mut client) = codex.try_lock() else {
+        let pending_candidate_count = sensing.count().await.unwrap_or_default();
+        sleep(Duration::from_secs(2)).await;
+        stop_activity_relay(runtime_tx, activity_task).await?;
+        settle_sensing_only(
+            &state,
+            ExplorationIntentStatus::Superseded,
+            "superseded",
+            pending_candidate_count,
+        )
+        .await;
+        return Ok(ExplorationRunCompletion {
+            status: ExplorationIntentStatus::Superseded,
+            trace_id: None,
+            result_revision_id: None,
+        });
+    };
+    let outcome = client
         .explore(
             &compute,
             &profile,
             &continuity_context,
-            conversation.subscribe_input(),
+            input_events,
             runtime_tx,
         )
         .await;
+    drop(client);
     activity_task
         .await
         .context("join exploration activity relay")?;
     let mut outcome = outcome?;
-    if scheduled && !outcome.interrupted && !outcome.superseded {
-        let reviewed_ids = reviewed_candidates
-            .iter()
-            .map(|candidate| candidate.id.clone())
-            .collect::<Vec<_>>();
-        sensing.remove_reviewed(&reviewed_ids).await?;
-    }
     let trace_id = outcome.metadata.trace_id.clone().or_else(|| {
         outcome
             .invocations

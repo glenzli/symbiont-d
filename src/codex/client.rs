@@ -74,11 +74,27 @@ const REFLECTION_COMPLETE_MARKER: &str = "<symbiont-reflected/>";
 const RECONCILIATION_COMPLETE_MARKER: &str = "<symbiont-reconciled/>";
 const PCP_MAINTENANCE_COMPLETE_MARKER: &str = "<symbiont-pcp-maintained/>";
 const CONTINUATION_SILENT_MARKER: &str = "<symbiont-no-continuation/>";
+const APP_SERVER_START_TIMEOUT: Duration = Duration::from_secs(20);
+const APP_SERVER_IDLE_TIMEOUT: Duration = Duration::from_secs(75);
 
 #[derive(Clone)]
 pub struct CodexConfig {
     pub binary: String,
     pub workspace: PathBuf,
+}
+
+#[derive(Clone)]
+struct CodexDependencies {
+    continuity: Arc<ContinuityHost>,
+    profile: Arc<ProfileStore>,
+    context: Arc<SymbiontContextStore>,
+    curiosity: Arc<CuriosityStore>,
+    reflection: Arc<ReflectionStore>,
+    compute_policies: Arc<crate::compute_policy::ComputePolicyStore>,
+    permissions: Arc<PermissionBroker>,
+    web_fetcher: Arc<WebFetcher>,
+    continuations: Arc<ContinuationQueue>,
+    exploration_intents: Arc<ExplorationIntentQueue>,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -261,6 +277,8 @@ enum ToolSurface {
 }
 
 pub struct CodexClient {
+    config: CodexConfig,
+    dependencies: CodexDependencies,
     _child: Child,
     stdin: ChildStdin,
     stdout: Lines<BufReader<ChildStdout>>,
@@ -299,22 +317,35 @@ impl CodexClient {
         continuations: Arc<ContinuationQueue>,
         exploration_intents: Arc<ExplorationIntentQueue>,
     ) -> Result<Self> {
+        let dependencies = CodexDependencies {
+            continuity,
+            profile,
+            context,
+            curiosity,
+            reflection,
+            compute_policies,
+            permissions,
+            web_fetcher,
+            continuations,
+            exploration_intents,
+        };
+        let rate_limits = Arc::new(RwLock::new(None));
+        Self::start_with_retries(config, dependencies, rate_limits).await
+    }
+
+    async fn start_with_retries(
+        config: CodexConfig,
+        dependencies: CodexDependencies,
+        rate_limits: Arc<RwLock<Option<RateLimitInfo>>>,
+    ) -> Result<Self> {
         let mut last_error = None;
         for attempt in 1..=3 {
             match timeout(
-                Duration::from_secs(20),
+                APP_SERVER_START_TIMEOUT,
                 Self::start_once(
                     config.clone(),
-                    Arc::clone(&continuity),
-                    Arc::clone(&profile),
-                    Arc::clone(&context),
-                    Arc::clone(&curiosity),
-                    Arc::clone(&reflection),
-                    Arc::clone(&compute_policies),
-                    Arc::clone(&permissions),
-                    Arc::clone(&web_fetcher),
-                    Arc::clone(&continuations),
-                    Arc::clone(&exploration_intents),
+                    dependencies.clone(),
+                    Arc::clone(&rate_limits),
                 ),
             )
             .await
@@ -327,7 +358,8 @@ impl CodexClient {
                 Err(_) => {
                     warn!(attempt, "Codex app-server startup attempt timed out");
                     last_error = Some(anyhow::anyhow!(
-                        "Codex app-server startup timed out after 20 seconds"
+                        "Codex app-server startup timed out after {} seconds",
+                        APP_SERVER_START_TIMEOUT.as_secs()
                     ));
                 }
             }
@@ -338,16 +370,8 @@ impl CodexClient {
 
     async fn start_once(
         config: CodexConfig,
-        continuity: Arc<ContinuityHost>,
-        profile: Arc<ProfileStore>,
-        context: Arc<SymbiontContextStore>,
-        curiosity: Arc<CuriosityStore>,
-        reflection: Arc<ReflectionStore>,
-        compute_policies: Arc<crate::compute_policy::ComputePolicyStore>,
-        permissions: Arc<PermissionBroker>,
-        web_fetcher: Arc<WebFetcher>,
-        continuations: Arc<ContinuationQueue>,
-        exploration_intents: Arc<ExplorationIntentQueue>,
+        dependencies: CodexDependencies,
+        rate_limits: Arc<RwLock<Option<RateLimitInfo>>>,
     ) -> Result<Self> {
         let mut child = Command::new(&config.binary)
             .arg("app-server")
@@ -369,6 +393,8 @@ impl CodexClient {
             .context("Codex app-server did not expose stdout")?;
 
         let mut client = Self {
+            config: config.clone(),
+            dependencies: dependencies.clone(),
             _child: child,
             stdin,
             stdout: BufReader::new(stdout).lines(),
@@ -380,27 +406,27 @@ impl CodexClient {
             maintenance_thread_id: String::new(),
             pcp_maintenance_thread_id: String::new(),
             workspace: config.workspace.clone(),
-            continuity: Arc::clone(&continuity),
+            continuity: Arc::clone(&dependencies.continuity),
             interactive_cursor: NativeThreadCursor::new(),
             tools: SymbiontTools::new(
-                continuity,
-                profile,
-                context,
-                curiosity,
-                reflection,
-                Arc::clone(&compute_policies),
-                Some(web_fetcher),
-                continuations,
-                exploration_intents,
+                Arc::clone(&dependencies.continuity),
+                Arc::clone(&dependencies.profile),
+                Arc::clone(&dependencies.context),
+                Arc::clone(&dependencies.curiosity),
+                Arc::clone(&dependencies.reflection),
+                Arc::clone(&dependencies.compute_policies),
+                Some(Arc::clone(&dependencies.web_fetcher)),
+                Arc::clone(&dependencies.continuations),
+                Arc::clone(&dependencies.exploration_intents),
             ),
             models: Vec::new(),
             thread_usage: HashMap::new(),
             thread_turns: HashMap::new(),
             thread_compactions: HashMap::new(),
             thread_context_pressure: HashMap::new(),
-            rate_limits: Arc::new(RwLock::new(None)),
-            permissions,
-            compute_policies,
+            rate_limits,
+            permissions: Arc::clone(&dependencies.permissions),
+            compute_policies: Arc::clone(&dependencies.compute_policies),
         };
         client.initialize().await?;
         client.models = client.load_models().await?;
@@ -424,6 +450,25 @@ impl CodexClient {
             .start_thread(&config.workspace, ToolSurface::PcpMaintenance)
             .await?;
         Ok(client)
+    }
+
+    /// Replaces the app-server child without changing the shared runtime stores.
+    ///
+    /// The caller only invokes this after a transport failure, so existing native
+    /// threads are intentionally discarded and re-created along with the process.
+    pub async fn restart_app_server(&mut self) -> Result<()> {
+        let config = self.config.clone();
+        let dependencies = self.dependencies.clone();
+        let rate_limits = Arc::clone(&self.rate_limits);
+
+        if let Err(error) = self._child.start_kill() {
+            debug!(%error, "could not immediately stop the failed Codex app-server");
+        }
+        let _ = timeout(Duration::from_secs(2), self._child.wait()).await;
+
+        let replacement = Self::start_with_retries(config, dependencies, rate_limits).await?;
+        *self = replacement;
+        Ok(())
     }
 
     pub fn models(&self) -> &[ModelInfo] {
@@ -1168,6 +1213,52 @@ impl CodexClient {
         working_context: Option<WorkingContext>,
         rollover: Option<&RolloverDecision>,
         allow_escalation: bool,
+        input_events: Option<watch::Receiver<u64>>,
+        events: &mpsc::Sender<RuntimeEvent>,
+    ) -> Result<ChatOutcome> {
+        let outcome = self
+            .run_request_inner(
+                thread_id,
+                first_input,
+                first_lane,
+                origin,
+                compute,
+                profile,
+                continuity_context,
+                working_context,
+                rollover,
+                allow_escalation,
+                input_events,
+                events,
+            )
+            .await;
+        match outcome {
+            Ok(outcome) => Ok(outcome),
+            Err(error) if is_app_server_transport_failure(&error) => {
+                let original_error = error.to_string();
+                self.restart_app_server().await.map_err(|recovery_error| {
+                    anyhow::anyhow!(
+                        "与 Codex 的通信异常（{original_error}），且自动重建连接失败：{recovery_error}"
+                    )
+                })?;
+                anyhow::bail!("与 Codex 的通信已自动重建，请重试这条消息。");
+            }
+            Err(error) => Err(error),
+        }
+    }
+
+    async fn run_request_inner(
+        &mut self,
+        thread_id: String,
+        first_input: Vec<Value>,
+        first_lane: ComputeLane,
+        origin: &str,
+        compute: &ComputeConfig,
+        profile: &ProfileSnapshot,
+        continuity_context: &str,
+        working_context: Option<WorkingContext>,
+        rollover: Option<&RolloverDecision>,
+        allow_escalation: bool,
         mut input_events: Option<watch::Receiver<u64>>,
         events: &mpsc::Sender<RuntimeEvent>,
     ) -> Result<ChatOutcome> {
@@ -1338,14 +1429,21 @@ impl CodexClient {
             .cloned()
             .unwrap_or_default();
         let mut turn_usage = TokenBreakdown::default();
-        let (observable_history_tail, history_tail_truncated) =
+        let (observable_history_tail, history_tail_truncated) = if origin == "interactive" {
             match self.observable_history_tail(thread_id).await {
                 Ok(history) => history,
+                Err(error) if is_app_server_transport_failure(&error) => return Err(error),
                 Err(error) => {
                     debug!(%error, "Codex did not expose its observable thread history");
                     (Vec::new(), false)
                 }
-            };
+            }
+        } else {
+            // Background lanes are deliberately stateless and are renewed after each
+            // run. Avoid a history round-trip before `turn/start`, so a new user
+            // message can interrupt their work immediately.
+            (Vec::new(), false)
+        };
         let mut fragments = if origin == "pcp_maintenance" {
             Vec::new()
         } else {
@@ -1912,10 +2010,14 @@ impl CodexClient {
 
     async fn read_message(&mut self) -> Result<Value> {
         loop {
-            let line = self
-                .stdout
-                .next_line()
+            let line = timeout(APP_SERVER_IDLE_TIMEOUT, self.stdout.next_line())
                 .await
+                .map_err(|_| {
+                    anyhow::anyhow!(
+                        "Codex app-server did not respond for {} seconds",
+                        APP_SERVER_IDLE_TIMEOUT.as_secs()
+                    )
+                })?
                 .context("read from Codex app-server")?
                 .context("Codex app-server closed its output")?;
             if line.trim().is_empty() {
@@ -2180,6 +2282,18 @@ impl CodexClient {
             .map(|model| model.display_name.clone())
             .unwrap_or_else(|| slug.to_owned())
     }
+}
+
+fn is_app_server_transport_failure(error: &anyhow::Error) -> bool {
+    let message = error.to_string();
+    [
+        "Codex app-server",
+        "read from Codex app-server",
+        "write to Codex app-server",
+        "flush Codex request",
+    ]
+    .iter()
+    .any(|needle| message.contains(needle))
 }
 
 fn granular_approval_policy() -> Value {

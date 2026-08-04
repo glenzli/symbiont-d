@@ -169,6 +169,16 @@ impl ConversationCoordinator {
         self.input_epoch.subscribe()
     }
 
+    /// Creates an input subscription before checking for an active user turn.
+    ///
+    /// Background workers use this immediately before acquiring the shared
+    /// Codex client. If a user starts a turn just after this check, the returned
+    /// receiver is already subscribed and will interrupt the background call.
+    pub async fn subscribe_background_input(&self) -> Option<watch::Receiver<u64>> {
+        let receiver = self.subscribe_input();
+        (!self.snapshot().await.active).then_some(receiver)
+    }
+
     pub fn announce_input(&self) {
         self.bump_input_epoch();
     }
@@ -453,6 +463,21 @@ mod tests {
             .unwrap();
         input_events.changed().await.unwrap();
         assert_eq!(*input_events.borrow(), coordinator.current_input_epoch());
+        coordinator.abort(lease).await;
+    }
+
+    #[tokio::test]
+    async fn background_subscription_observes_or_yields_to_a_user_turn() {
+        let coordinator = ConversationCoordinator::new();
+        let mut background_input = coordinator
+            .subscribe_background_input()
+            .await
+            .expect("idle background work may subscribe");
+
+        let lease = coordinator.start(message("one")).await.unwrap();
+        background_input.changed().await.unwrap();
+        assert!(coordinator.subscribe_background_input().await.is_none());
+
         coordinator.abort(lease).await;
     }
 }

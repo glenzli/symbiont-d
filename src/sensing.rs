@@ -6,7 +6,6 @@ use serde::{Deserialize, Serialize};
 use tokio::{fs, sync::RwLock};
 
 const CANDIDATE_TTL_HOURS: i64 = 24;
-const MAX_CANDIDATES: usize = 36;
 pub const REVIEW_BATCH_SIZE: usize = 3;
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -142,13 +141,14 @@ impl SensingStore {
         Ok(store)
     }
 
-    pub async fn append(&self, drafts: Vec<SensingCandidateDraft>) -> Result<usize> {
-        if drafts.is_empty() {
-            return Ok(0);
-        }
+    /// Replaces the short-lived intake pool after a new sensing pass.
+    ///
+    /// Candidates are deliberately not durable memory. A fresh pass supersedes
+    /// the prior pool, even when its earlier candidates were not promoted.
+    pub async fn replace(&self, drafts: Vec<SensingCandidateDraft>) -> Result<usize> {
         let now = Utc::now();
         let mut pool = self.pool.write().await;
-        let mut changed = prune_expired(&mut pool, now);
+        pool.candidates.clear();
         let mut appended = 0;
         for draft in drafts.into_iter().take(REVIEW_BATCH_SIZE) {
             let fingerprint = candidate_fingerprint(&draft);
@@ -175,17 +175,9 @@ impl SensingStore {
                 fingerprint,
             });
             appended += 1;
-            changed = true;
-        }
-        if pool.candidates.len() > MAX_CANDIDATES {
-            let overflow = pool.candidates.len() - MAX_CANDIDATES;
-            pool.candidates.drain(..overflow);
-            changed = true;
         }
         drop(pool);
-        if changed {
-            self.persist().await?;
-        }
+        self.persist().await?;
         Ok(appended)
     }
 
@@ -216,21 +208,16 @@ impl SensingStore {
         Ok(candidates)
     }
 
-    pub async fn remove_reviewed(&self, ids: &[String]) -> Result<()> {
-        if ids.is_empty() {
-            return Ok(());
-        }
-        let ids = ids.iter().collect::<std::collections::HashSet<_>>();
+    pub async fn candidates(&self) -> Result<Vec<SensingCandidate>> {
+        let now = Utc::now();
         let mut pool = self.pool.write().await;
-        let before = pool.candidates.len();
-        pool.candidates
-            .retain(|candidate| !ids.contains(&candidate.id));
-        let changed = before != pool.candidates.len();
+        let changed = prune_expired(&mut pool, now);
+        let candidates = pool.candidates.clone();
         drop(pool);
         if changed {
             self.persist().await?;
         }
-        Ok(())
+        Ok(candidates)
     }
 
     pub async fn count(&self) -> Result<usize> {
@@ -352,7 +339,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn candidates_are_deduplicated_and_removed_only_after_review() {
+    async fn a_new_sensing_pass_replaces_the_temporary_candidate_pool() {
         let nonce = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .unwrap()
@@ -361,23 +348,22 @@ mod tests {
         let store = SensingStore::open(path.clone()).await.unwrap();
         assert_eq!(
             store
-                .append(vec![candidate("New signal", "https://example.test/news")])
+                .replace(vec![candidate("Old signal", "https://example.test/old")])
                 .await
                 .unwrap(),
             1
         );
         assert_eq!(
             store
-                .append(vec![candidate("new signal", "https://example.test/news")])
+                .replace(vec![candidate("New signal", "https://example.test/news")])
                 .await
                 .unwrap(),
-            0
+            1
         );
         let batch = store.review_batch(3).await.unwrap();
         assert_eq!(batch.len(), 1);
+        assert_eq!(batch[0].title, "New signal");
         assert_eq!(store.count().await.unwrap(), 1);
-        store.remove_reviewed(&[batch[0].id.clone()]).await.unwrap();
-        assert_eq!(store.count().await.unwrap(), 0);
         std::fs::remove_file(path).unwrap();
     }
 
@@ -413,7 +399,7 @@ mod tests {
         let path = std::env::temp_dir().join(format!("symbiont-sensing-open-{nonce}.json"));
         let store = SensingStore::open(path.clone()).await.unwrap();
         store
-            .append(vec![candidate(
+            .replace(vec![candidate(
                 "Unfamiliar but credible signal",
                 "https://example.test/open",
             )])

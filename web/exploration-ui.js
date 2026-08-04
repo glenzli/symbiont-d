@@ -48,8 +48,11 @@ export function initExplorationUi(state, { announceManualSilence } = {}) {
       error.textContent = `最近异常：${payload.exploration.lastError}`;
       history.append(error);
     }
+    if (payload.candidates?.length) {
+      history.append(renderCandidatePool(payload.candidates));
+    }
     if (payload.intents?.length) history.append(renderIntentLog(payload.intents));
-    if (!payload.runs.length) {
+    if (!payload.runs.length && !payload.candidates?.length) {
       const empty = document.createElement("p");
       empty.className = "exploration-empty";
       empty.textContent = "还没有完成过自主探索。";
@@ -178,6 +181,80 @@ export function initExplorationUi(state, { announceManualSilence } = {}) {
       if (runAt && runAt !== lastLoadedRunAt) load();
     },
   };
+}
+
+function renderCandidatePool(candidates) {
+  const section = document.createElement("section");
+  section.className = "exploration-candidate-pool";
+  const header = document.createElement("header");
+  const title = document.createElement("strong");
+  title.textContent = `最近感知候选 · ${candidates.length} 条`;
+  const note = document.createElement("span");
+  note.textContent = "临时信息，不写入记忆；下一次感知会替换";
+  header.append(title, note);
+  const list = document.createElement("ol");
+  for (const candidate of candidates) {
+    const item = document.createElement("li");
+    const itemHeader = document.createElement("header");
+    const candidateTitle = document.createElement("strong");
+    candidateTitle.textContent = candidate.title;
+    const sourceClass = document.createElement("span");
+    sourceClass.textContent = sourceClassLabel(candidate.sourceClass);
+    itemHeader.append(candidateTitle, sourceClass);
+    const summary = document.createElement("p");
+    summary.textContent = candidate.summary;
+    item.append(itemHeader, summary);
+    if (candidate.possibleConnection) {
+      const connection = document.createElement("p");
+      connection.className = "candidate-connection";
+      connection.textContent = `可能关联：${candidate.possibleConnection}`;
+      item.append(connection);
+    }
+    if (candidate.sources?.length) {
+      const sources = document.createElement("ul");
+      sources.className = "candidate-sources";
+      for (const source of candidate.sources) {
+        const sourceItem = document.createElement("li");
+        const url = safeHttpUrl(source.url);
+        if (url) {
+          const link = document.createElement("a");
+          link.href = url;
+          link.target = "_blank";
+          link.rel = "noreferrer";
+          link.textContent = source.detail || url;
+          sourceItem.append(link);
+        } else {
+          sourceItem.textContent = source.detail || source.url;
+        }
+        sources.append(sourceItem);
+      }
+      item.append(sources);
+    }
+    list.append(item);
+  }
+  section.append(header, list);
+  return section;
+}
+
+function safeHttpUrl(value) {
+  try {
+    const url = new URL(value);
+    return ["http:", "https:"].includes(url.protocol) ? url.href : null;
+  } catch {
+    return null;
+  }
+}
+
+function sourceClassLabel(value) {
+  return {
+    research: "研究与方法",
+    products_and_tools: "产品与工具",
+    projects_and_ecosystems: "项目与生态",
+    institutions_and_policy: "机构与政策",
+    industry_and_markets: "产业与市场",
+    culture_and_ideas: "文化与观念",
+    open_discovery: "开放发现",
+  }[value] || "开放发现";
 }
 
 function renderRun(run) {
