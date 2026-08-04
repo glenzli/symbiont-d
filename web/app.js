@@ -68,11 +68,14 @@ let activePending = null;
 let typingSignalTimer = null;
 let composerNoticeTimer = null;
 let stoppingResponse = false;
+const manualExplorationReceiptIds = new Set();
 
 const MAX_IMAGES = 4;
 const MAX_IMAGE_BYTES = 15 * 1024 * 1024;
 
-const explorationUi = initExplorationUi(appState);
+const explorationUi = initExplorationUi(appState, {
+  announceManualSilence: appendManualExplorationReceipt,
+});
 const settingsUi = initSettings(appState, explorationUi.trigger);
 const identityUi = initIdentityUi(appState);
 const permissionUi = initPermissionUi(appState);
@@ -128,6 +131,7 @@ function metadataText(metadata) {
   const runs = metadata.runs.map((run) => {
     const name = run.displayName || run.model;
     const lane = {
+      sense: "感知",
       observe: "观察",
       conversation: "日常",
       investigate: "深入",
@@ -195,6 +199,31 @@ function appendMessage(entry, options = {}) {
     conversation.scrollTop = conversation.scrollHeight;
   }
   return element;
+}
+
+function appendManualExplorationReceipt(receipt) {
+  if (!receipt?.id || manualExplorationReceiptIds.has(receipt.id)) return;
+  manualExplorationReceiptIds.add(receipt.id);
+  emptyState.hidden = true;
+
+  const notice = document.createElement("article");
+  notice.className = "conversation-notice exploration-receipt";
+  notice.dataset.receiptId = receipt.id;
+  notice.setAttribute("role", "status");
+
+  const label = document.createElement("strong");
+  label.textContent = "探索完成";
+  const message = document.createElement("span");
+  message.textContent = "本次没有发现值得打扰你的新情报。";
+  const time = document.createElement("time");
+  time.dateTime = receipt.completedAt;
+  time.textContent = new Date(receipt.completedAt).toLocaleTimeString([], {
+    hour: "2-digit",
+    minute: "2-digit",
+  });
+  notice.append(label, message, time);
+  conversation.append(notice);
+  conversation.scrollTop = conversation.scrollHeight;
 }
 
 function resizeComposer() {
@@ -303,9 +332,12 @@ function renderRuntimeStatus() {
   } else if (phase === "error") {
     connectionStatus.textContent = "在线 · 探索运行异常";
   } else if (phase === "waiting" && exploration.nextRunAt) {
-    connectionStatus.textContent = `在线 · 下次探索 ${new Date(
+    const candidates = exploration.pendingCandidateCount
+      ? ` · ${exploration.pendingCandidateCount} 条候选待复核`
+      : "";
+    connectionStatus.textContent = `在线 · 下次感知 ${new Date(
       exploration.nextRunAt,
-    ).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}`;
+    ).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}${candidates}`;
   } else {
     const reflection = appState.reflection?.runtime || appState.reflection;
     connectionStatus.textContent =

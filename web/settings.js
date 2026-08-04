@@ -451,8 +451,11 @@ function explorationStatusText(exploration, usage, autonomy) {
     return `今日主动消息额度已用尽 · 介入 ${usage?.autonomousInterventionsToday || 0}/${autonomy?.dailyInterruptLimit || 0} · 留话 ${usage?.autonomousNotesToday || 0}/${autonomy?.dailyNoteLimit ?? 2}`;
   }
   if (phase === "error") return exploration.lastError || "探索运行出错";
+  const candidates = exploration.pendingCandidateCount
+    ? `候选池待复核 ${exploration.pendingCandidateCount} 条 · `
+    : "";
   return exploration.nextRunAt
-    ? `下次 ${formatNext(exploration.nextRunAt)}`
+    ? `${candidates}下次感知 ${formatNext(exploration.nextRunAt)}`
     : "等待调度";
 }
 

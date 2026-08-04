@@ -44,11 +44,25 @@ user's attention into a feed.
 - A separate Reflection pipeline that records interaction facts, then uses a
   model to maintain temporal Episodes, revisable hypotheses, and optional
   delayed follow-ups.
+- Reflection projections have an explicit lifecycle: every active hypothesis
+  carries a bounded future review time, age without contrary evidence becomes
+  `stale`, and a lifecycle-only audit can run without pretending that a new
+  conversation event occurred. Projection health exposes missing or due review
+  work, while a 24-hour checkpoint prevents repeated background audits.
 - Exact local time is injected into every model run; reply delay, message
   length, continuation, correction, and read state remain contextual evidence,
   never numeric ratings.
 - Model-owned Hunches collected in a visible Curiosity Map.
 - Scheduled, manual, and conversation-triggered autonomous exploration.
+- A low-cost ambient sensing lane that rotates across research, tools, project
+  ecosystems, institutions, industry, and culture. It writes only a 24-hour
+  candidate inbox; candidates need credible sources but do not need a known
+  user connection and are never memory until stronger stages independently
+  verify and select them.
+- Purpose-bounded exploration context: Current Map and Open Loops help recognize
+  consequences, ready Hunches remain optional questions, and Topics, interaction
+  hypotheses, deferred follow-ups, and profile-maintenance evidence do not all
+  compete as simultaneous search priorities.
 - Model-chosen proactive delivery: an **intervention** for a live decision,
   risk, timing window, or shared question; or a lower-pressure **note** for a
   credible, fresh external development that has a real connection to the
@@ -73,7 +87,7 @@ symbiont-d host
   |-- Reflection: raw interaction events -> Episodes -> working hypotheses
   |-- Curiosity: model-owned questions and their lifecycle
   |-- Permission Broker: interactive grants and background deny-by-default
-  |-- browser UI: conversation, settings, archive, usage, traces
+  |-- browser UI: conversation, working state, settings, usage, traces
   `-- macOS menu client: native lifecycle around the same local UI
 ```
 
@@ -277,7 +291,9 @@ Service logs are written to `data/logs/`. Uninstalling the service preserves
 all local data. The PCP Console is available at
 [http://127.0.0.1:4318](http://127.0.0.1:4318). It uses a separate
 `operator:local` audit endpoint that can inspect Pages and access events but
-cannot mutate the Store.
+cannot mutate the Store. Symbiont links to this Console for Page browsing;
+its own **工作状态** panel keeps only Symbiont-specific context and background
+signals.
 
 ### Add the macOS menu-bar client
 
@@ -324,6 +340,7 @@ data/context.sqlite3   PCP Pages and revisions
 data/pcp-maintenance-state.json  PCP Runtime observation/apply cooldown ledger
 data/symbiont.sqlite3  usage and temporary trace details
 data/reflection.sqlite3 interaction facts, Episodes, hypotheses, follow-ups
+data/sensing-candidates.json  transient ambient intake and channel rotation
 data/assets/           content-addressed image files
 data/identity.toml     local avatar selection; not profile or model context
 data/orientation.md    visible user orientation

@@ -29,6 +29,8 @@ fn defaults_choose_semantic_model_lanes() {
     ];
 
     let config = ComputeConfig::defaults(&catalog).unwrap();
+    assert_eq!(config.lane(ComputeLane::Sense).model, "gpt-5.6-luna");
+    assert_eq!(config.lane(ComputeLane::Sense).effort, "low");
     assert_eq!(config.lane(ComputeLane::Observe).model, "gpt-5.6-luna");
     assert_eq!(
         config.lane(ComputeLane::Conversation).model,

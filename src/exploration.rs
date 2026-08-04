@@ -12,6 +12,7 @@ use chrono::{DateTime, Days, Local, LocalResult, NaiveDateTime, NaiveTime, TimeZ
 use serde::Serialize;
 use tokio::{
     sync::{Mutex, RwLock, mpsc},
+    task::JoinHandle,
     time::sleep,
 };
 
@@ -26,6 +27,10 @@ use crate::{
     outreach::all_budgets_exhausted,
     profile::{ProfileStore, SetupStatus},
     reflection::ReflectionStore,
+    sensing::{
+        REVIEW_BATCH_SIZE, SensingCandidate, SensingIntakeBrief, SensingStore,
+        format_candidate_pool,
+    },
     symbiont_context::SymbiontContextStore,
     usage::{UsageHeadline, UsageStore},
 };
@@ -36,6 +41,8 @@ const EXPLORATION_JOURNAL_RUNS: usize = 8;
 const EXPLORATION_CONTEXT_CHARS: usize = 16_000;
 const EXPLORATION_MESSAGE_EXCERPT_CHARS: usize = 700;
 const EXPLORATION_EDGE_EXCERPT_CHARS: usize = 900;
+const SENSING_CHAT_TAIL: usize = 2;
+const SENSING_MESSAGE_EXCERPT_CHARS: usize = 320;
 
 #[derive(Clone, Copy, Debug, Serialize)]
 #[serde(rename_all = "snake_case")]
@@ -72,6 +79,7 @@ pub struct ExplorationSnapshot {
     pub latest_message: Option<MemoryEntry>,
     pub current_trigger: Option<String>,
     pub last_trigger: Option<String>,
+    pub pending_candidate_count: usize,
 }
 
 impl Default for ExplorationSnapshot {
@@ -86,6 +94,7 @@ impl Default for ExplorationSnapshot {
             latest_message: None,
             current_trigger: None,
             last_trigger: None,
+            pending_candidate_count: 0,
         }
     }
 }
@@ -157,6 +166,7 @@ impl ExplorationHandle {
         curiosity: Arc<CuriosityStore>,
         reflection: Arc<ReflectionStore>,
         usage: Arc<UsageStore>,
+        sensing: Arc<SensingStore>,
         conversation: ConversationCoordinator,
         intents: Arc<ExplorationIntentQueue>,
         mut intent_receiver: ExplorationIntentReceiver,
@@ -202,6 +212,7 @@ impl ExplorationHandle {
             curiosity,
             reflection,
             usage,
+            sensing,
             conversation,
             Arc::clone(&intents),
             trigger_rx,
@@ -250,6 +261,7 @@ async fn run_scheduler(
     curiosity: Arc<CuriosityStore>,
     reflection: Arc<ReflectionStore>,
     usage: Arc<UsageStore>,
+    sensing: Arc<SensingStore>,
     conversation: ConversationCoordinator,
     intents: Arc<ExplorationIntentQueue>,
     mut trigger_rx: mpsc::Receiver<ExplorationTrigger>,
@@ -299,13 +311,13 @@ async fn run_scheduler(
             pending_trigger.is_some() && !conversation_busy,
             pending_trigger.is_some_and(ExplorationTrigger::bypasses_quiet_hours),
             pending_trigger.is_some_and(ExplorationTrigger::bypasses_token_limit),
-            pending_trigger.is_some_and(ExplorationTrigger::bypasses_message_limit),
+            pending_trigger.is_none()
+                || pending_trigger.is_some_and(ExplorationTrigger::bypasses_message_limit),
         );
 
         match gate {
             Gate::Run => {
                 let mut trigger = pending_triggers.pop_front();
-                let scheduled_run = trigger.is_none();
                 if let Some(ExplorationTrigger::Intent(intent)) = trigger.as_ref() {
                     match intents.claim(&intent.id).await {
                         Ok(Some(claimed)) => trigger = Some(ExplorationTrigger::Intent(claimed)),
@@ -331,12 +343,16 @@ async fn run_scheduler(
                     Arc::clone(&curiosity),
                     Arc::clone(&reflection),
                     Arc::clone(&usage),
+                    Arc::clone(&sensing),
                     conversation.clone(),
                     trigger,
                 )
                 .await;
                 match result {
                     Ok(completion) => {
+                        if completion.status != ExplorationIntentStatus::Superseded {
+                            last_run_at = Some(Utc::now());
+                        }
                         if let Some(id) = intent_id {
                             let _ = intents
                                 .complete(
@@ -363,9 +379,6 @@ async fn run_scheduler(
                         }
                         set_error(&state, error.to_string()).await;
                     }
-                }
-                if scheduled_run {
-                    last_run_at = Some(Utc::now());
                 }
                 continue;
             }
@@ -490,11 +503,13 @@ async fn run_once(
     curiosity: Arc<CuriosityStore>,
     reflection: Arc<ReflectionStore>,
     usage: Arc<UsageStore>,
+    sensing: Arc<SensingStore>,
     conversation: ConversationCoordinator,
     trigger: Option<ExplorationTrigger>,
 ) -> Result<ExplorationRunCompletion> {
     let completes_deferred_follow_up =
         matches!(&trigger, Some(ExplorationTrigger::DeferredFollowUp));
+    let scheduled = trigger.is_none();
     {
         let mut snapshot = state.write().await;
         snapshot.phase = ExplorationPhase::Exploring;
@@ -504,12 +519,12 @@ async fn run_once(
             label: trigger
                 .as_ref()
                 .map(ExplorationTrigger::preparation_label)
-                .unwrap_or("准备定时探索")
+                .unwrap_or("准备低成本感知")
                 .to_owned(),
             model: String::new(),
             display_name: String::new(),
             effort: String::new(),
-            lane: "observe".to_owned(),
+            lane: if scheduled { "sense" } else { "observe" }.to_owned(),
         });
         snapshot.current_trigger = Some(
             trigger
@@ -523,21 +538,6 @@ async fn run_once(
     let compute = compute.snapshot().await;
     let profile = profile.snapshot().await;
     let recent_messages = continuity.recent_messages(EXPLORATION_CHAT_TAIL).await?;
-    let recent_explorations = usage.recent_explorations(EXPLORATION_JOURNAL_RUNS).await?;
-    let continuity_context = format!(
-        "{}\n\n{}\n\n{}\n\n{}\n\n{}\n\n{}",
-        continuity.context_seed(None).await,
-        context.prompt().await?,
-        curiosity.prompt().await?,
-        reflection.prompt().await?,
-        autonomy_config.attention_context(),
-        exploration_working_context(
-            &recent_messages,
-            &recent_explorations,
-            trigger.as_ref(),
-            Utc::now(),
-        )
-    );
     let (runtime_tx, mut runtime_rx) = mpsc::channel(64);
     let activity_state = Arc::clone(&state);
     let activity_task = tokio::spawn(async move {
@@ -570,6 +570,149 @@ async fn run_once(
     });
 
     let input_epoch = conversation.current_input_epoch();
+    let mut reviewed_candidates = Vec::new();
+    if scheduled {
+        let intake_brief = match sensing.next_intake_brief().await {
+            Ok(brief) => brief,
+            Err(error) => {
+                stop_activity_relay(runtime_tx, activity_task).await?;
+                return Err(error);
+            }
+        };
+        let sensing_outcome = codex
+            .lock()
+            .await
+            .sense(
+                &compute,
+                &profile,
+                &ambient_sensing_context(&recent_messages, &intake_brief),
+                conversation.subscribe_input(),
+                runtime_tx.clone(),
+            )
+            .await;
+        let sensing_outcome = match sensing_outcome {
+            Ok(outcome) => outcome,
+            Err(error) => {
+                stop_activity_relay(runtime_tx, activity_task).await?;
+                return Err(error);
+            }
+        };
+        let trace_id = sensing_outcome
+            .invocations
+            .first()
+            .map(|invocation| invocation.id.clone());
+        if let Err(error) = usage.record_all(&sensing_outcome.invocations).await {
+            stop_activity_relay(runtime_tx, activity_task).await?;
+            return Err(error);
+        }
+        if !sensing_outcome.interrupted {
+            if let Err(error) = sensing.append(sensing_outcome.candidates).await {
+                stop_activity_relay(runtime_tx, activity_task).await?;
+                return Err(error);
+            }
+        }
+        let pending_candidate_count = match sensing.count().await {
+            Ok(count) => count,
+            Err(error) => {
+                stop_activity_relay(runtime_tx, activity_task).await?;
+                return Err(error);
+            }
+        };
+        if sensing_outcome.interrupted {
+            stop_activity_relay(runtime_tx, activity_task).await?;
+            settle_sensing_only(
+                &state,
+                ExplorationIntentStatus::Superseded,
+                "superseded",
+                pending_candidate_count,
+            )
+            .await;
+            return Ok(ExplorationRunCompletion {
+                status: ExplorationIntentStatus::Superseded,
+                trace_id: None,
+                result_revision_id: None,
+            });
+        }
+        let headline = match usage.headline(&today_started_at()).await {
+            Ok(headline) => headline,
+            Err(error) => {
+                stop_activity_relay(runtime_tx, activity_task).await?;
+                return Err(error);
+            }
+        };
+        if all_budgets_exhausted(&autonomy_config, &headline) {
+            stop_activity_relay(runtime_tx, activity_task).await?;
+            settle_sensing_only(
+                &state,
+                ExplorationIntentStatus::Silent,
+                if pending_candidate_count == 0 {
+                    "no_candidates"
+                } else {
+                    "candidates_waiting"
+                },
+                pending_candidate_count,
+            )
+            .await;
+            return Ok(ExplorationRunCompletion {
+                status: ExplorationIntentStatus::Silent,
+                trace_id,
+                result_revision_id: None,
+            });
+        }
+        reviewed_candidates = match sensing.review_batch(REVIEW_BATCH_SIZE).await {
+            Ok(candidates) => candidates,
+            Err(error) => {
+                stop_activity_relay(runtime_tx, activity_task).await?;
+                return Err(error);
+            }
+        };
+        if reviewed_candidates.is_empty() {
+            stop_activity_relay(runtime_tx, activity_task).await?;
+            settle_sensing_only(
+                &state,
+                ExplorationIntentStatus::Silent,
+                "no_candidates",
+                pending_candidate_count,
+            )
+            .await;
+            return Ok(ExplorationRunCompletion {
+                status: ExplorationIntentStatus::Silent,
+                trace_id,
+                result_revision_id: None,
+            });
+        }
+    }
+    let recent_explorations = match usage.recent_explorations(EXPLORATION_JOURNAL_RUNS).await {
+        Ok(runs) => runs,
+        Err(error) => {
+            stop_activity_relay(runtime_tx, activity_task).await?;
+            return Err(error);
+        }
+    };
+    let continuity_context = match async {
+        Ok::<_, anyhow::Error>(format!(
+            "{}\n\n{}\n\n{}\n\n{}\n\n{}",
+            continuity.context_seed(None).await,
+            context.exploration_prompt().await?,
+            curiosity.exploration_prompt().await?,
+            autonomy_config.attention_context(),
+            exploration_working_context(
+                &recent_messages,
+                &recent_explorations,
+                &reviewed_candidates,
+                trigger.as_ref(),
+                Utc::now(),
+            )
+        ))
+    }
+    .await
+    {
+        Ok(context) => context,
+        Err(error) => {
+            stop_activity_relay(runtime_tx, activity_task).await?;
+            return Err(error);
+        }
+    };
     let outcome = codex
         .lock()
         .await
@@ -585,6 +728,13 @@ async fn run_once(
         .await
         .context("join exploration activity relay")?;
     let mut outcome = outcome?;
+    if scheduled && !outcome.interrupted && !outcome.superseded {
+        let reviewed_ids = reviewed_candidates
+            .iter()
+            .map(|candidate| candidate.id.clone())
+            .collect::<Vec<_>>();
+        sensing.remove_reviewed(&reviewed_ids).await?;
+    }
     let trace_id = outcome.metadata.trace_id.clone().or_else(|| {
         outcome
             .invocations
@@ -699,6 +849,7 @@ async fn run_once(
             .unwrap_or("scheduled")
             .to_owned(),
     );
+    snapshot.pending_candidate_count = sensing.count().await?;
     let result_revision_id = published
         .as_ref()
         .and_then(|message| message.revision_id.clone());
@@ -721,6 +872,7 @@ struct ExplorationRunCompletion {
 fn exploration_working_context(
     messages: &[MemoryEntry],
     runs: &[crate::usage::ExplorationRunSummary],
+    candidates: &[SensingCandidate],
     trigger: Option<&ExplorationTrigger>,
     now: DateTime<Utc>,
 ) -> String {
@@ -792,6 +944,9 @@ fn exploration_working_context(
         ));
     }
     lines.push("</recent-exploration-journal>".to_owned());
+    if !candidates.is_empty() {
+        lines.push(format_candidate_pool(candidates));
+    }
     let joined = lines.join("\n");
     if joined.chars().count() <= EXPLORATION_CONTEXT_CHARS {
         return joined;
@@ -802,6 +957,67 @@ fn exploration_working_context(
         .collect::<String>();
     truncated.push_str("\n[older working context truncated]");
     truncated
+}
+
+fn ambient_sensing_context(messages: &[MemoryEntry], brief: &SensingIntakeBrief) -> String {
+    let mut lines = vec![
+        "<ambient-sensing-context>".to_owned(),
+        format!(
+            "<intake-channel id=\"{}\" label=\"{}\">{}</intake-channel>",
+            brief.id, brief.label, brief.brief
+        ),
+        "<open-discovery>Also allow one credible, high-information signal outside this channel when it is unusually novel or consequential. Breadth emerges across rotated passes; do not turn one pass into a generic news roundup.</open-discovery>".to_owned(),
+        "The recent user edge below is an optional downstream ranking hint only. It must not gate intake, define the search domain, or be turned into memory or durable interests.".to_owned(),
+        "<recent-user-edge role=\"ranking-hint\">".to_owned(),
+    ];
+    for entry in messages
+        .iter()
+        .rev()
+        .filter(|entry| entry.role == MemoryRole::User)
+        .take(SENSING_CHAT_TAIL)
+        .collect::<Vec<_>>()
+        .into_iter()
+        .rev()
+    {
+        lines.push(format!(
+            "<message role=\"user\" at=\"{}\">{}</message>",
+            entry.at,
+            bounded_message_excerpt(&entry.content, SENSING_MESSAGE_EXCERPT_CHARS)
+        ));
+    }
+    lines.push("</recent-user-edge>".to_owned());
+    lines.push("</ambient-sensing-context>".to_owned());
+    lines.join("\n")
+}
+
+async fn stop_activity_relay(
+    events: mpsc::Sender<RuntimeEvent>,
+    activity_task: JoinHandle<()>,
+) -> Result<()> {
+    drop(events);
+    activity_task
+        .await
+        .context("join exploration activity relay")
+}
+
+async fn settle_sensing_only(
+    state: &RwLock<ExplorationSnapshot>,
+    status: ExplorationIntentStatus,
+    outcome: &str,
+    pending_candidate_count: usize,
+) {
+    let mut snapshot = state.write().await;
+    snapshot.last_run_at = if status == ExplorationIntentStatus::Superseded {
+        None
+    } else {
+        Some(timestamp(Utc::now()))
+    };
+    snapshot.last_outcome = Some(outcome.to_owned());
+    snapshot.last_error = None;
+    snapshot.current_activity = None;
+    snapshot.current_trigger = None;
+    snapshot.last_trigger = Some("scheduled".to_owned());
+    snapshot.pending_candidate_count = pending_candidate_count;
 }
 
 fn conversation_edge(messages: &[MemoryEntry], now: DateTime<Utc>) -> String {
@@ -981,12 +1197,13 @@ mod tests {
 
     use super::{
         ExplorationIntent, ExplorationIntentOrigin, ExplorationIntentStatus, ExplorationPhase,
-        ExplorationTrigger, Gate, bounded_message_excerpt, conversation_edge, evaluate_gate,
-        exploration_working_context, quiet_end, today_started_at,
+        ExplorationTrigger, Gate, ambient_sensing_context, bounded_message_excerpt,
+        conversation_edge, evaluate_gate, exploration_working_context, quiet_end, today_started_at,
     };
     use crate::{
         autonomy::{AutonomyConfig, QuietHours},
         memory::{MemoryEntry, MemoryRole, MessageMetadata},
+        sensing::SensingIntakeBrief,
         usage::UsageHeadline,
     };
 
@@ -1112,6 +1329,50 @@ mod tests {
     }
 
     #[test]
+    fn ambient_sensing_starts_from_a_rotating_channel_and_only_uses_user_text_as_hint() {
+        let messages = vec![
+            message(
+                MemoryRole::User,
+                "2026-08-01T00:00:00Z",
+                "old user topic",
+                None,
+            ),
+            message(
+                MemoryRole::Assistant,
+                "2026-08-01T00:01:00Z",
+                "assistant framing must not steer intake",
+                Some("interactive"),
+            ),
+            message(
+                MemoryRole::User,
+                "2026-08-01T00:02:00Z",
+                "recent user hint one",
+                None,
+            ),
+            message(
+                MemoryRole::User,
+                "2026-08-01T00:03:00Z",
+                "recent user hint two",
+                None,
+            ),
+        ];
+        let brief = SensingIntakeBrief {
+            id: "culture_and_ideas",
+            label: "Culture and ideas",
+            brief: "Scan concrete cultural developments without requiring a project connection.",
+        };
+
+        let context = ambient_sensing_context(&messages, &brief);
+
+        assert!(context.contains("intake-channel id=\"culture_and_ideas\""));
+        assert!(context.contains("must not gate intake"));
+        assert!(context.contains("recent user hint one"));
+        assert!(context.contains("recent user hint two"));
+        assert!(!context.contains("old user topic"));
+        assert!(!context.contains("assistant framing"));
+    }
+
+    #[test]
     fn thought_trigger_carries_the_exact_question_into_latest_working_context() {
         let trigger = ExplorationTrigger::Intent(ExplorationIntent {
             id: "intent_test".to_owned(),
@@ -1131,6 +1392,7 @@ mod tests {
         });
 
         let context = exploration_working_context(
+            &[],
             &[],
             &[],
             Some(&trigger),

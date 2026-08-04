@@ -433,7 +433,7 @@ impl UsageStore {
                         COALESCE(SUM(
                             CASE
                                 WHEN origin IN (
-                                    'autonomous', 'autonomous_scout', 'maintenance', 'pcp_maintenance',
+                                    'ambient_sense', 'autonomous', 'autonomous_scout', 'maintenance', 'pcp_maintenance',
                                     'reconciliation_preview', 'reconciliation_apply'
                                 )
                                      AND completed_at >= ?1
@@ -443,7 +443,7 @@ impl UsageStore {
                         COALESCE(SUM(
                             CASE
                                 WHEN origin IN (
-                                    'autonomous', 'autonomous_scout', 'maintenance', 'pcp_maintenance', 'reflection',
+                                    'ambient_sense', 'autonomous', 'autonomous_scout', 'maintenance', 'pcp_maintenance', 'reflection',
                                     'reconciliation_preview', 'reconciliation_apply'
                                 )
                                      AND completed_at >= ?1
@@ -454,7 +454,7 @@ impl UsageStore {
                         COALESCE(SUM(
                             CASE
                                 WHEN origin IN (
-                                    'autonomous', 'autonomous_scout', 'maintenance', 'pcp_maintenance', 'reflection',
+                                    'ambient_sense', 'autonomous', 'autonomous_scout', 'maintenance', 'pcp_maintenance', 'reflection',
                                     'reconciliation_preview', 'reconciliation_apply'
                                 )
                                      AND completed_at >= ?1
@@ -511,7 +511,7 @@ impl UsageStore {
                     "
                     SELECT MAX(completed_at)
                     FROM invocations
-                    WHERE origin IN ('autonomous_scout', 'autonomous')
+                    WHERE origin IN ('ambient_sense', 'autonomous_scout', 'autonomous')
                       AND parent_id IS NULL
                     ",
                     [],

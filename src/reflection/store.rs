@@ -7,15 +7,16 @@ use std::{
 
 use anyhow::{Context, Result};
 use chrono::{DateTime, Duration, Local, SecondsFormat, Utc};
-use rusqlite::{Connection, OptionalExtension, params};
+use rusqlite::{Connection, OptionalExtension, Transaction, TransactionBehavior, params};
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 use tokio::{fs, sync::RwLock, task};
 
 use super::{
-    ConversationEpisode, DeferredFollowUp, EpisodeInput, EpisodeState, FollowUpInput,
+    ConversationEpisode, DeferredFollowUp, EpisodeAlias, EpisodeInput, EpisodeState, FollowUpInput,
     HunchFeedbackTarget, HypothesisHorizon, HypothesisInput, HypothesisStatus, InteractionEvent,
-    ReflectionConfig, ReflectionRun, TurnDisposition, WorkingHypothesis,
+    ProjectionHealth, ReflectionConfig, ReflectionRun, TurnDisposition, WorkingHypothesis,
+    lifecycle,
 };
 use crate::memory::{MemoryEntry, MemoryRole};
 
@@ -36,6 +37,7 @@ pub struct ReflectionBatch {
     pub to_event_id: i64,
     pub events: Vec<InteractionEvent>,
     pub source_bundle: String,
+    pub lifecycle_audit: bool,
 }
 
 impl ReflectionStore {
@@ -320,10 +322,74 @@ impl ReflectionStore {
                 to_event_id,
                 events,
                 source_bundle,
+                lifecycle_audit: false,
             }))
         })
         .await
         .context("join pending Reflection batch read")?
+    }
+
+    pub async fn lifecycle_batch(&self) -> Result<Option<ReflectionBatch>> {
+        let path = self.path.clone();
+        task::spawn_blocking(move || -> Result<Option<ReflectionBatch>> {
+            let connection = open_connection(&path)?;
+            let cursor = read_cursor(&connection)?;
+            let episodes = read_episodes(&connection, 40)?;
+            let hypotheses = read_hypotheses(&connection, 60)?;
+            let follow_ups = read_follow_ups(&connection, 30)?;
+            if episodes.is_empty() && hypotheses.is_empty() && follow_ups.is_empty() {
+                return Ok(None);
+            }
+            let temporal = format_temporal_prompt(&[], &episodes, &hypotheses, &follow_ups);
+            let source_bundle = truncate(
+                &format!(
+                    "<projection-lifecycle-audit>\nNo new conversation event is being interpreted. Review the existing projections themselves. Every active hypothesis must either receive an honest future revisit_after appropriate to its horizon, or be revised to stale, superseded, or contradicted. Do not preserve a hypothesis merely because it once had evidence. Move Topics to dormant or closed only when their own source history shows the line is no longer active; never merge merely adjacent subjects. Preserve exact evidence Revisions and prefer no semantic rewrite when only lifecycle state needs attention.\n</projection-lifecycle-audit>\n\n{temporal}"
+                ),
+                MAX_PROMPT_CHARS,
+            );
+            Ok(Some(ReflectionBatch {
+                from_event_id: cursor,
+                to_event_id: cursor,
+                events: Vec::new(),
+                source_bundle,
+                lifecycle_audit: true,
+            }))
+        })
+        .await
+        .context("join projection lifecycle batch read")?
+    }
+
+    pub async fn projection_health(&self) -> Result<ProjectionHealth> {
+        let path = self.path.clone();
+        task::spawn_blocking(move || -> Result<ProjectionHealth> {
+            let connection = open_connection(&path)?;
+            read_projection_health(&connection, Utc::now())
+        })
+        .await
+        .context("join projection health read")?
+    }
+
+    pub async fn lifecycle_review_due(&self) -> Result<bool> {
+        let health = self.projection_health().await?;
+        Ok(lifecycle::review_due(&health, Utc::now()))
+    }
+
+    pub async fn mark_lifecycle_reviewed(&self) -> Result<()> {
+        let path = self.path.clone();
+        task::spawn_blocking(move || -> Result<()> {
+            let connection = open_connection(&path)?;
+            connection.execute(
+                "
+                INSERT INTO reflection_meta (key, value)
+                VALUES ('last_lifecycle_review_at', ?1)
+                ON CONFLICT(key) DO UPDATE SET value = excluded.value
+                ",
+                params![now()],
+            )?;
+            Ok(())
+        })
+        .await
+        .context("join lifecycle review checkpoint write")?
     }
 
     pub async fn upsert_episode(&self, input: EpisodeInput) -> Result<ConversationEpisode> {
@@ -333,22 +399,39 @@ impl ReflectionStore {
         }
         let path = self.path.clone();
         task::spawn_blocking(move || -> Result<ConversationEpisode> {
-            let connection = open_connection(&path)?;
+            let mut connection = open_connection(&path)?;
+            let transaction =
+                connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
             let source_revision_ids = dedup(input.source_revision_ids);
-            let parent_episode_ids = dedup(input.parent_episode_ids);
-            ensure_known_source_revisions(&connection, &source_revision_ids)?;
-            let id = match input.id {
+            let parent_episode_ids = dedup(
+                input
+                    .parent_episode_ids
+                    .into_iter()
+                    .map(|id| resolve_episode_alias(&transaction, &id))
+                    .collect::<Result<Vec<_>>>()?,
+            );
+            ensure_known_source_revisions(&transaction, &source_revision_ids)?;
+            let (id, title) = match input.id {
                 Some(id) => {
-                    ensure_episode_exists(&connection, &id)?;
-                    id
+                    let id = resolve_episode_alias(&transaction, &id)?;
+                    ensure_episode_exists(&transaction, &id)?;
+                    (id, input.title.trim().to_owned())
                 }
-                None => {
-                    ensure_episode_title_is_new(&connection, input.title.trim())?;
-                    new_id("ep")
-                }
+                None => match find_episode_id_by_title(&transaction, input.title.trim())? {
+                    Some(id) => {
+                        let title = transaction.query_row(
+                            "SELECT title FROM episodes WHERE id = ?1",
+                            params![id],
+                            |row| row.get::<_, String>(0),
+                        )?;
+                        (id, title)
+                    }
+                    None => (new_id("ep"), input.title.trim().to_owned()),
+                },
             };
-            validate_episode_parents(&connection, &id, &parent_episode_ids)?;
-            let existing_started_at = connection
+            ensure_episode_title_is_available(&transaction, &title, &id)?;
+            validate_episode_parents(&transaction, &id, &parent_episode_ids)?;
+            let existing_started_at = transaction
                 .query_row(
                     "SELECT started_at FROM episodes WHERE id = ?1",
                     params![&id],
@@ -357,11 +440,12 @@ impl ReflectionStore {
                 .optional()?;
             let now = now();
             let started_at = existing_started_at.unwrap_or_else(|| {
-                source_time(&connection, &source_revision_ids, false).unwrap_or_else(|| now.clone())
+                source_time(&transaction, &source_revision_ids, false)
+                    .unwrap_or_else(|| now.clone())
             });
-            let last_activity_at =
-                source_time(&connection, &source_revision_ids, true).unwrap_or_else(|| now.clone());
-            connection.execute(
+            let last_activity_at = source_time(&transaction, &source_revision_ids, true)
+                .unwrap_or_else(|| now.clone());
+            transaction.execute(
                 "
                 INSERT INTO episodes (
                     id, title, summary, state, started_at, last_activity_at,
@@ -378,7 +462,7 @@ impl ReflectionStore {
                 ",
                 params![
                     id,
-                    input.title.trim(),
+                    title,
                     input.summary.trim(),
                     input.state.as_str(),
                     started_at,
@@ -388,17 +472,11 @@ impl ReflectionStore {
                     serde_json::to_string(&parent_episode_ids)?
                 ],
             )?;
-            for revision_id in source_revision_ids {
-                connection.execute(
-                    "
-                    INSERT OR IGNORE INTO episode_messages (
-                        episode_id, revision_id, associated_at, association_source
-                    ) VALUES (?1, ?2, ?3, 'reflection')
-                    ",
-                    params![id, revision_id, now],
-                )?;
-            }
-            read_episode(&connection, &id)?.context("read written Episode")
+            let turn_revision_ids = expand_conversation_turns(&transaction, &source_revision_ids)?;
+            insert_episode_messages(&transaction, &id, &turn_revision_ids, &now, "reflection")?;
+            let episode = read_episode(&transaction, &id)?.context("read written Episode")?;
+            transaction.commit()?;
+            Ok(episode)
         })
         .await
         .context("join Episode upsert")?
@@ -409,10 +487,7 @@ impl ReflectionStore {
         if input.statement.trim().is_empty() || input.evidence.trim().is_empty() {
             anyhow::bail!("hypothesis statement and evidence are required");
         }
-        if let Some(revisit_after) = input.revisit_after.as_deref() {
-            DateTime::parse_from_rfc3339(revisit_after)
-                .context("hypothesis revisit_after must be RFC 3339")?;
-        }
+        lifecycle::validate_hypothesis_review_window(&input, Utc::now())?;
         let path = self.path.clone();
         task::spawn_blocking(move || -> Result<WorkingHypothesis> {
             let connection = open_connection(&path)?;
@@ -535,10 +610,31 @@ impl ReflectionStore {
         let id = id.to_owned();
         task::spawn_blocking(move || {
             let connection = open_connection(&path)?;
+            let id = resolve_episode_alias(&connection, &id)?;
             read_episode(&connection, &id)
         })
         .await
         .context("join Episode read")?
+    }
+
+    pub async fn episode_aliases(&self) -> Result<Vec<EpisodeAlias>> {
+        let path = self.path.clone();
+        task::spawn_blocking(move || -> Result<Vec<EpisodeAlias>> {
+            let connection = open_connection(&path)?;
+            let mut statement = connection.prepare(
+                "SELECT alias_id, canonical_id FROM episode_aliases ORDER BY merged_at, alias_id",
+            )?;
+            Ok(statement
+                .query_map([], |row| {
+                    Ok(EpisodeAlias {
+                        alias_id: row.get(0)?,
+                        canonical_id: row.get(1)?,
+                    })
+                })?
+                .collect::<rusqlite::Result<Vec<_>>>()?)
+        })
+        .await
+        .context("join Episode alias read")?
     }
 
     pub async fn episode_message_counts(&self) -> Result<HashMap<String, u64>> {
@@ -561,6 +657,7 @@ impl ReflectionStore {
         let id = id.to_owned();
         task::spawn_blocking(move || -> Result<Vec<String>> {
             let connection = open_connection(&path)?;
+            let id = resolve_episode_alias(&connection, &id)?;
             let mut statement = connection.prepare(
                 "
                 SELECT em.revision_id
@@ -580,6 +677,22 @@ impl ReflectionStore {
         .context("join Episode message read")?
     }
 
+    pub async fn conversation_turn_revision_ids(
+        &self,
+        revision_ids: &[String],
+    ) -> Result<Vec<String>> {
+        validate_sources(revision_ids)?;
+        let path = self.path.clone();
+        let revision_ids = revision_ids.to_vec();
+        task::spawn_blocking(move || -> Result<Vec<String>> {
+            let connection = open_connection(&path)?;
+            ensure_known_source_revisions(&connection, &revision_ids)?;
+            expand_conversation_turns(&connection, &revision_ids)
+        })
+        .await
+        .context("join conversation turn expansion")?
+    }
+
     pub async fn attach_episode_messages(&self, id: &str, revision_ids: &[String]) -> Result<()> {
         if revision_ids.is_empty() {
             return Ok(());
@@ -590,22 +703,21 @@ impl ReflectionStore {
         let revision_ids = dedup(revision_ids.to_vec());
         task::spawn_blocking(move || -> Result<()> {
             let mut connection = open_connection(&path)?;
+            let id = resolve_episode_alias(&connection, &id)?;
             if read_episode(&connection, &id)?.is_none() {
                 anyhow::bail!("unknown conversation Topic: {id}");
             }
             ensure_known_source_revisions(&connection, &revision_ids)?;
             let transaction = connection.transaction()?;
             let associated_at = now();
-            for revision_id in revision_ids {
-                transaction.execute(
-                    "
-                    INSERT OR IGNORE INTO episode_messages (
-                        episode_id, revision_id, associated_at, association_source
-                    ) VALUES (?1, ?2, ?3, 'explicit_context')
-                    ",
-                    params![id, revision_id, associated_at],
-                )?;
-            }
+            let turn_revision_ids = expand_conversation_turns(&transaction, &revision_ids)?;
+            insert_episode_messages(
+                &transaction,
+                &id,
+                &turn_revision_ids,
+                &associated_at,
+                "explicit_context",
+            )?;
             transaction.execute(
                 "UPDATE episodes SET last_activity_at = ?2, updated_at = ?2 WHERE id = ?1",
                 params![id, associated_at],
@@ -967,7 +1079,7 @@ fn initialize_database(path: &PathBuf) -> Result<()> {
         std::fs::create_dir_all(parent)
             .with_context(|| format!("create Reflection directory {}", parent.display()))?;
     }
-    let connection = Connection::open(path)
+    let mut connection = Connection::open(path)
         .with_context(|| format!("open Reflection database {}", path.display()))?;
     connection.execute_batch(
         "
@@ -1024,6 +1136,13 @@ fn initialize_database(path: &PathBuf) -> Result<()> {
         );
         CREATE INDEX IF NOT EXISTS episode_message_revision
             ON episode_messages(revision_id);
+        CREATE TABLE IF NOT EXISTS episode_aliases (
+            alias_id TEXT PRIMARY KEY,
+            canonical_id TEXT NOT NULL,
+            merged_at TEXT NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS episode_alias_canonical
+            ON episode_aliases(canonical_id);
         CREATE TABLE IF NOT EXISTS hypotheses (
             id TEXT PRIMARY KEY,
             statement TEXT NOT NULL,
@@ -1071,6 +1190,14 @@ fn initialize_database(path: &PathBuf) -> Result<()> {
             ON reflection_runs(started_at DESC);
         ",
     )?;
+    consolidate_duplicate_episodes(&mut connection)?;
+    connection.execute(
+        "
+        CREATE UNIQUE INDEX IF NOT EXISTS episode_normalized_title
+        ON episodes(lower(trim(title)))
+        ",
+        [],
+    )?;
     connection.execute(
         "
         INSERT OR IGNORE INTO episode_messages (
@@ -1091,6 +1218,168 @@ fn initialize_database(path: &PathBuf) -> Result<()> {
         ",
         params![now()],
     )?;
+    Ok(())
+}
+
+fn consolidate_duplicate_episodes(connection: &mut Connection) -> Result<()> {
+    let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+    let episodes = {
+        let mut statement = transaction.prepare(
+            "
+            SELECT id, title, summary, state, started_at, last_activity_at,
+                   updated_at, source_revision_ids_json, related_episode_ids_json
+            FROM episodes
+            ORDER BY id
+            ",
+        )?;
+        statement
+            .query_map([], episode_from_row)?
+            .collect::<rusqlite::Result<Vec<_>>>()?
+    };
+    let mut grouped = HashMap::<String, Vec<ConversationEpisode>>::new();
+    for episode in episodes {
+        grouped
+            .entry(episode.title.trim().to_lowercase())
+            .or_default()
+            .push(episode);
+    }
+
+    let mut aliases = HashMap::<String, String>::new();
+    for group in grouped.values_mut().filter(|group| group.len() > 1) {
+        let mut counts = HashMap::<String, u64>::new();
+        for episode in group.iter() {
+            let count = transaction.query_row(
+                "SELECT COUNT(*) FROM episode_messages WHERE episode_id = ?1",
+                params![episode.id],
+                |row| row.get::<_, i64>(0),
+            )?;
+            counts.insert(episode.id.clone(), count as u64);
+        }
+        group.sort_by(|left, right| {
+            counts[&right.id]
+                .cmp(&counts[&left.id])
+                .then_with(|| left.started_at.cmp(&right.started_at))
+                .then_with(|| left.id.cmp(&right.id))
+        });
+        let canonical = group[0].clone();
+        let duplicate_ids = group
+            .iter()
+            .skip(1)
+            .map(|episode| episode.id.clone())
+            .collect::<Vec<_>>();
+        let mut sources = canonical.source_revision_ids.clone();
+        let mut parents = canonical.parent_episode_ids.clone();
+        for duplicate in group.iter().skip(1) {
+            for source in &duplicate.source_revision_ids {
+                if !sources.contains(source) && sources.len() < 50 {
+                    sources.push(source.clone());
+                }
+            }
+            for parent in &duplicate.parent_episode_ids {
+                if !parents.contains(parent) {
+                    parents.push(parent.clone());
+                }
+            }
+            transaction.execute(
+                "
+                INSERT OR IGNORE INTO episode_messages (
+                    episode_id, revision_id, associated_at, association_source
+                )
+                SELECT ?1, revision_id, associated_at, 'duplicate_consolidation'
+                FROM episode_messages
+                WHERE episode_id = ?2
+                ",
+                params![canonical.id, duplicate.id],
+            )?;
+            transaction.execute(
+                "UPDATE episode_aliases SET canonical_id = ?1 WHERE canonical_id = ?2",
+                params![canonical.id, duplicate.id],
+            )?;
+            transaction.execute(
+                "
+                INSERT INTO episode_aliases (alias_id, canonical_id, merged_at)
+                VALUES (?1, ?2, ?3)
+                ON CONFLICT(alias_id) DO UPDATE SET
+                    canonical_id = excluded.canonical_id,
+                    merged_at = excluded.merged_at
+                ",
+                params![duplicate.id, canonical.id, now()],
+            )?;
+            aliases.insert(duplicate.id.clone(), canonical.id.clone());
+        }
+        parents.retain(|parent| parent != &canonical.id && !duplicate_ids.contains(parent));
+        parents = dedup(parents);
+        let started_at = group
+            .iter()
+            .map(|episode| episode.started_at.as_str())
+            .min()
+            .unwrap_or(canonical.started_at.as_str());
+        let last_activity_at = group
+            .iter()
+            .map(|episode| episode.last_activity_at.as_str())
+            .max()
+            .unwrap_or(canonical.last_activity_at.as_str());
+        transaction.execute(
+            "
+            UPDATE episodes SET
+                started_at = ?2,
+                last_activity_at = ?3,
+                updated_at = ?4,
+                source_revision_ids_json = ?5,
+                related_episode_ids_json = ?6
+            WHERE id = ?1
+            ",
+            params![
+                canonical.id,
+                started_at,
+                last_activity_at,
+                now(),
+                serde_json::to_string(&sources)?,
+                serde_json::to_string(&parents)?
+            ],
+        )?;
+        for duplicate_id in duplicate_ids {
+            transaction.execute(
+                "DELETE FROM episode_messages WHERE episode_id = ?1",
+                params![duplicate_id],
+            )?;
+            transaction.execute("DELETE FROM episodes WHERE id = ?1", params![duplicate_id])?;
+        }
+    }
+
+    if !aliases.is_empty() {
+        let remaining_parents = {
+            let mut statement = transaction
+                .prepare("SELECT id, related_episode_ids_json FROM episodes ORDER BY id")?;
+            statement
+                .query_map([], |row| {
+                    Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+                })?
+                .collect::<rusqlite::Result<Vec<_>>>()?
+        };
+        for (episode_id, encoded_parents) in remaining_parents {
+            let original =
+                serde_json::from_str::<Vec<String>>(&encoded_parents).unwrap_or_default();
+            let mut resolved = Vec::with_capacity(original.len());
+            for parent in &original {
+                let parent = aliases
+                    .get(parent)
+                    .cloned()
+                    .unwrap_or_else(|| parent.clone());
+                if parent != episode_id {
+                    resolved.push(parent);
+                }
+            }
+            let resolved = dedup(resolved);
+            if resolved != original {
+                transaction.execute(
+                    "UPDATE episodes SET related_episode_ids_json = ?2, updated_at = ?3 WHERE id = ?1",
+                    params![episode_id, serde_json::to_string(&resolved)?, now()],
+                )?;
+            }
+        }
+    }
+    transaction.commit()?;
     Ok(())
 }
 
@@ -1120,6 +1409,24 @@ fn validate_config(config: &ReflectionConfig) -> Result<()> {
         anyhow::bail!("Reflection daily token limit cannot exceed {MAX_DAILY_TOKEN_LIMIT}");
     }
     Ok(())
+}
+
+fn read_projection_health(connection: &Connection, now: DateTime<Utc>) -> Result<ProjectionHealth> {
+    let episodes = read_episodes(connection, 1_000)?;
+    let hypotheses = read_hypotheses(connection, 1_000)?;
+    let last_lifecycle_review_at = connection
+        .query_row(
+            "SELECT value FROM reflection_meta WHERE key = 'last_lifecycle_review_at'",
+            [],
+            |row| row.get::<_, String>(0),
+        )
+        .optional()?;
+    Ok(lifecycle::projection_health(
+        &episodes,
+        &hypotheses,
+        last_lifecycle_review_at,
+        now,
+    ))
 }
 
 async fn persist_file(path: &PathBuf, content: &str) -> Result<()> {
@@ -1548,12 +1855,7 @@ fn append_state_sections(
     }
     let active_hypotheses = hypotheses
         .iter()
-        .filter(|hypothesis| {
-            matches!(
-                hypothesis.status,
-                HypothesisStatus::Tentative | HypothesisStatus::Working
-            )
-        })
+        .filter(|hypothesis| hypothesis.status.is_active())
         .collect::<Vec<_>>();
     if !active_hypotheses.is_empty() {
         output.push("<working-hypotheses>".to_owned());
@@ -1705,18 +2007,129 @@ fn ensure_episode_exists(connection: &Connection, id: &str) -> Result<()> {
     Ok(())
 }
 
-fn ensure_episode_title_is_new(connection: &Connection, title: &str) -> Result<()> {
-    let existing = connection
+fn find_episode_id_by_title(connection: &Connection, title: &str) -> Result<Option<String>> {
+    connection
         .query_row(
             "SELECT id FROM episodes WHERE lower(trim(title)) = lower(trim(?1)) LIMIT 1",
             params![title],
             |row| row.get::<_, String>(0),
         )
-        .optional()?;
-    if let Some(id) = existing {
+        .optional()
+        .map_err(Into::into)
+}
+
+fn ensure_episode_title_is_available(
+    connection: &Connection,
+    title: &str,
+    episode_id: &str,
+) -> Result<()> {
+    if let Some(existing_id) = find_episode_id_by_title(connection, title)?
+        && existing_id != episode_id
+    {
         anyhow::bail!(
-            "Episode title already exists as `{id}`; revise that exact Episode instead of creating a duplicate"
+            "Episode title already belongs to `{existing_id}`; revise or consolidate that exact Episode instead of renaming `{episode_id}` over it"
         );
+    }
+    Ok(())
+}
+
+fn resolve_episode_alias(connection: &Connection, id: &str) -> Result<String> {
+    let mut current = id.to_owned();
+    for _ in 0..16 {
+        let next = connection
+            .query_row(
+                "SELECT canonical_id FROM episode_aliases WHERE alias_id = ?1",
+                params![current],
+                |row| row.get::<_, String>(0),
+            )
+            .optional()?;
+        let Some(next) = next else {
+            return Ok(current);
+        };
+        if next == current {
+            anyhow::bail!("Episode alias cycle at `{current}`");
+        }
+        current = next;
+    }
+    anyhow::bail!("Episode alias chain is too deep for `{id}`")
+}
+
+fn expand_conversation_turns(
+    connection: &Connection,
+    revision_ids: &[String],
+) -> Result<Vec<String>> {
+    let mut expanded = dedup(revision_ids.to_vec());
+    let requested = expanded.clone();
+    for revision_id in requested {
+        let event = connection
+            .query_row(
+                "
+                SELECT role, related_revision_id
+                FROM conversation_events
+                WHERE revision_id = ?1
+                  AND kind IN ('message_user', 'message_assistant')
+                  AND retracted = 0
+                ORDER BY id DESC
+                LIMIT 1
+                ",
+                params![revision_id],
+                |row| {
+                    Ok((
+                        row.get::<_, Option<String>>(0)?,
+                        row.get::<_, Option<String>>(1)?,
+                    ))
+                },
+            )
+            .optional()?;
+        let Some((role, related_revision_id)) = event else {
+            continue;
+        };
+        match role.as_deref() {
+            Some("assistant") => {
+                if let Some(user_revision_id) = related_revision_id {
+                    expanded.push(user_revision_id);
+                }
+            }
+            Some("user") => {
+                let mut replies = connection.prepare(
+                    "
+                    SELECT revision_id
+                    FROM conversation_events
+                    WHERE kind = 'message_assistant'
+                      AND related_revision_id = ?1
+                      AND revision_id IS NOT NULL
+                      AND retracted = 0
+                    ORDER BY id
+                    ",
+                )?;
+                expanded.extend(
+                    replies
+                        .query_map(params![revision_id], |row| row.get::<_, String>(0))?
+                        .collect::<rusqlite::Result<Vec<_>>>()?,
+                );
+            }
+            _ => {}
+        }
+    }
+    Ok(dedup(expanded))
+}
+
+fn insert_episode_messages(
+    transaction: &Transaction<'_>,
+    episode_id: &str,
+    revision_ids: &[String],
+    associated_at: &str,
+    association_source: &str,
+) -> Result<()> {
+    for revision_id in revision_ids {
+        transaction.execute(
+            "
+            INSERT OR IGNORE INTO episode_messages (
+                episode_id, revision_id, associated_at, association_source
+            ) VALUES (?1, ?2, ?3, ?4)
+            ",
+            params![episode_id, revision_id, associated_at, association_source],
+        )?;
     }
     Ok(())
 }

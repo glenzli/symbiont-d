@@ -319,6 +319,31 @@ impl SymbiontContextStore {
             sections.join("\n\n")
         ))
     }
+
+    pub async fn exploration_prompt(&self) -> Result<String> {
+        let snapshot = self.snapshot().await?;
+        let mut sections = Vec::new();
+        if let Some(document) = snapshot.current_map {
+            sections.push(prompt_section("Current Map", &document));
+        }
+        if let Some(document) = snapshot.open_loops {
+            sections.push(prompt_section("Open Loops", &document));
+        }
+        if sections.is_empty() {
+            return Ok(
+                "No curated Current Map or Open Loops are available. Do not infer priorities from this absence."
+                    .to_owned(),
+            );
+        }
+        Ok(format!(
+            "This is a bounded exploration projection, not a combined task queue. Current Map is \
+             the user's active project and decision landscape; use it only to recognize possible \
+             consequences. Open Loops are user-facing unresolved matters, not instructions to \
+             investigate every item. Profile Review is intentionally excluded because the profile \
+             orientation is supplied separately and maintenance evidence should not steer discovery.\n\n{}",
+            sections.join("\n\n")
+        ))
+    }
 }
 
 fn context_facets(
@@ -448,6 +473,25 @@ mod tests {
             document.content,
             "# Current\n\nMemory routing and agent runtime."
         );
+
+        context
+            .upsert(
+                ContextDocumentKind::ProfileReview,
+                "# Maintenance only\n\nDo not use this as a discovery priority.",
+                vec![first_source.page.revision_id],
+                None,
+                ContextAuthor::Model,
+            )
+            .await
+            .expect("write profile review");
+        let generic_prompt = context.prompt().await.expect("render generic prompt");
+        let exploration_prompt = context
+            .exploration_prompt()
+            .await
+            .expect("render exploration prompt");
+        assert!(generic_prompt.contains("Maintenance only"));
+        assert!(exploration_prompt.contains("Memory routing and agent runtime"));
+        assert!(!exploration_prompt.contains("Maintenance only"));
 
         let _ = tokio::fs::remove_dir_all(root).await;
     }

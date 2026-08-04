@@ -20,6 +20,7 @@ export function initReflectionUi(state) {
   );
   const availability = document.querySelector("#reflection-availability");
   const runtimeState = document.querySelector("#reflection-runtime-state");
+  const healthState = document.querySelector("#reflection-health-state");
   const saveState = document.querySelector("#reflection-save-state");
   const runButton = document.querySelector("#run-reflection");
   const archive = document.querySelector("#reflection-archive");
@@ -45,6 +46,7 @@ export function initReflectionUi(state) {
     const runtime = state.reflection?.runtime || state.reflection;
     if (!runtime) return;
     runtimeState.textContent = reflectionStatus(runtime);
+    healthState.textContent = projectionHealth(state.reflection?.health);
     runButton.disabled = runtime.phase === "reflecting";
   }
 
@@ -318,8 +320,21 @@ function hypothesisState(value) {
       working: "工作中",
       contradicted: "已反证",
       superseded: "已替代",
+      stale: "待更新",
     }[value] || value
   );
+}
+
+function projectionHealth(health) {
+  if (!health) return "等待数据健康检查";
+  if (health.hypothesesMissingRevisit) {
+    return `${health.hypothesesMissingRevisit} 条判断缺少复查时间`;
+  }
+  const due =
+    (health.hypothesesDueForReview || 0) +
+    (health.topicsDueForReview || 0);
+  if (due) return `${due} 项已有必要重新检查`;
+  return `${health.activeEpisodeCount || 0} 个活跃主题 · ${health.activeHypothesisCount || 0} 条有效判断`;
 }
 
 function followUpStatus(value) {

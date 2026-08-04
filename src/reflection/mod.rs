@@ -1,3 +1,4 @@
+mod lifecycle;
 mod store;
 mod worker;
 
@@ -75,6 +76,7 @@ impl EpisodeState {
 pub enum HypothesisStatus {
     Tentative,
     Working,
+    Stale,
     Contradicted,
     Superseded,
 }
@@ -84,6 +86,7 @@ impl HypothesisStatus {
         match value {
             "tentative" => Some(Self::Tentative),
             "working" => Some(Self::Working),
+            "stale" => Some(Self::Stale),
             "contradicted" => Some(Self::Contradicted),
             "superseded" => Some(Self::Superseded),
             _ => None,
@@ -94,9 +97,14 @@ impl HypothesisStatus {
         match self {
             Self::Tentative => "tentative",
             Self::Working => "working",
+            Self::Stale => "stale",
             Self::Contradicted => "contradicted",
             Self::Superseded => "superseded",
         }
+    }
+
+    pub fn is_active(self) -> bool {
+        matches!(self, Self::Tentative | Self::Working)
     }
 }
 
@@ -168,6 +176,13 @@ pub struct ConversationEpisode {
     pub updated_at: String,
     pub source_revision_ids: Vec<String>,
     pub parent_episode_ids: Vec<String>,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct EpisodeAlias {
+    pub alias_id: String,
+    pub canonical_id: String,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -260,10 +275,30 @@ impl Default for ReflectionRuntime {
 pub struct ReflectionSnapshot {
     pub config: ReflectionConfig,
     pub runtime: ReflectionRuntime,
+    pub health: ProjectionHealth,
     pub episodes: Vec<ConversationEpisode>,
     pub hypotheses: Vec<WorkingHypothesis>,
     pub follow_ups: Vec<DeferredFollowUp>,
     pub recent_runs: Vec<ReflectionRun>,
+}
+
+#[derive(Clone, Debug, Default, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ProjectionHealth {
+    pub active_episode_count: usize,
+    pub active_hypothesis_count: usize,
+    pub topics_due_for_review: usize,
+    pub hypotheses_due_for_review: usize,
+    pub hypotheses_missing_revisit: usize,
+    pub last_lifecycle_review_at: Option<String>,
+}
+
+impl ProjectionHealth {
+    pub fn requires_review(&self) -> bool {
+        self.topics_due_for_review > 0
+            || self.hypotheses_due_for_review > 0
+            || self.hypotheses_missing_revisit > 0
+    }
 }
 
 #[derive(Clone, Debug)]

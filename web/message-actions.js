@@ -1,4 +1,4 @@
-import { renderIcons } from "/icons.js";
+import { renderIcons } from "./icons.js";
 
 const ACTIONS = {
   copy: { icon: "copy", label: "复制文本" },
@@ -8,6 +8,29 @@ const ACTIONS = {
   recall: { icon: "undo-2", label: "撤回本条及后续对话", destructive: true },
   retry: { icon: "rotate-cw", label: "重新发送" },
 };
+
+export function availableMessageActions({
+  role,
+  state = "delivered",
+  hasRevision = false,
+  hasContent = false,
+  busy = false,
+  actionBusy = false,
+}) {
+  const actions = [];
+  const isDelivered = ["delivered", "settled", "reacted"].includes(state);
+
+  if (!actionBusy && hasRevision && isDelivered) actions.push("quote");
+  if (!actionBusy && hasContent) actions.push("copy");
+  if (role !== "user" || busy || actionBusy) return actions;
+
+  if (state === "failed" || state === "stopped") {
+    actions.push("edit", "retry", "delete");
+  } else if (isDelivered) {
+    actions.push("edit", "recall");
+  }
+  return actions;
+}
 
 export function initMessageActions({ conversation, isBusy, perform }) {
   const entries = new WeakMap();
@@ -78,7 +101,6 @@ export function initMessageActions({ conversation, isBusy, perform }) {
     const stateLabel = foot.querySelector(".message-state");
     const actions = foot.querySelector(".message-actions");
     const state = states.get(message) || "delivered";
-    const isDelivered = ["delivered", "settled", "reacted"].includes(state);
     const entry = entries.get(message);
     const actionBusy = message.dataset.actionBusy === "true";
     stateLabel.textContent =
@@ -96,23 +118,15 @@ export function initMessageActions({ conversation, isBusy, perform }) {
     stateLabel.title = failures.get(message) || "";
     message.classList.toggle("message-failed", state === "failed");
     actions.replaceChildren();
-
-    if (!actionBusy && entry?.revisionId && isDelivered) {
-      actions.append(actionButton("quote"));
-    }
-    if (!actionBusy && String(entry?.content || "").trim()) {
-      actions.append(actionButton("copy"));
-    }
-    if (
-      message.dataset.role === "user" &&
-      !isBusy() &&
-      !actionBusy
-    ) {
-      if (state === "failed" || state === "stopped") {
-        actions.append(actionButton("retry"), actionButton("delete"));
-      } else if (isDelivered) {
-        actions.append(actionButton("edit"), actionButton("recall"));
-      }
+    for (const action of availableMessageActions({
+      role: message.dataset.role,
+      state,
+      hasRevision: Boolean(entry?.revisionId),
+      hasContent: Boolean(String(entry?.content || "").trim()),
+      busy: isBusy(),
+      actionBusy,
+    })) {
+      actions.append(actionButton(action));
     }
     renderIcons(actions);
     foot.hidden = ![

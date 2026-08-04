@@ -37,6 +37,7 @@ pub struct ServiceTierInfo {
 #[derive(Clone, Copy, Debug, Deserialize, Eq, Hash, Ord, PartialEq, PartialOrd, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ComputeLane {
+    Sense,
     Observe,
     Conversation,
     Investigate,
@@ -59,8 +60,20 @@ pub struct LaneConfig {
     pub service_tier: Option<String>,
 }
 
+impl Default for LaneConfig {
+    fn default() -> Self {
+        Self {
+            model: String::new(),
+            effort: String::new(),
+            service_tier: None,
+        }
+    }
+}
+
 #[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct LaneConfigs {
+    #[serde(default)]
+    pub sense: LaneConfig,
     pub observe: LaneConfig,
     pub conversation: LaneConfig,
     pub investigate: LaneConfig,
@@ -134,6 +147,7 @@ impl ModelInfo {
 impl ComputeLane {
     pub fn as_str(self) -> &'static str {
         match self {
+            Self::Sense => "sense",
             Self::Observe => "observe",
             Self::Conversation => "conversation",
             Self::Investigate => "investigate",
@@ -143,6 +157,7 @@ impl ComputeLane {
 
     pub fn parse(value: &str) -> Option<Self> {
         match value {
+            "sense" => Some(Self::Sense),
             "observe" => Some(Self::Observe),
             "conversation" | "auto" => Some(Self::Conversation),
             "investigate" | "deep" => Some(Self::Investigate),
@@ -153,10 +168,11 @@ impl ComputeLane {
 
     fn rank(self) -> u8 {
         match self {
-            Self::Observe => 0,
-            Self::Conversation => 1,
-            Self::Investigate => 2,
-            Self::Critical => 3,
+            Self::Sense => 0,
+            Self::Observe => 1,
+            Self::Conversation => 2,
+            Self::Investigate => 3,
+            Self::Critical => 4,
         }
     }
 }
@@ -164,6 +180,7 @@ impl ComputeLane {
 impl ComputeConfig {
     pub fn lane(&self, lane: ComputeLane) -> &LaneConfig {
         match lane {
+            ComputeLane::Sense => &self.lanes.sense,
             ComputeLane::Observe => &self.lanes.observe,
             ComputeLane::Conversation => &self.lanes.conversation,
             ComputeLane::Investigate => &self.lanes.investigate,
@@ -181,6 +198,7 @@ impl ComputeConfig {
             .find(|model| model.is_default)
             .or_else(|| catalog.first())
             .context("Codex returned an empty model catalog")?;
+        let sense = preferred_model(catalog, &["gpt-5.4-mini", "gpt-5.6-luna"]).unwrap_or(fallback);
         let observe =
             preferred_model(catalog, &["gpt-5.6-luna", "gpt-5.4-mini"]).unwrap_or(fallback);
         let conversation =
@@ -191,6 +209,7 @@ impl ComputeConfig {
             routing: RoutingMode::BoundedAuto,
             show_model: true,
             lanes: LaneConfigs {
+                sense: lane_default(sense, &["low", "medium"]),
                 observe: lane_default(observe, &["medium", "low"]),
                 conversation: lane_default(conversation, &["medium", "low"]),
                 investigate: lane_default(deep, &["high", "xhigh", "medium"]),
@@ -208,12 +227,16 @@ impl ComputeStore {
         let defaults = ComputeConfig::defaults(&catalog)?;
         let config = match fs::read_to_string(&path).await {
             Ok(content) => match toml::from_str::<ComputeConfig>(&content) {
-                Ok(config) if validate(&config, &catalog).is_ok() => config,
-                Ok(_) => {
-                    warn!(
-                        "compute configuration references unavailable model settings; using defaults"
-                    );
-                    defaults
+                Ok(config) => {
+                    let config = hydrate_legacy_sense(config, &defaults);
+                    if validate(&config, &catalog).is_ok() {
+                        config
+                    } else {
+                        warn!(
+                            "compute configuration references unavailable model settings; using defaults"
+                        );
+                        defaults
+                    }
                 }
                 Err(error) => {
                     warn!(%error, "compute configuration could not be parsed; using defaults");
@@ -244,6 +267,8 @@ impl ComputeStore {
     }
 
     pub async fn update(&self, config: ComputeConfig) -> Result<ComputeConfig> {
+        let defaults = ComputeConfig::defaults(&self.catalog)?;
+        let config = hydrate_legacy_sense(config, &defaults);
         validate(&config, &self.catalog)?;
         persist(&self.path, &config).await?;
         *self.config.write().await = config.clone();
@@ -253,6 +278,7 @@ impl ComputeStore {
 
 fn validate(config: &ComputeConfig, catalog: &[ModelInfo]) -> Result<()> {
     for lane in [
+        ComputeLane::Sense,
         ComputeLane::Observe,
         ComputeLane::Conversation,
         ComputeLane::Investigate,
@@ -295,6 +321,13 @@ fn validate(config: &ComputeConfig, catalog: &[ModelInfo]) -> Result<()> {
         }
     }
     Ok(())
+}
+
+fn hydrate_legacy_sense(mut config: ComputeConfig, defaults: &ComputeConfig) -> ComputeConfig {
+    if config.lanes.sense.model.trim().is_empty() || config.lanes.sense.effort.trim().is_empty() {
+        config.lanes.sense = defaults.lanes.sense.clone();
+    }
+    config
 }
 
 async fn persist(path: &PathBuf, config: &ComputeConfig) -> Result<()> {

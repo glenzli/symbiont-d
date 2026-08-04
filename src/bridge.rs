@@ -17,7 +17,7 @@ use crate::{
     continuity::{ContinuityHost, ImageAssetPage},
     curiosity::{CuriosityStore, HunchState},
     profile::ProfileStore,
-    reflection::{HypothesisStatus, ReflectionStore},
+    reflection::ReflectionStore,
     symbiont_context::SymbiontContextStore,
 };
 
@@ -272,12 +272,7 @@ impl CodexBridge {
                 .collect(),
             working_hypotheses: hypotheses
                 .into_iter()
-                .filter(|hypothesis| {
-                    matches!(
-                        hypothesis.status,
-                        HypothesisStatus::Tentative | HypothesisStatus::Working
-                    )
-                })
+                .filter(|hypothesis| hypothesis.status.is_active())
                 .take(MAX_SIGNALS)
                 .map(|hypothesis| BridgeSignal {
                     text: truncate(&hypothesis.statement, MAX_SIGNAL_CHARS),

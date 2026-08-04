@@ -4,8 +4,9 @@ import {
   responseJson,
 } from "/presentation.js";
 import { renderRichText } from "/rich-text.js";
+import { manualCompletionSince } from "/exploration-receipt.js";
 
-export function initExplorationUi(state) {
+export function initExplorationUi(state, { announceManualSilence } = {}) {
   const dialog = document.querySelector("#exploration-dialog");
   const status = document.querySelector("#exploration-dialog-status");
   const history = document.querySelector("#exploration-history");
@@ -19,6 +20,7 @@ export function initExplorationUi(state) {
   let triggering = false;
   let queued = false;
   let budgetResolver = null;
+  let pendingManualCompletion = null;
 
   async function load() {
     status.textContent = "正在读取";
@@ -76,6 +78,9 @@ export function initExplorationUi(state) {
         payload = await requestExploration(true);
       }
       if (payload.accepted) {
+        pendingManualCompletion = {
+          priorRunAt: state.exploration?.lastRunAt || null,
+        };
         queued = true;
         window.setTimeout(() => {
           queued = false;
@@ -154,11 +159,22 @@ export function initExplorationUi(state) {
   return {
     trigger,
     runtimeUpdated() {
-      const runAt = state.exploration?.lastRunAt || null;
-      if (state.exploration?.phase === "exploring") queued = false;
+      const exploration = state.exploration;
+      const runAt = exploration?.lastRunAt || null;
+      if (exploration?.phase === "exploring") queued = false;
+      if (pendingManualCompletion) {
+        const completion = manualCompletionSince(
+          exploration,
+          pendingManualCompletion.priorRunAt,
+        );
+        if (completion) {
+          pendingManualCompletion = null;
+          if (completion.outcome === "silent") announceManualSilence?.(completion);
+        }
+      }
       renderQuickRun();
       if (!dialog.open) return;
-      status.textContent = currentStatus(state.exploration);
+      status.textContent = currentStatus(exploration);
       if (runAt && runAt !== lastLoadedRunAt) load();
     },
   };

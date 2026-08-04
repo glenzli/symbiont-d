@@ -28,6 +28,7 @@ const INITIAL_DELAY: Duration = Duration::from_secs(45);
 const RETRY_DELAY: Duration = Duration::from_secs(60);
 const IDLE_DELAY: Duration = Duration::from_secs(300);
 const PROFILE_REVIEW_INTERVAL_HOURS: i64 = 24;
+const OPERATIONAL_REVIEW_INTERVAL_HOURS: i64 = 24;
 const MAX_SOURCE_EVENTS: usize = 30;
 const MAX_EVENT_CHARS: usize = 1_200;
 const MAX_SOURCE_BUNDLE_CHARS: usize = 18_000;
@@ -36,6 +37,8 @@ const MAX_SOURCE_BUNDLE_CHARS: usize = 18_000;
 #[serde(rename_all = "camelCase")]
 struct ContextMaintenanceCheckpoint {
     assessed_through: Option<String>,
+    #[serde(default)]
+    operational_reviewed_at: Option<String>,
 }
 
 struct ContextMaintenanceCursor {
@@ -74,6 +77,8 @@ impl ContextMaintenanceCursor {
         let content = {
             let mut checkpoint = self.checkpoint.write().await;
             checkpoint.assessed_through = Some(revision_id.to_owned());
+            checkpoint.operational_reviewed_at =
+                Some(Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true));
             serde_json::to_vec_pretty(&*checkpoint)?
         };
         if let Some(parent) = self.path.parent() {
@@ -83,6 +88,18 @@ impl ContextMaintenanceCursor {
         fs::write(&temporary, content).await?;
         fs::rename(temporary, &self.path).await?;
         Ok(())
+    }
+
+    async fn operational_review_due(&self) -> bool {
+        let checkpoint = self.checkpoint.read().await;
+        let Some(reviewed_at) = checkpoint.operational_reviewed_at.as_deref() else {
+            return true;
+        };
+        let Ok(reviewed_at) = DateTime::parse_from_rfc3339(reviewed_at) else {
+            return true;
+        };
+        Utc::now() - reviewed_at.with_timezone(&Utc)
+            >= chrono::Duration::hours(OPERATIONAL_REVIEW_INTERVAL_HOURS)
     }
 }
 
@@ -209,7 +226,7 @@ async fn maintain_one(
         .is_some_and(|document| document.has_source(latest_revision))
         || already_assessed;
 
-    if !map_is_current || !loops_are_current {
+    if !map_is_current || !loops_are_current || assessed_through.operational_review_due().await {
         let source_bundle = conversation_source_bundle(&recent, &snapshot);
         return maintain_operational_context(
             codex,
@@ -525,6 +542,7 @@ mod tests {
             .await
             .expect("restore cursor");
         assert!(restored.is_assessed("rev_latest").await);
+        assert!(!restored.operational_review_due().await);
         let _ = tokio::fs::remove_dir_all(root).await;
     }
 }

@@ -1,5 +1,4 @@
 import { formatTokens, responseJson } from "/presentation.js";
-import { renderIcons } from "/icons.js";
 
 export function initReconciliationUi(state) {
   const dialog = document.querySelector("#reconciliation-dialog");
@@ -19,6 +18,7 @@ export function initReconciliationUi(state) {
   const budgetLimit = document.querySelector("#reconciliation-budget-limit");
   let previousPhase = null;
   let loading = false;
+  let pendingMode = null;
 
   openButton.addEventListener("click", async () => {
     if (!dialog.open) dialog.showModal();
@@ -53,7 +53,8 @@ export function initReconciliationUi(state) {
   }
 
   async function triggerPreview() {
-    previewButton.disabled = true;
+    pendingMode = "preview";
+    renderActionState(state.reconciliation?.runtime || state.reconciliation);
     status.textContent = "正在加入检查队列";
     try {
       const result = await responseJson(
@@ -61,16 +62,19 @@ export function initReconciliationUi(state) {
         "无法开始检查",
       );
       if (!result.accepted) throw new Error("整理任务正在运行或队列已满");
+      render();
     } catch (error) {
+      pendingMode = null;
       status.textContent = error.message;
-      previewButton.disabled = false;
+      renderActionState(state.reconciliation?.runtime || state.reconciliation);
     }
   }
 
   async function applyLatest(overrideTokenLimit) {
     const preview = state.reconciliation?.latestPreview;
     if (!preview) return;
-    applyButton.disabled = true;
+    pendingMode = "apply";
+    renderActionState(state.reconciliation?.runtime || state.reconciliation);
     status.textContent = "正在加入应用队列";
     try {
       const result = await responseJson(
@@ -82,6 +86,7 @@ export function initReconciliationUi(state) {
         "无法应用建议",
       );
       if (result.requiresConfirmation) {
+        pendingMode = null;
         budgetUsed.textContent = formatTokens(result.backgroundTokensToday || 0);
         budgetLimit.textContent = formatTokens(result.dailyTokenLimit || 0);
         budgetDialog.showModal();
@@ -89,9 +94,11 @@ export function initReconciliationUi(state) {
         return;
       }
       if (!result.accepted) throw new Error("整理任务正在运行或队列已满");
-    } catch (error) {
-      status.textContent = error.message;
       render();
+    } catch (error) {
+      pendingMode = null;
+      status.textContent = error.message;
+      renderActionState(state.reconciliation?.runtime || state.reconciliation);
     }
   }
 
@@ -109,7 +116,8 @@ export function initReconciliationUi(state) {
             run.previewRunId === preview.id,
         )
       : false;
-    status.textContent = runtimeText(runtime);
+    if (runtime.phase !== "idle" && !isRunning(runtime)) pendingMode = null;
+    status.textContent = statusText(runtime);
     candidateCount.textContent = `${runtime.candidateCount || 0} 页`;
     lastRun.textContent = runtime.lastRunAt
       ? formatDate(runtime.lastRunAt)
@@ -121,11 +129,51 @@ export function initReconciliationUi(state) {
         ? "校准异常"
         : formatDate(memoryIndex.lastSyncAt)
       : "尚未运行";
-    const running = ["previewing", "applying"].includes(runtime.phase);
-    previewButton.disabled = running;
-    applyButton.disabled =
-      running || !preview?.proposals?.length || applied || preview.status !== "completed";
+    renderActionState(runtime, preview, applied);
     renderContent(snapshot, applied);
+  }
+
+  function renderActionState(runtime, preview, applied) {
+    const phase = runtime?.phase;
+    const running = isRunning(runtime);
+    if (running) pendingMode = null;
+    const waitingForPreview = pendingMode === "preview";
+    const waitingForApply = pendingMode === "apply";
+    const previewBusy = phase === "previewing" || waitingForPreview;
+    const applyBusy = phase === "applying" || waitingForApply;
+    setActionButton(
+      previewButton,
+      phase === "previewing" ? "检查中" : waitingForPreview ? "等待检查" : "检查",
+      previewBusy,
+    );
+    setActionButton(
+      applyButton,
+      phase === "applying" ? "应用中" : waitingForApply ? "等待应用" : "应用建议",
+      applyBusy,
+    );
+    previewButton.disabled = running || waitingForPreview || waitingForApply;
+    applyButton.disabled =
+      running ||
+      waitingForPreview ||
+      waitingForApply ||
+      !preview?.proposals?.length ||
+      applied ||
+      preview?.status !== "completed";
+  }
+
+  function setActionButton(button, label, busy) {
+    button.querySelector(".reconciliation-action-label").textContent = label;
+    button.querySelector(".reconciliation-action-progress").hidden = !busy;
+    button.dataset.busy = String(busy);
+    button.setAttribute("aria-busy", String(busy));
+  }
+
+  function statusText(runtime) {
+    if (!isRunning(runtime) && runtime?.phase === "idle") {
+      if (pendingMode === "preview") return "已加入检查队列";
+      if (pendingMode === "apply") return "已加入应用队列";
+    }
+    return runtimeText(runtime || {});
   }
 
   function renderContent(snapshot, applied) {
@@ -168,13 +216,17 @@ export function initReconciliationUi(state) {
     const runtime = state.reconciliation?.runtime || state.reconciliation;
     if (!runtime) return;
     const wasRunning = ["previewing", "applying"].includes(previousPhase);
-    const running = ["previewing", "applying"].includes(runtime.phase);
+    const running = isRunning(runtime);
     previousPhase = runtime.phase;
     render();
     if (dialog.open && wasRunning && !running) load();
   }
 
   return { render, runtimeUpdated };
+}
+
+function isRunning(runtime) {
+  return ["previewing", "applying"].includes(runtime?.phase);
 }
 
 function renderProposal(proposal) {

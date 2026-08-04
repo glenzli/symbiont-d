@@ -16,6 +16,8 @@ const MAX_HUNCH_FIELD_CHARS: usize = 4_000;
 const MAX_HUNCHES: u32 = 100;
 const MAX_ACTIVE_PROMPT_HUNCHES: usize = 12;
 const MAX_CLOSED_PROMPT_HUNCHES: usize = 4;
+const MAX_EXPLORATION_HUNCHES: usize = 6;
+const MAX_EXPLORATION_CONSTRAINTS: usize = 8;
 const MAX_PROMPT_FIELD_CHARS: usize = 800;
 const FEEDBACK_COOLDOWN_HOURS: i64 = 24;
 
@@ -537,6 +539,52 @@ impl CuriosityStore {
         Ok(prompt)
     }
 
+    pub async fn exploration_prompt(&self) -> Result<String> {
+        let snapshot = self.snapshot().await?;
+        let ready = snapshot
+            .hunches
+            .iter()
+            .filter(|hunch| hunch.state.is_active() && hunch.attention == HunchAttention::Ready)
+            .take(MAX_EXPLORATION_HUNCHES)
+            .map(prompt_hunch)
+            .collect::<Vec<_>>();
+        let constrained = snapshot
+            .hunches
+            .iter()
+            .filter(|hunch| hunch.state.is_active() && hunch.attention != HunchAttention::Ready)
+            .take(MAX_EXPLORATION_CONSTRAINTS)
+            .map(|hunch| {
+                format!(
+                    "- revision `{}` [{} until {}]: {}",
+                    hunch.revision_id,
+                    hunch.attention.as_str(),
+                    hunch.eligible_after.as_deref().unwrap_or("state changes"),
+                    truncate(&hunch.question, 240)
+                )
+            })
+            .collect::<Vec<_>>();
+
+        let mut prompt = vec![
+            "Curiosity Map contributes only Symbiont-owned investigation candidates. These are optional questions, not user priorities or a requirement to stay on known themes. A credible external candidate may be unrelated. Open Loops are supplied separately and should not be copied into new Hunches.".to_owned(),
+        ];
+        if ready.is_empty() {
+            prompt.push("No Hunch is currently ready for exploration.".to_owned());
+        } else {
+            prompt.push("<ready-investigation-candidates>".to_owned());
+            prompt.push(ready.join("\n\n"));
+            prompt.push("</ready-investigation-candidates>".to_owned());
+        }
+        if !constrained.is_empty() {
+            prompt.push(
+                "<excluded-investigations>Do not select these merely because they appear here."
+                    .to_owned(),
+            );
+            prompt.push(constrained.join("\n"));
+            prompt.push("</excluded-investigations>".to_owned());
+        }
+        Ok(prompt.join("\n\n"))
+    }
+
     async fn read_revision(&self, revision_id: &str) -> Result<Option<Hunch>> {
         let mut pages = self
             .continuity
@@ -847,6 +895,12 @@ mod tests {
         let prompt = curiosity.prompt().await.expect("render prompt");
         assert!(prompt.contains("not the user's profile"));
         assert!(prompt.contains(&created.page_id));
+        let exploration_prompt = curiosity
+            .exploration_prompt()
+            .await
+            .expect("render exploration prompt");
+        assert!(exploration_prompt.contains("ready-investigation-candidates"));
+        assert!(exploration_prompt.contains(&created.page_id));
 
         drop(curiosity);
         drop(continuity);
@@ -967,6 +1021,13 @@ mod tests {
         assert_eq!(snapshot.hunches[0].attention, HunchAttention::Cooldown);
         assert!(snapshot.hunches[0].eligible_after.is_some());
         assert_eq!(awaiting.page_id, created.page_id);
+        let exploration_prompt = curiosity
+            .exploration_prompt()
+            .await
+            .expect("render constrained exploration prompt");
+        assert!(exploration_prompt.contains("No Hunch is currently ready"));
+        assert!(exploration_prompt.contains("excluded-investigations"));
+        assert!(exploration_prompt.contains("cooldown"));
 
         let _ = tokio::fs::remove_dir_all(root).await;
     }

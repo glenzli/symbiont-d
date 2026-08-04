@@ -5,26 +5,29 @@ use std::{
 };
 
 use super::{
-    autonomous::{ExplorationEvidence, ExplorationScoutFinding, review_prompt, scout_prompt},
+    autonomous::{
+        ExplorationEvidence, ExplorationScoutFinding, review_prompt, scout_prompt, sensing_prompt,
+    },
     client::{
         autonomous_response_is_superseded, context_revision_ids, extract_completed_response_text,
         extract_final_agent_message, generated_image_output, remember_generated_image,
         text_and_image_input_items,
     },
     prompts::{
-        developer_instructions, interaction_reflection_prompt, memory_reconciliation_prompt,
-        pcp_maintenance_worker_prompt, summary_maintenance_prompt,
+        context_fragments, developer_instructions, interaction_reflection_prompt,
+        memory_reconciliation_prompt, pcp_maintenance_worker_prompt, summary_maintenance_prompt,
     },
     tools::SymbiontTools,
     trace::observable_item_event,
 };
 use crate::{
+    compute::ComputeLane,
     compute_policy::ComputePolicyStore,
     continuity::{ContinuityHost, MessageLinks},
     curiosity::CuriosityStore,
     exploration::{ExplorationIntentQueue, ExplorationIntentReceiver},
     memory::MemoryRole,
-    profile::{CalibrationMode, ProfileStore, SetupStatus},
+    profile::{CalibrationMode, ProfileSnapshot, ProfileStore, SetupStatus},
     reconciliation::ReconciliationMode,
     reflection::ReflectionStore,
     symbiont_context::SymbiontContextStore,
@@ -183,6 +186,68 @@ fn autonomous_scout_sees_only_its_read_only_tool_surface() {
             "search_pages",
             "read_pages"
         ]
+    );
+}
+
+#[test]
+fn ambient_sensing_sees_only_a_temporary_candidate_surface() {
+    let specs = SymbiontTools::sensing_specifications();
+    assert_eq!(specs.as_array().unwrap().len(), 1);
+    assert_eq!(specs[0]["name"], "symbiont");
+    let symbiont = specs[0]["tools"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter_map(|tool| tool["name"].as_str())
+        .collect::<Vec<_>>();
+    assert_eq!(symbiont, vec!["submit_sensing_candidates", "fetch_url"]);
+
+    let prompt = sensing_prompt("<silent/>");
+    assert!(prompt.contains("not memory"));
+    assert!(prompt.contains("submit_sensing_candidates"));
+    let candidate_schema =
+        &specs[0]["tools"][0]["inputSchema"]["properties"]["candidates"]["items"];
+    assert_eq!(
+        candidate_schema["required"],
+        json!(["title", "summary", "source_class", "sources"])
+    );
+    assert!(candidate_schema["properties"]["possible_connection"].is_object());
+    assert!(candidate_schema["properties"].get("relevance").is_none());
+}
+
+#[test]
+fn ambient_sensing_does_not_receive_the_user_orientation() {
+    let profile = ProfileSnapshot {
+        status: SetupStatus::Ready,
+        mode: None,
+        orientation: "A deliberately distinctive private orientation".to_owned(),
+        updated_at: None,
+    };
+    let sensing = context_fragments(
+        ComputeLane::Sense,
+        false,
+        &profile,
+        "rotating intake context",
+        None,
+        None,
+    );
+    let observing = context_fragments(
+        ComputeLane::Observe,
+        false,
+        &profile,
+        "bounded exploration context",
+        None,
+        None,
+    );
+
+    assert!(!sensing.iter().any(|fragment| {
+        fragment.source == "symbiont.profile"
+            || fragment.value.contains("distinctive private orientation")
+    }));
+    assert!(
+        observing
+            .iter()
+            .any(|fragment| fragment.source == "symbiont.profile")
     );
 }
 
@@ -365,6 +430,8 @@ fn reflection_prompt_preserves_facts_uncertainty_and_profile_boundaries() {
     assert!(prompt.contains("without scores or fixed message thresholds"));
     assert!(prompt.contains("Adjacency is not Topic evidence"));
     assert!(prompt.contains("message_revision_ids"));
+    assert!(prompt.contains("direct counterparts"));
+    assert!(prompt.contains("cite assistant replies only when used"));
     assert!(prompt.contains("same Page may contribute to several Topics"));
     assert!(prompt.contains("never promote temporary behavior directly"));
     assert!(prompt.contains("publication gate will still decide whether to speak"));

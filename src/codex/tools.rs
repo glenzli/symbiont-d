@@ -332,13 +332,13 @@ impl SymbiontTools {
                                     "items": {"type": "string"},
                                     "minItems": 1,
                                     "maxItems": 50,
-                                    "description": "Small set of exact evidence Revisions supporting the current Topic summary."
+                                    "description": "Small set of exact evidence Revisions supporting the current Topic summary. User intent remains authoritative; include an assistant Revision only when its analysis, evidence, constraint, or correction is actually used by the summary."
                                 },
                                 "message_revision_ids": {
                                     "type": "array",
                                     "items": {"type": "string"},
                                     "maxItems": 50,
-                                    "description": "Original conversation Revisions that belong in this Topic timeline. This membership accumulates and is distinct from summary evidence; a Revision may belong to several Topics."
+                                    "description": "Original conversation Revisions that belong in this Topic timeline. This membership accumulates and is distinct from summary evidence; the host automatically includes each selected message's direct user-assistant counterpart when present, and a Revision may belong to several Topics."
                                 },
                                 "parent_episode_ids": {
                                     "type": "array",
@@ -373,7 +373,7 @@ impl SymbiontTools {
                                 },
                                 "status": {
                                     "type": "string",
-                                    "enum": ["tentative", "working", "contradicted", "superseded"]
+                                    "enum": ["tentative", "working", "stale", "contradicted", "superseded"]
                                 },
                                 "horizon": {
                                     "type": "string",
@@ -381,7 +381,7 @@ impl SymbiontTools {
                                 },
                                 "revisit_after": {
                                     "type": "string",
-                                    "description": "Optional RFC 3339 time after which this interpretation deserves another look."
+                                    "description": "RFC 3339 review time. Required by the Host for tentative or working hypotheses; omit it only when retiring the hypothesis as stale, contradicted, or superseded."
                                 },
                                 "source_revision_ids": {
                                     "type": "array",
@@ -479,6 +479,70 @@ impl SymbiontTools {
                                 "strongest_counterpoint", "source_revision_ids",
                                 "related_hunch_revision_ids"
                             ],
+                            "additionalProperties": false
+                        }
+                    },
+                    {
+                        "type": "function",
+                        "name": "submit_sensing_candidates",
+                        "description": "During low-cost ambient sensing only, place one to three short-lived external-signal candidates into a private review pool. This does not create memory, a Hunch, an action, or a user-visible message. A stronger stage will independently decide whether any candidate is worth pursuing.",
+                        "inputSchema": {
+                            "type": "object",
+                            "properties": {
+                                "candidates": {
+                                    "type": "array",
+                                    "minItems": 1,
+                                    "maxItems": 3,
+                                    "items": {
+                                        "type": "object",
+                                        "properties": {
+                                            "title": {
+                                                "type": "string",
+                                                "maxLength": 240,
+                                                "description": "A specific external development, not a broad topic."
+                                            },
+                                            "summary": {
+                                                "type": "string",
+                                                "maxLength": 1000,
+                                                "description": "A compact factual account of the development."
+                                            },
+                                            "source_class": {
+                                                "type": "string",
+                                                "enum": [
+                                                    "research", "products_and_tools",
+                                                    "projects_and_ecosystems",
+                                                    "institutions_and_policy",
+                                                    "industry_and_markets", "culture_and_ideas",
+                                                    "open_discovery"
+                                                ],
+                                                "description": "One broad intake class used for source diversity, not a detailed topic taxonomy."
+                                            },
+                                            "possible_connection": {
+                                                "type": "string",
+                                                "maxLength": 800,
+                                                "description": "Optional tentative reason this could connect to the user's work or thinking. Omit it when no honest connection is apparent."
+                                            },
+                                            "sources": {
+                                                "type": "array",
+                                                "minItems": 1,
+                                                "maxItems": 3,
+                                                "items": {
+                                                    "type": "object",
+                                                    "properties": {
+                                                        "url": {"type": "string", "maxLength": 900},
+                                                        "detail": {"type": "string", "maxLength": 800}
+                                                    },
+                                                    "required": ["url", "detail"],
+                                                    "additionalProperties": false
+                                                }
+                                            }
+                                        },
+                                        "required": ["title", "summary", "source_class", "sources"],
+                                        "additionalProperties": false
+                                    }
+                                }
+                            },
+                            "required": ["candidates"],
                             "additionalProperties": false
                         }
                     },
@@ -995,6 +1059,35 @@ impl SymbiontTools {
         specifications
     }
 
+    pub(super) fn sensing_specifications() -> Value {
+        let mut specifications = Self::specifications();
+        let Some(namespaces) = specifications.as_array_mut() else {
+            return specifications;
+        };
+        for namespace in namespaces {
+            let allowed = match namespace.get("name").and_then(Value::as_str) {
+                Some("symbiont") => &["submit_sensing_candidates", "fetch_url"][..],
+                _ => &[][..],
+            };
+            if let Some(tools) = namespace.get_mut("tools").and_then(Value::as_array_mut) {
+                tools.retain(|tool| {
+                    tool.get("name")
+                        .and_then(Value::as_str)
+                        .is_some_and(|name| allowed.contains(&name))
+                });
+            }
+        }
+        if let Some(namespaces) = specifications.as_array_mut() {
+            namespaces.retain(|namespace| {
+                namespace
+                    .get("tools")
+                    .and_then(Value::as_array)
+                    .is_some_and(|tools| !tools.is_empty())
+            });
+        }
+        specifications
+    }
+
     pub(super) fn pcp_maintenance_specifications() -> Value {
         json!([{
             "type": "namespace",
@@ -1119,6 +1212,11 @@ impl SymbiontTools {
             && !matches!(tool, "submit_exploration_finding" | "fetch_url")
         {
             anyhow::bail!("{tool} is outside the read-only autonomous reconnaissance boundary");
+        }
+        if run_origin == "ambient_sense"
+            && !matches!(tool, "submit_sensing_candidates" | "fetch_url")
+        {
+            anyhow::bail!("{tool} is outside the ambient sensing intake boundary");
         }
         match tool {
             "complete_orientation" => {
@@ -1505,6 +1603,66 @@ impl SymbiontTools {
                         "accepted": true,
                         "sourceRevisionIds": source_revision_ids,
                         "relatedHunchRevisionIds": related_hunch_revision_ids
+                    }))?,
+                    None,
+                ))
+            }
+            "submit_sensing_candidates" => {
+                require_sensing_origin(run_origin, tool)?;
+                let candidates = arguments
+                    .get("candidates")
+                    .and_then(Value::as_array)
+                    .context("submit_sensing_candidates requires candidates")?;
+                if candidates.is_empty() || candidates.len() > 3 {
+                    anyhow::bail!("ambient sensing accepts one to three candidates");
+                }
+                for candidate in candidates {
+                    for (field, limit) in [("title", 240), ("summary", 1_000)] {
+                        if required_text(candidate, field)?.chars().count() > limit {
+                            anyhow::bail!(
+                                "ambient sensing candidate {field} exceeds {limit} characters"
+                            );
+                        }
+                    }
+                    let source_class = required_text(candidate, "source_class")?;
+                    if !matches!(
+                        source_class,
+                        "research"
+                            | "products_and_tools"
+                            | "projects_and_ecosystems"
+                            | "institutions_and_policy"
+                            | "industry_and_markets"
+                            | "culture_and_ideas"
+                            | "open_discovery"
+                    ) {
+                        anyhow::bail!("ambient sensing candidate has an unknown source_class");
+                    }
+                    if optional_text(candidate, "possible_connection")
+                        .is_some_and(|connection| connection.chars().count() > 800)
+                    {
+                        anyhow::bail!(
+                            "ambient sensing candidate possible_connection exceeds 800 characters"
+                        );
+                    }
+                    let sources = candidate
+                        .get("sources")
+                        .and_then(Value::as_array)
+                        .context("ambient sensing candidate requires sources")?;
+                    if sources.is_empty() || sources.len() > 3 {
+                        anyhow::bail!("ambient sensing candidate requires one to three sources");
+                    }
+                    for source in sources {
+                        if required_text(source, "url")?.chars().count() > 900
+                            || required_text(source, "detail")?.chars().count() > 800
+                        {
+                            anyhow::bail!("ambient sensing source exceeds its compact limit");
+                        }
+                    }
+                }
+                Ok((
+                    serde_json::to_string(&json!({
+                        "accepted": true,
+                        "candidateCount": candidates.len()
                     }))?,
                     None,
                 ))
@@ -1976,6 +2134,13 @@ fn require_proactive_origin(run_origin: &str, tool: &str) -> Result<()> {
 fn require_scout_origin(run_origin: &str, tool: &str) -> Result<()> {
     if run_origin != "autonomous_scout" {
         anyhow::bail!("{tool} is available only to autonomous reconnaissance");
+    }
+    Ok(())
+}
+
+fn require_sensing_origin(run_origin: &str, tool: &str) -> Result<()> {
+    if run_origin != "ambient_sense" {
+        anyhow::bail!("{tool} is available only to low-cost ambient sensing");
     }
     Ok(())
 }

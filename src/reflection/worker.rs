@@ -109,6 +109,7 @@ impl ReflectionHandle {
         Ok(ReflectionSnapshot {
             config,
             runtime,
+            health: self.store.projection_health().await?,
             episodes: self.store.episodes(30).await?,
             hypotheses: self.store.hypotheses(40).await?,
             follow_ups: self.store.follow_ups(30).await?,
@@ -366,9 +367,21 @@ async fn reflect_once(
         runtime.write().await.phase = ReflectionPhase::TokenLimit;
         return Ok(ReflectState::Idle);
     }
-    let Some(batch) = store.pending_batch(MAX_BATCH_EVENTS).await? else {
-        runtime.write().await.phase = ReflectionPhase::Waiting;
-        return Ok(ReflectState::Idle);
+    let batch = match store.pending_batch(MAX_BATCH_EVENTS).await? {
+        Some(batch) => batch,
+        None if matches!(trigger, ReflectionTrigger::Manual)
+            || store.lifecycle_review_due().await? =>
+        {
+            let Some(batch) = store.lifecycle_batch().await? else {
+                runtime.write().await.phase = ReflectionPhase::Waiting;
+                return Ok(ReflectState::Idle);
+            };
+            batch
+        }
+        None => {
+            runtime.write().await.phase = ReflectionPhase::Waiting;
+            return Ok(ReflectState::Idle);
+        }
     };
     let input_epoch = conversation.current_input_epoch();
     let Ok(mut client) = codex.try_lock() else {
@@ -376,7 +389,19 @@ async fn reflect_once(
         return Ok(ReflectState::Busy);
     };
 
-    let run_id = store.start_run(trigger.as_str(), &batch).await?;
+    let run_id = store
+        .start_run(
+            if batch.lifecycle_audit {
+                "lifecycle"
+            } else {
+                trigger.as_str()
+            },
+            &batch,
+        )
+        .await?;
+    if batch.lifecycle_audit {
+        store.mark_lifecycle_reviewed().await?;
+    }
     {
         let mut current = runtime.write().await;
         current.phase = ReflectionPhase::Reflecting;
@@ -490,6 +515,9 @@ async fn reflect_once(
             }
             .to_owned(),
         );
+    }
+    if batch.lifecycle_audit {
+        outcome.actions.push("lifecycle.reviewed".to_owned());
     }
     usage.record_all(&outcome.invocations).await?;
     let trace_id = outcome

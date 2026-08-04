@@ -25,6 +25,7 @@ mod profile;
 mod reconciliation;
 mod reflection;
 mod rollover;
+mod sensing;
 mod symbiont_context;
 mod topics;
 mod usage;
@@ -58,6 +59,7 @@ use permission::PermissionBroker;
 use profile::ProfileStore;
 use reconciliation::{ReconciliationDependencies, ReconciliationHandle, ReconciliationStore};
 use reflection::{ReflectionHandle, ReflectionStore};
+use sensing::SensingStore;
 use symbiont_context::SymbiontContextStore;
 use tokio::{net::TcpListener, sync::Mutex};
 use tracing::info;
@@ -211,6 +213,14 @@ async fn main() -> Result<()> {
         ))
         .await?,
     );
+    let sensing = Arc::new(
+        SensingStore::open(resolve_data_path(
+            &workspace,
+            "SYMBIONT_SENSING_CANDIDATES_PATH",
+            "sensing-candidates.json",
+        ))
+        .await?,
+    );
     let reconciliation_store = Arc::new(
         ReconciliationStore::open(resolve_data_path(
             &workspace,
@@ -250,6 +260,7 @@ async fn main() -> Result<()> {
         Arc::clone(&curiosity),
         Arc::clone(&reflection_store),
         Arc::clone(&usage),
+        Arc::clone(&sensing),
         conversation.clone(),
         Arc::clone(&exploration_intents),
         exploration_intent_receiver,

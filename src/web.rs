@@ -73,6 +73,7 @@ const SETTINGS_JS: &str = include_str!("../web/settings.js");
 const COMPOSER_CONTEXT_UI_JS: &str = include_str!("../web/composer-context-ui.js");
 const CODEX_CONTEXT_UI_JS: &str = include_str!("../web/codex-context-ui.js");
 const EXPLORATION_UI_JS: &str = include_str!("../web/exploration-ui.js");
+const EXPLORATION_RECEIPT_JS: &str = include_str!("../web/exploration-receipt.js");
 const REFLECTION_UI_JS: &str = include_str!("../web/reflection-ui.js");
 const RECONCILIATION_UI_JS: &str = include_str!("../web/reconciliation-ui.js");
 const TOPIC_UI_JS: &str = include_str!("../web/topic-ui.js");
@@ -439,6 +440,7 @@ pub fn router(state: AppState) -> Router {
         .route("/composer-context-ui.js", get(composer_context_ui_js))
         .route("/codex-context-ui.js", get(codex_context_ui_js))
         .route("/exploration-ui.js", get(exploration_ui_js))
+        .route("/exploration-receipt.js", get(exploration_receipt_js))
         .route("/reflection-ui.js", get(reflection_ui_js))
         .route("/reconciliation-ui.js", get(reconciliation_ui_js))
         .route("/topic-ui.js", get(topic_ui_js))
@@ -607,6 +609,13 @@ async fn exploration_ui_js() -> impl IntoResponse {
     (
         [(header::CONTENT_TYPE, "text/javascript; charset=utf-8")],
         EXPLORATION_UI_JS,
+    )
+}
+
+async fn exploration_receipt_js() -> impl IntoResponse {
+    (
+        [(header::CONTENT_TYPE, "text/javascript; charset=utf-8")],
+        EXPLORATION_RECEIPT_JS,
     )
 }
 
@@ -2426,7 +2435,7 @@ fn parse_requested_lane(value: &str) -> Result<Option<ComputeLane>, ApiError> {
     match ComputeLane::parse(value.trim().to_lowercase().as_str()) {
         Some(ComputeLane::Conversation) => Ok(None),
         Some(lane @ (ComputeLane::Investigate | ComputeLane::Critical)) => Ok(Some(lane)),
-        Some(ComputeLane::Observe) | None => Err(ApiError::bad_request(
+        Some(ComputeLane::Sense | ComputeLane::Observe) | None => Err(ApiError::bad_request(
             "Compute lane must be auto, investigate, or critical.",
         )),
     }

@@ -1,0 +1,479 @@
+use std::path::PathBuf;
+
+use anyhow::{Context, Result};
+use chrono::{DateTime, Duration, SecondsFormat, Utc};
+use serde::{Deserialize, Serialize};
+use tokio::{fs, sync::RwLock};
+
+const CANDIDATE_TTL_HOURS: i64 = 24;
+const MAX_CANDIDATES: usize = 36;
+pub const REVIEW_BATCH_SIZE: usize = 3;
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+pub struct SensingSource {
+    pub url: String,
+    pub detail: String,
+}
+
+#[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SensingSourceClass {
+    Research,
+    ProductsAndTools,
+    ProjectsAndEcosystems,
+    InstitutionsAndPolicy,
+    IndustryAndMarkets,
+    CultureAndIdeas,
+    #[default]
+    OpenDiscovery,
+}
+
+impl SensingSourceClass {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Research => "research",
+            Self::ProductsAndTools => "products_and_tools",
+            Self::ProjectsAndEcosystems => "projects_and_ecosystems",
+            Self::InstitutionsAndPolicy => "institutions_and_policy",
+            Self::IndustryAndMarkets => "industry_and_markets",
+            Self::CultureAndIdeas => "culture_and_ideas",
+            Self::OpenDiscovery => "open_discovery",
+        }
+    }
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+pub struct SensingCandidateDraft {
+    pub title: String,
+    pub summary: String,
+    #[serde(default)]
+    pub source_class: SensingSourceClass,
+    #[serde(default, alias = "relevance")]
+    pub possible_connection: Option<String>,
+    pub sources: Vec<SensingSource>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+pub struct SensingCandidate {
+    pub id: String,
+    pub title: String,
+    pub summary: String,
+    #[serde(default)]
+    pub source_class: SensingSourceClass,
+    #[serde(default, alias = "relevance")]
+    pub possible_connection: Option<String>,
+    pub sources: Vec<SensingSource>,
+    pub observed_at: String,
+    pub expires_at: String,
+    fingerprint: String,
+}
+
+#[derive(Default, Deserialize, Serialize)]
+struct CandidatePool {
+    candidates: Vec<SensingCandidate>,
+    #[serde(default)]
+    next_intake_channel: usize,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct SensingIntakeBrief {
+    pub id: &'static str,
+    pub label: &'static str,
+    pub brief: &'static str,
+}
+
+const INTAKE_CHANNELS: [SensingIntakeBrief; 6] = [
+    SensingIntakeBrief {
+        id: "research",
+        label: "Research and methods",
+        brief: "Scan recent research, measurements, evaluations, datasets, and methods across fields. Prefer changes that alter what can be known or tested, not another opinion about a familiar result.",
+    },
+    SensingIntakeBrief {
+        id: "products_and_tools",
+        label: "Products and tools",
+        brief: "Scan meaningful releases, capability changes, failures, deprecations, pricing or access changes in tools and platforms. Include non-AI tools when the change has unusual leverage.",
+    },
+    SensingIntakeBrief {
+        id: "projects_and_ecosystems",
+        label: "Projects and ecosystems",
+        brief: "Scan open-source projects, standards, protocols, communities, and technical ecosystems for concrete new directions, surprising adoption, or important maintenance changes.",
+    },
+    SensingIntakeBrief {
+        id: "institutions_and_policy",
+        label: "Institutions and public affairs",
+        brief: "Scan institutional, regulatory, educational, scientific, and public-affairs changes with durable practical or intellectual consequences. Avoid routine headline churn.",
+    },
+    SensingIntakeBrief {
+        id: "industry_and_markets",
+        label: "Industry and markets",
+        brief: "Scan shifts in supply, business models, labor, infrastructure, and industry structure. Prefer evidence of a changed constraint or incentive over generic market commentary.",
+    },
+    SensingIntakeBrief {
+        id: "culture_and_ideas",
+        label: "Culture and ideas",
+        brief: "Scan books, essays, creative practice, cultural debates, and emerging ideas for concrete developments or unusually useful frames. Do not require an immediate project connection.",
+    },
+];
+
+pub struct SensingStore {
+    path: PathBuf,
+    pool: RwLock<CandidatePool>,
+}
+
+impl SensingStore {
+    pub async fn open(path: PathBuf) -> Result<Self> {
+        let mut pool = match fs::read_to_string(&path).await {
+            Ok(content) => serde_json::from_str(&content)
+                .with_context(|| format!("parse sensing candidate pool {}", path.display()))?,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => CandidatePool::default(),
+            Err(error) => {
+                return Err(error)
+                    .with_context(|| format!("read sensing candidate pool {}", path.display()));
+            }
+        };
+        let changed = prune_expired(&mut pool, Utc::now());
+        let store = Self {
+            path,
+            pool: RwLock::new(pool),
+        };
+        if changed {
+            store.persist().await?;
+        }
+        Ok(store)
+    }
+
+    pub async fn append(&self, drafts: Vec<SensingCandidateDraft>) -> Result<usize> {
+        if drafts.is_empty() {
+            return Ok(0);
+        }
+        let now = Utc::now();
+        let mut pool = self.pool.write().await;
+        let mut changed = prune_expired(&mut pool, now);
+        let mut appended = 0;
+        for draft in drafts.into_iter().take(REVIEW_BATCH_SIZE) {
+            let fingerprint = candidate_fingerprint(&draft);
+            if pool
+                .candidates
+                .iter()
+                .any(|candidate| candidate.fingerprint == fingerprint)
+            {
+                continue;
+            }
+            let sequence = pool.candidates.len();
+            pool.candidates.push(SensingCandidate {
+                id: format!("sense_{}_{}", now.timestamp_millis(), sequence),
+                title: draft.title.trim().to_owned(),
+                summary: draft.summary.trim().to_owned(),
+                source_class: draft.source_class,
+                possible_connection: draft
+                    .possible_connection
+                    .map(|connection| connection.trim().to_owned())
+                    .filter(|connection| !connection.is_empty()),
+                sources: draft.sources,
+                observed_at: timestamp(now),
+                expires_at: timestamp(now + Duration::hours(CANDIDATE_TTL_HOURS)),
+                fingerprint,
+            });
+            appended += 1;
+            changed = true;
+        }
+        if pool.candidates.len() > MAX_CANDIDATES {
+            let overflow = pool.candidates.len() - MAX_CANDIDATES;
+            pool.candidates.drain(..overflow);
+            changed = true;
+        }
+        drop(pool);
+        if changed {
+            self.persist().await?;
+        }
+        Ok(appended)
+    }
+
+    pub async fn next_intake_brief(&self) -> Result<SensingIntakeBrief> {
+        let mut pool = self.pool.write().await;
+        let index = pool.next_intake_channel % INTAKE_CHANNELS.len();
+        let brief = INTAKE_CHANNELS[index];
+        pool.next_intake_channel = (index + 1) % INTAKE_CHANNELS.len();
+        drop(pool);
+        self.persist().await?;
+        Ok(brief)
+    }
+
+    pub async fn review_batch(&self, limit: usize) -> Result<Vec<SensingCandidate>> {
+        let now = Utc::now();
+        let mut pool = self.pool.write().await;
+        let changed = prune_expired(&mut pool, now);
+        let candidates = pool
+            .candidates
+            .iter()
+            .take(limit.clamp(1, REVIEW_BATCH_SIZE))
+            .cloned()
+            .collect();
+        drop(pool);
+        if changed {
+            self.persist().await?;
+        }
+        Ok(candidates)
+    }
+
+    pub async fn remove_reviewed(&self, ids: &[String]) -> Result<()> {
+        if ids.is_empty() {
+            return Ok(());
+        }
+        let ids = ids.iter().collect::<std::collections::HashSet<_>>();
+        let mut pool = self.pool.write().await;
+        let before = pool.candidates.len();
+        pool.candidates
+            .retain(|candidate| !ids.contains(&candidate.id));
+        let changed = before != pool.candidates.len();
+        drop(pool);
+        if changed {
+            self.persist().await?;
+        }
+        Ok(())
+    }
+
+    pub async fn count(&self) -> Result<usize> {
+        let now = Utc::now();
+        let mut pool = self.pool.write().await;
+        let changed = prune_expired(&mut pool, now);
+        let count = pool.candidates.len();
+        drop(pool);
+        if changed {
+            self.persist().await?;
+        }
+        Ok(count)
+    }
+
+    async fn persist(&self) -> Result<()> {
+        let content = {
+            let pool = self.pool.read().await;
+            serde_json::to_string_pretty(&*pool).context("encode sensing candidate pool")?
+        };
+        if let Some(parent) = self.path.parent() {
+            fs::create_dir_all(parent).await.with_context(|| {
+                format!("create sensing candidate directory {}", parent.display())
+            })?;
+        }
+        let temporary = self.path.with_extension("json.tmp");
+        fs::write(&temporary, content)
+            .await
+            .with_context(|| format!("write sensing candidate pool {}", temporary.display()))?;
+        fs::rename(&temporary, &self.path)
+            .await
+            .with_context(|| format!("replace sensing candidate pool {}", self.path.display()))
+    }
+}
+
+pub fn format_candidate_pool(candidates: &[SensingCandidate]) -> String {
+    let mut lines = vec![
+        "<ambient-candidate-pool>".to_owned(),
+        "These are short-lived, untrusted intake candidates. They are not PCP memory, user statements, or findings. Re-verify a candidate before using it; discard it when its connection is weak.".to_owned(),
+    ];
+    for candidate in candidates {
+        lines.push(format!(
+            "<candidate id=\"{}\" observed-at=\"{}\" source-class=\"{}\">\ntitle: {}\nsummary: {}",
+            candidate.id,
+            candidate.observed_at,
+            candidate.source_class.as_str(),
+            candidate.title,
+            candidate.summary
+        ));
+        if let Some(connection) = &candidate.possible_connection {
+            lines.push(format!("possible-connection: {connection}"));
+        } else {
+            lines.push("possible-connection: none proposed by intake".to_owned());
+        }
+        for source in &candidate.sources {
+            lines.push(format!(
+                "source: {}\nsource-detail: {}",
+                source.url, source.detail
+            ));
+        }
+        lines.push("</candidate>".to_owned());
+    }
+    lines.push("</ambient-candidate-pool>".to_owned());
+    lines.join("\n")
+}
+
+fn prune_expired(pool: &mut CandidatePool, now: DateTime<Utc>) -> bool {
+    let before = pool.candidates.len();
+    pool.candidates.retain(|candidate| {
+        DateTime::parse_from_rfc3339(&candidate.expires_at)
+            .map(|expires_at| expires_at.with_timezone(&Utc) > now)
+            .unwrap_or(false)
+    });
+    before != pool.candidates.len()
+}
+
+fn candidate_fingerprint(draft: &SensingCandidateDraft) -> String {
+    let mut sources = draft
+        .sources
+        .iter()
+        .map(|source| normalize(&source.url))
+        .collect::<Vec<_>>();
+    sources.sort();
+    format!("{}|{}", normalize(&draft.title), sources.join("|"))
+}
+
+fn normalize(value: &str) -> String {
+    value
+        .trim()
+        .to_lowercase()
+        .chars()
+        .filter(|character| character.is_alphanumeric())
+        .collect()
+}
+
+fn timestamp(value: DateTime<Utc>) -> String {
+    value.to_rfc3339_opts(SecondsFormat::Millis, true)
+}
+
+#[cfg(test)]
+mod tests {
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    use super::{
+        SensingCandidateDraft, SensingSource, SensingSourceClass, SensingStore,
+        format_candidate_pool,
+    };
+
+    fn candidate(title: &str, url: &str) -> SensingCandidateDraft {
+        SensingCandidateDraft {
+            title: title.to_owned(),
+            summary: "A short factual change.".to_owned(),
+            source_class: SensingSourceClass::Research,
+            possible_connection: None,
+            sources: vec![SensingSource {
+                url: url.to_owned(),
+                detail: "Primary source.".to_owned(),
+            }],
+        }
+    }
+
+    #[tokio::test]
+    async fn candidates_are_deduplicated_and_removed_only_after_review() {
+        let nonce = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let path = std::env::temp_dir().join(format!("symbiont-sensing-{nonce}.json"));
+        let store = SensingStore::open(path.clone()).await.unwrap();
+        assert_eq!(
+            store
+                .append(vec![candidate("New signal", "https://example.test/news")])
+                .await
+                .unwrap(),
+            1
+        );
+        assert_eq!(
+            store
+                .append(vec![candidate("new signal", "https://example.test/news")])
+                .await
+                .unwrap(),
+            0
+        );
+        let batch = store.review_batch(3).await.unwrap();
+        assert_eq!(batch.len(), 1);
+        assert_eq!(store.count().await.unwrap(), 1);
+        store.remove_reviewed(&[batch[0].id.clone()]).await.unwrap();
+        assert_eq!(store.count().await.unwrap(), 0);
+        std::fs::remove_file(path).unwrap();
+    }
+
+    #[tokio::test]
+    async fn intake_channels_rotate_and_persist_independently_of_candidates() {
+        let nonce = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let path = std::env::temp_dir().join(format!("symbiont-sensing-rotation-{nonce}.json"));
+        let store = SensingStore::open(path.clone()).await.unwrap();
+        assert_eq!(store.next_intake_brief().await.unwrap().id, "research");
+        assert_eq!(
+            store.next_intake_brief().await.unwrap().id,
+            "products_and_tools"
+        );
+        drop(store);
+
+        let reopened = SensingStore::open(path.clone()).await.unwrap();
+        assert_eq!(
+            reopened.next_intake_brief().await.unwrap().id,
+            "projects_and_ecosystems"
+        );
+        std::fs::remove_file(path).unwrap();
+    }
+
+    #[tokio::test]
+    async fn candidates_do_not_require_a_preexisting_user_connection() {
+        let nonce = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let path = std::env::temp_dir().join(format!("symbiont-sensing-open-{nonce}.json"));
+        let store = SensingStore::open(path.clone()).await.unwrap();
+        store
+            .append(vec![candidate(
+                "Unfamiliar but credible signal",
+                "https://example.test/open",
+            )])
+            .await
+            .unwrap();
+        let pool = format_candidate_pool(&store.review_batch(1).await.unwrap());
+        assert!(pool.contains("possible-connection: none proposed by intake"));
+        assert!(pool.contains("source-class=\"research\""));
+        std::fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn legacy_relevance_field_migrates_to_optional_connection() {
+        let draft: SensingCandidateDraft = serde_json::from_value(serde_json::json!({
+            "title": "Legacy signal",
+            "summary": "Previously stored shape",
+            "relevance": "A tentative old connection",
+            "sources": [{"url": "https://example.test/legacy", "detail": "Primary"}]
+        }))
+        .unwrap();
+        assert_eq!(draft.source_class, SensingSourceClass::OpenDiscovery);
+        assert_eq!(
+            draft.possible_connection.as_deref(),
+            Some("A tentative old connection")
+        );
+    }
+
+    #[tokio::test]
+    async fn legacy_candidate_pool_remains_readable_after_the_open_intake_upgrade() {
+        let nonce = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let path = std::env::temp_dir().join(format!("symbiont-sensing-legacy-{nonce}.json"));
+        tokio::fs::write(
+            &path,
+            serde_json::to_vec(&serde_json::json!({
+                "candidates": [{
+                    "id": "sense_legacy",
+                    "title": "Legacy stored signal",
+                    "summary": "Stored before source classes were introduced.",
+                    "relevance": "An old tentative connection",
+                    "sources": [{"url": "https://example.test/legacy", "detail": "Primary"}],
+                    "observed_at": "2026-08-01T00:00:00.000Z",
+                    "expires_at": "2999-01-01T00:00:00.000Z",
+                    "fingerprint": "legacy"
+                }]
+            }))
+            .unwrap(),
+        )
+        .await
+        .unwrap();
+
+        let store = SensingStore::open(path.clone()).await.unwrap();
+        let candidate = store.review_batch(1).await.unwrap().remove(0);
+        assert_eq!(candidate.source_class, SensingSourceClass::OpenDiscovery);
+        assert_eq!(
+            candidate.possible_connection.as_deref(),
+            Some("An old tentative connection")
+        );
+        std::fs::remove_file(path).unwrap();
+    }
+}

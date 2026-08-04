@@ -1,7 +1,7 @@
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 
-use crate::usage::InvocationRecord;
+use crate::{sensing::SensingCandidateDraft, usage::InvocationRecord};
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct ExplorationEvidence {
@@ -34,9 +34,9 @@ impl ExplorationScoutFinding {
 
 pub fn scout_prompt(silent_marker: &str, superseded_marker: &str) -> String {
     format!(
-        r#"Privately run one autonomous reconnaissance cycle. No user message is waiting. Your job is high-recall evidence discovery, not conversation, durable interpretation, or Hunch maintenance. Begin from the supplied Current Map, Open Loops, Curiosity Map, recent conversation, and exploration journal. Treat every existing Hunch and connection as a hypothesis, never a conclusion. Do not search PCP to rediscover that supplied working set. When older context could change the search direction, browse its compact model-written index, semantically choose a small number of candidates, and read only selected Detail. Use short lexical anchors only when you already know them. Use live web search when freshness matters. Follow adjacent or unexpected signals and verify consequential claims.
+        r#"Privately run one autonomous reconnaissance cycle. No user message is waiting. Your job is high-recall evidence discovery, not conversation, durable interpretation, or Hunch maintenance. The supplied context is intentionally role-bounded: Current Map and Open Loops help recognize consequences, ready Hunches are optional investigation candidates, and recent conversation plus the exploration journal preserve continuity. Do not combine them into one priority list. Treat every existing Hunch and connection as a hypothesis, never a conclusion. Topic Episodes, interaction hypotheses, profile-maintenance evidence, and deferred follow-ups are intentionally absent; do not reconstruct them by searching PCP. When older context could change the search direction, browse its compact model-written index, semantically choose a small number of candidates, and read only selected Detail. Use short lexical anchors only when you already know them. Use live web search when freshness matters. Follow adjacent or unexpected signals and verify consequential claims.
 
-This stage is host-enforced read-only: do not alter Hunches, profile, Current Map, Open Loops, PCP Pages, Summaries, Relations, or validity. Never draft or propose a user-visible message.
+This stage is host-enforced read-only: do not alter Hunches, profile, Current Map, Open Loops, PCP Pages, Summaries, Relations, or validity. Never draft or propose a user-visible message. The working context may contain an ambient candidate pool. It is weak, short-lived intake rather than evidence or memory: select it only when you can independently verify a concrete connection, and freely discard it otherwise.
 
 Respect Hunch attention state. Never select `feedback_pending`. Avoid repeating an `awaiting_user` or `cooldown` Hunch before its eligible time merely because the user was silent. Compare possible findings with recent exploration themes; another example of the same thesis is not a new finding unless it changes the conclusion, timing, uncertainty, decision, or possible action.
 
@@ -45,6 +45,18 @@ If the working context contains an explicit exploration intent, first re-evaluat
 Submit at most one `symbiont.submit_exploration_finding` when fresh evidence may materially change a shared question, justify later Hunch maintenance, support a genuinely new conversational move, or reveal a credible external development that may expand the user's long-term map. The finding is an untrusted handoff to a stronger reviewer, not a recommendation to interrupt. Keep it compact. Include exact recent conversation Revisions that make the possible connection timely, any exact Hunch Revisions it bears on, and the strongest reason the proposed connection may be wrong. Do not force external evidence into the user's frameworks. If nothing deserves stronger review, call no completion tool.
 
 After the optional finding tool call, return exactly `{silent_marker}`. Never put user-visible prose in the final response."#
+    )
+}
+
+pub fn sensing_prompt(silent_marker: &str) -> String {
+    format!(
+        r#"Run one low-cost ambient sensing pass. No user message is waiting. Begin from the supplied rotating intake channel, not from the user's projects, profile, or recent topics. Look for credible fresh external developments with information value in their own right. The optional recent user edge may help rank two otherwise comparable signals, but it must not define what can enter the inbox. Prefer primary or authoritative sources when possible. Keep the selected candidates source- and subject-diverse; do not submit several versions of one story.
+
+This stage is host-enforced intake only. It has no PCP access and must not alter Hunches, profile, Current Map, Open Loops, Pages, Relations, or validity. Never draft, propose, or send a user-visible message. Do not report that scanning occurred.
+
+Call `symbiont.submit_sensing_candidates` at most once, with one to three compact candidates, only when each has a concrete source and is novel, credible, or potentially consequential enough for stronger review. A known connection to the user is not required: omit `possible_connection` when none is apparent instead of inventing one. Classify the broad source domain without over-interpreting it. The candidate pool is a temporary external inbox; it is not memory, a finding, or a recommendation. Include source URLs and the factual detail each source supports. It is entirely valid to submit nothing.
+
+After optional tool use, return exactly `{silent_marker}`. Never put user-visible prose in the final response."#
     )
 }
 
@@ -89,4 +101,29 @@ pub fn finding_from_invocations(
                 .context("parse autonomous reconnaissance finding")
         })
         .transpose()
+}
+
+pub fn sensing_candidates_from_invocations(
+    invocations: &[InvocationRecord],
+) -> Result<Vec<SensingCandidateDraft>> {
+    invocations
+        .iter()
+        .flat_map(|invocation| &invocation.trace_steps)
+        .rev()
+        .find(|step| {
+            step.succeeded
+                && step.namespace == "symbiont"
+                && step.tool == "submit_sensing_candidates"
+        })
+        .map(|step| {
+            step.arguments
+                .get("candidates")
+                .cloned()
+                .context("ambient sensing completion omitted candidates")
+                .and_then(|value| {
+                    serde_json::from_value(value).context("parse ambient sensing candidates")
+                })
+        })
+        .transpose()
+        .map(Option::unwrap_or_default)
 }

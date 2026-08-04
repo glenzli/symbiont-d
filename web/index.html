@@ -72,11 +72,17 @@
                 type="button"
                 data-top-menu-action
               ><i data-lucide="git-merge" aria-hidden="true"></i><span>记忆整理</span></button>
+              <a
+                href="http://127.0.0.1:4318/"
+                target="_blank"
+                rel="noopener"
+                data-top-menu-action
+              ><i data-lucide="archive" aria-hidden="true"></i><span>PCP Console</span></a>
               <button
                 id="open-archive"
                 type="button"
                 data-top-menu-action
-              ><i data-lucide="archive" aria-hidden="true"></i><span>档案</span></button>
+              ><i data-lucide="archive" aria-hidden="true"></i><span>工作状态</span></button>
               <button
                 id="open-settings"
                 type="button"
@@ -356,7 +362,7 @@
           </div>
           <div class="setting-grid autonomy-setting-grid">
             <label class="field">
-              <span>检查间隔</span>
+              <span>感知间隔</span>
               <select id="autonomy-interval">
                 <option value="30">30 分钟</option>
                 <option value="60">1 小时</option>
@@ -435,6 +441,7 @@
             <span>
               <small>运行状态</small>
               <strong id="reflection-runtime-state">正在读取</strong>
+              <small id="reflection-health-state">正在检查整理状态</small>
             </span>
             <button id="run-reflection" class="secondary-button" type="button">立即整理</button>
           </div>
@@ -518,6 +525,11 @@
           </label>
 
           <div class="lane-list">
+            <div class="lane-row" data-lane="sense">
+              <div class="lane-name"><strong>感知</strong><span>低成本采样，不写入记忆</span></div>
+              <label class="field"><span>模型</span><select data-field="model"></select></label>
+              <label class="field"><span>思考</span><select data-field="effort"></select></label>
+            </div>
             <div class="lane-row" data-lane="observe">
               <div class="lane-name"><strong>观察</strong><span>后台轻量任务</span></div>
               <label class="field"><span>模型</span><select data-field="model"></select></label>
@@ -597,20 +609,19 @@
     <dialog id="archive-dialog" class="panel-dialog">
       <header class="dialog-header">
         <div>
-          <h2>档案</h2>
-          <p>symbiont-d 当前知道的内容</p>
+          <h2>工作状态</h2>
+          <p>Symbiont 当前的理解与后台信号；Pages 请在 PCP Console 查看。</p>
         </div>
         <button class="icon-button" data-close="archive-dialog" type="button" aria-label="关闭">×</button>
       </header>
-      <nav class="dialog-tabs" role="tablist" aria-label="档案分类">
+      <nav class="dialog-tabs" role="tablist" aria-label="工作状态分类">
         <button type="button" role="tab" data-archive-tab="orientation" aria-selected="true">画像</button>
         <button type="button" role="tab" data-archive-tab="context" aria-selected="false">脉络</button>
         <button type="button" role="tab" data-archive-tab="reflection" aria-selected="false">思考</button>
         <button type="button" role="tab" data-archive-tab="curiosity" aria-selected="false">好奇</button>
-        <button type="button" role="tab" data-archive-tab="pages" aria-selected="false">Pages</button>
-        <button type="button" role="tab" data-archive-tab="memory" aria-selected="false">记录</button>
         <button type="button" role="tab" data-archive-tab="info" aria-selected="false">信息</button>
       </nav>
+      <p id="archive-load-state" class="dialog-load-state" role="status"></p>
 
       <section class="tab-panel archive-panel" data-archive-panel="orientation">
         <form id="orientation-form">
@@ -670,12 +681,6 @@
       <section class="tab-panel archive-panel" data-archive-panel="curiosity" hidden>
         <div id="archive-curiosity" class="archive-curiosity"></div>
       </section>
-      <section class="tab-panel archive-panel" data-archive-panel="pages" hidden>
-        <div id="archive-pages" class="archive-pages"></div>
-      </section>
-      <section class="tab-panel archive-panel" data-archive-panel="memory" hidden>
-        <div id="archive-memory" class="archive-memory"></div>
-      </section>
       <section class="tab-panel archive-panel" data-archive-panel="info" hidden>
         <dl id="archive-info" class="info-list"></dl>
       </section>
@@ -720,10 +725,22 @@
         </dl>
         <div class="inline-actions">
           <button id="preview-reconciliation" class="secondary-button" type="button">
-            <i data-lucide="search" aria-hidden="true"></i><span>检查</span>
+            <i data-lucide="search" aria-hidden="true"></i>
+            <span class="reconciliation-action-label">检查</span>
+            <span
+              class="reconciliation-action-progress"
+              aria-hidden="true"
+              hidden
+            ></span>
           </button>
           <button id="apply-reconciliation" class="primary-button" type="button" disabled>
-            <i data-lucide="check-check" aria-hidden="true"></i><span>应用建议</span>
+            <i data-lucide="check-check" aria-hidden="true"></i>
+            <span class="reconciliation-action-label">应用建议</span>
+            <span
+              class="reconciliation-action-progress"
+              aria-hidden="true"
+              hidden
+            ></span>
           </button>
         </div>
       </div>

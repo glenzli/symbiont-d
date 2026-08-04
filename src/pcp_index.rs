@@ -86,6 +86,11 @@ impl PcpIndex {
 
     async fn sync_all_inner(&self) -> Result<PcpIndexSnapshot> {
         let episodes = self.reflection.episodes(EPISODE_LIMIT).await?;
+        let aliases = self.reflection.episode_aliases().await?;
+        let episode_titles = episodes
+            .iter()
+            .map(|episode| (episode.id.clone(), episode.title.clone()))
+            .collect::<HashMap<_, _>>();
         let episodes = dependency_order(episodes);
         let mut indexed_revisions = HashMap::<String, String>::new();
         let mut snapshot = PcpIndexSnapshot {
@@ -112,6 +117,25 @@ impl PcpIndex {
                 SyncKind::Unchanged => snapshot.unchanged_pages += 1,
             }
         }
+        for alias in aliases {
+            let Some(canonical_revision_id) = indexed_revisions.get(&alias.canonical_id) else {
+                continue;
+            };
+            if self
+                .retire_alias_page(
+                    &alias.alias_id,
+                    &alias.canonical_id,
+                    episode_titles
+                        .get(&alias.canonical_id)
+                        .map(String::as_str)
+                        .unwrap_or("合并后的主题"),
+                    canonical_revision_id,
+                )
+                .await?
+            {
+                snapshot.revised_pages += 1;
+            }
+        }
         Ok(snapshot)
     }
 
@@ -121,7 +145,17 @@ impl PcpIndex {
         parent_revision_ids: &[String],
     ) -> Result<SyncOutcome> {
         let stable_key = format!("reflection.episode.{}", episode.id);
-        let digest = episode_digest(episode)?;
+        let source_revision_ids = sorted(episode.source_revision_ids.clone());
+        let turn_revision_ids = self
+            .reflection
+            .conversation_turn_revision_ids(&source_revision_ids)
+            .await?;
+        let supporting_turn_revision_ids = turn_revision_ids
+            .iter()
+            .filter(|revision_id| !source_revision_ids.contains(revision_id))
+            .cloned()
+            .collect::<Vec<_>>();
+        let digest = episode_digest(episode, &turn_revision_ids)?;
         let content = format!("# {}\n\n{}", episode.title.trim(), episode.summary.trim());
         let facets = json!({
             "kind": "conversation_episode",
@@ -131,19 +165,24 @@ impl PcpIndex {
             "title": episode.title,
             "state": episode.state.as_str(),
             "startedAt": episode.started_at,
+            "evidenceRevisionIds": source_revision_ids,
+            "supportingTurnRevisionIds": supporting_turn_revision_ids,
             "sourceDigest": digest,
         });
-        let aggregate_targets = sorted(parent_revision_ids.to_vec());
-        let mut source_revision_ids = episode.source_revision_ids.clone();
-        source_revision_ids.sort();
-        source_revision_ids.dedup();
+        let parent_targets = sorted(parent_revision_ids.to_vec());
         let relations = self
             .continuity
             .initial_relations_for_revision_targets(
-                aggregate_targets
+                parent_targets
                     .iter()
                     .cloned()
-                    .map(|revision_id| ("aggregates".to_owned(), revision_id))
+                    .map(|revision_id| ("continues".to_owned(), revision_id))
+                    .chain(
+                        supporting_turn_revision_ids
+                            .iter()
+                            .cloned()
+                            .map(|revision_id| ("includes".to_owned(), revision_id)),
+                    )
                     .chain(
                         source_revision_ids
                             .iter()
@@ -154,9 +193,7 @@ impl PcpIndex {
             )
             .await?;
         let actor = index_actor();
-        let mut provenance_inputs = aggregate_targets.clone();
-        provenance_inputs.extend(source_revision_ids.iter().cloned());
-        provenance_inputs = sorted(provenance_inputs);
+        let provenance_inputs = source_revision_ids.clone();
         let provenance = vec![ProvenanceEvent {
             operation: "derive".to_owned(),
             actor: actor.clone(),
@@ -248,6 +285,81 @@ impl PcpIndex {
         })
     }
 
+    async fn retire_alias_page(
+        &self,
+        alias_id: &str,
+        canonical_id: &str,
+        canonical_title: &str,
+        canonical_revision_id: &str,
+    ) -> Result<bool> {
+        let stable_key = format!("reflection.episode.{alias_id}");
+        let Some(current) = self.current_episode_page(&stable_key).await? else {
+            return Ok(false);
+        };
+        if current.page.lifecycle_status != LifecycleStatus::Active {
+            return Ok(false);
+        }
+        let mut facets = current.revision.facets.clone().unwrap_or_else(|| json!({}));
+        if let Some(object) = facets.as_object_mut() {
+            object.insert(
+                "indexRole".to_owned(),
+                Value::String("aggregate_alias".to_owned()),
+            );
+            object.insert(
+                "canonicalEpisodeId".to_owned(),
+                Value::String(canonical_id.to_owned()),
+            );
+            object.insert("state".to_owned(), Value::String("merged".to_owned()));
+        }
+        let actor = index_actor();
+        let timestamp = now();
+        let relations = self
+            .continuity
+            .initial_relations_for_revision_targets(vec![(
+                "outdated_by".to_owned(),
+                canonical_revision_id.to_owned(),
+            )])
+            .await?;
+        self.continuity
+            .store()
+            .revise_page(RevisePageRequest {
+                page_id: current.page.page_id,
+                expected_revision_id: current.revision.revision_id.clone(),
+                created_by: actor.clone(),
+                lifecycle_status: LifecycleStatus::Superseded,
+                observed_at: Some(timestamp.clone()),
+                valid_from: None,
+                valid_to: Some(timestamp.clone()),
+                payload: Some(PagePayload {
+                    media_type: "text/markdown".to_owned(),
+                    content: format!("# {canonical_title}\n\n此重复主题已合并至统一主题。"),
+                }),
+                source_refs: vec![SourceRef {
+                    source_type: "symbiont_topic_episode_alias".to_owned(),
+                    uri: format!("symbiont://reflection/episodes/{alias_id}"),
+                    locator: None,
+                    metadata: Some(json!({"canonicalEpisodeId": canonical_id})),
+                }],
+                facets: Some(facets),
+                provenance: vec![ProvenanceEvent {
+                    operation: "consolidate".to_owned(),
+                    actor,
+                    timestamp,
+                    input_revision_ids: vec![
+                        current.revision.revision_id,
+                        canonical_revision_id.to_owned(),
+                    ],
+                    tool_or_model: Some("symbiont Reflection index".to_owned()),
+                }],
+                initial_relations: relations,
+                idempotency_key: Some(format!(
+                    "episode-index:alias:{alias_id}:{canonical_revision_id}"
+                )),
+            })
+            .await?;
+        Ok(true)
+    }
+
     async fn current_episode_page(&self, stable_key: &str) -> Result<Option<pcp_core::ReadPage>> {
         let revision_ids = self
             .continuity
@@ -329,12 +441,13 @@ fn dependency_order(mut episodes: Vec<ConversationEpisode>) -> Vec<ConversationE
     ordered
 }
 
-fn episode_digest(episode: &ConversationEpisode) -> Result<String> {
+fn episode_digest(episode: &ConversationEpisode, turn_revision_ids: &[String]) -> Result<String> {
     let value = json!({
         "title": episode.title,
         "summary": episode.summary,
         "state": episode.state.as_str(),
         "sources": sorted(episode.source_revision_ids.clone()),
+        "turn": sorted(turn_revision_ids.to_vec()),
         "parents": sorted(episode.parent_episode_ids.clone()),
     });
     let encoded = serde_json::to_vec(&value).context("encode Topic Episode index digest")?;
@@ -365,10 +478,12 @@ mod tests {
         time::{SystemTime, UNIX_EPOCH},
     };
 
-    use pcp_core::{Projection, ReadPagesRequest};
+    use pcp_core::{LifecycleStatus, Projection, ReadPagesRequest};
     use pcp_sqlite::SqlitePcpStore;
+    use rusqlite::{Connection, params};
+    use serde_json::json;
 
-    use super::PcpIndex;
+    use super::{PcpIndex, now};
     use crate::{
         continuity::{ContinuityHost, MessageLinks},
         memory::MemoryRole,
@@ -414,6 +529,23 @@ mod tests {
             .record_message(&user.entry, None, false, &[])
             .await
             .expect("record Reflection message");
+        let assistant = continuity
+            .ingest_message(
+                MemoryRole::Assistant,
+                "Use the low-cost route for reversible work, with an escalation boundary.",
+                Vec::new(),
+                None,
+                MessageLinks {
+                    responds_to: Some(user.page.revision_id.clone()),
+                    ..MessageLinks::default()
+                },
+            )
+            .await
+            .expect("write assistant message");
+        reflection
+            .record_message(&assistant.entry, Some(&user.page.revision_id), false, &[])
+            .await
+            .expect("record assistant Reflection message");
         let episode = reflection
             .upsert_episode(EpisodeInput {
                 id: None,
@@ -497,12 +629,9 @@ mod tests {
         assert!(page.relations.iter().any(|relation| {
             relation.relation_type == "derived_from" && relation.to_page_id == user.page.page_id
         }));
-        assert!(
-            !page
-                .relations
-                .iter()
-                .any(|relation| relation.relation_type == "aggregates")
-        );
+        assert!(page.relations.iter().any(|relation| {
+            relation.relation_type == "includes" && relation.to_page_id == assistant.page.page_id
+        }));
 
         let _ = tokio::fs::remove_dir_all(root).await;
     }
@@ -572,6 +701,205 @@ mod tests {
                 Some(stable_key)
             );
         }
+
+        let _ = tokio::fs::remove_dir_all(root).await;
+    }
+
+    #[tokio::test]
+    async fn retires_projected_pages_for_consolidated_episode_aliases() {
+        let nonce = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("clock")
+            .as_nanos();
+        let root = std::env::temp_dir().join(format!("symbiont-pcp-index-alias-{nonce}"));
+        let pcp = Arc::new(
+            SqlitePcpStore::open(root.join("context.sqlite3"))
+                .await
+                .expect("open PCP"),
+        );
+        let continuity = Arc::new(
+            ContinuityHost::open_embedded_for_test(pcp)
+                .await
+                .expect("open continuity"),
+        );
+        let reflection_path = root.join("reflection.sqlite3");
+        let reflection = Arc::new(
+            ReflectionStore::open(reflection_path.clone(), root.join("reflection.toml"))
+                .await
+                .expect("open Reflection"),
+        );
+        let user = continuity
+            .ingest_message(
+                MemoryRole::User,
+                "One topic identity should remain after consolidation.",
+                Vec::new(),
+                None,
+                MessageLinks::default(),
+            )
+            .await
+            .expect("write user message");
+        reflection
+            .record_message(&user.entry, None, false, &[])
+            .await
+            .expect("record Reflection message");
+        let canonical = reflection
+            .upsert_episode(EpisodeInput {
+                id: None,
+                title: "Canonical topic".to_owned(),
+                summary: "The duplicate identity has one canonical owner.".to_owned(),
+                state: EpisodeState::Active,
+                source_revision_ids: vec![user.page.revision_id],
+                parent_episode_ids: Vec::new(),
+            })
+            .await
+            .expect("write canonical Episode");
+        let alias_page = continuity
+            .write_model_page(
+                Some(continuity.project_scope()),
+                "# Canonical topic\n\nLegacy duplicate projection.",
+                Some(json!({
+                    "kind": "conversation_episode",
+                    "stableKey": "reflection.episode.ep_legacy_alias",
+                    "episodeId": "ep_legacy_alias",
+                })),
+                Vec::new(),
+                Vec::new(),
+                Vec::new(),
+                Some("reflection.episode.ep_legacy_alias".to_owned()),
+            )
+            .await
+            .expect("write legacy alias Page");
+        Connection::open(reflection_path)
+            .expect("open Reflection database")
+            .execute(
+                "INSERT INTO episode_aliases (alias_id, canonical_id, merged_at) VALUES (?1, ?2, ?3)",
+                params!["ep_legacy_alias", canonical.id, now()],
+            )
+            .expect("record Episode alias");
+
+        let index = PcpIndex::new(Arc::clone(&continuity), reflection);
+        let snapshot = index.sync_all().await.expect("sync consolidated index");
+        assert_eq!(snapshot.created_pages, 1);
+        assert_eq!(snapshot.revised_pages, 1);
+        let alias = continuity
+            .read(ReadPagesRequest {
+                page_ids: vec![alias_page.page_id],
+                revision_ids: Vec::new(),
+                projections: vec![Projection::Manifest, Projection::Relations],
+                max_chars: 8_000,
+            })
+            .await
+            .expect("read alias relations")
+            .remove(0);
+        assert_eq!(alias.page.lifecycle_status, LifecycleStatus::Superseded);
+        assert!(
+            alias
+                .relations
+                .iter()
+                .any(|relation| relation.relation_type == "outdated_by")
+        );
+
+        let _ = tokio::fs::remove_dir_all(root).await;
+    }
+
+    #[tokio::test]
+    async fn paired_answer_that_used_topic_context_does_not_form_a_derivation_cycle() {
+        let nonce = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("clock")
+            .as_nanos();
+        let root = std::env::temp_dir().join(format!("symbiont-pcp-index-turn-cycle-{nonce}"));
+        let pcp = Arc::new(
+            SqlitePcpStore::open(root.join("context.sqlite3"))
+                .await
+                .expect("open PCP"),
+        );
+        let continuity = Arc::new(
+            ContinuityHost::open_embedded_for_test(pcp)
+                .await
+                .expect("open continuity"),
+        );
+        let reflection = Arc::new(
+            ReflectionStore::open(
+                root.join("reflection.sqlite3"),
+                root.join("reflection.toml"),
+            )
+            .await
+            .expect("open Reflection"),
+        );
+        let user = continuity
+            .ingest_message(
+                MemoryRole::User,
+                "Refine the current topic using its existing context.",
+                Vec::new(),
+                None,
+                MessageLinks::default(),
+            )
+            .await
+            .expect("write user message");
+        reflection
+            .record_message(&user.entry, None, false, &[])
+            .await
+            .expect("record user Reflection message");
+        let episode = reflection
+            .upsert_episode(EpisodeInput {
+                id: None,
+                title: "Context-aware topic".to_owned(),
+                summary: "The topic exists before the direct answer is generated.".to_owned(),
+                state: EpisodeState::Active,
+                source_revision_ids: vec![user.page.revision_id.clone()],
+                parent_episode_ids: Vec::new(),
+            })
+            .await
+            .expect("write Episode");
+        let index = PcpIndex::new(Arc::clone(&continuity), Arc::clone(&reflection));
+        index.sync_all().await.expect("sync initial Episode");
+        let topic_revision_id = index
+            .current_episode_page(&format!("reflection.episode.{}", episode.id))
+            .await
+            .expect("read Episode Page")
+            .expect("Episode Page exists")
+            .revision
+            .revision_id;
+        let assistant = continuity
+            .ingest_message(
+                MemoryRole::Assistant,
+                "The answer can use Topic context without becoming its derivation parent.",
+                Vec::new(),
+                None,
+                MessageLinks {
+                    responds_to: Some(user.page.revision_id.clone()),
+                    input_revision_ids: vec![topic_revision_id],
+                    ..MessageLinks::default()
+                },
+            )
+            .await
+            .expect("write context-aware assistant message");
+        reflection
+            .record_message(&assistant.entry, Some(&user.page.revision_id), false, &[])
+            .await
+            .expect("record assistant Reflection message");
+
+        let refreshed = index.sync_all().await.expect("sync paired turn");
+        assert_eq!(refreshed.revised_pages, 1);
+        let topic = index
+            .current_episode_page(&format!("reflection.episode.{}", episode.id))
+            .await
+            .expect("read refreshed Episode Page")
+            .expect("refreshed Episode Page exists");
+        let topic = continuity
+            .read(ReadPagesRequest {
+                page_ids: Vec::new(),
+                revision_ids: vec![topic.revision.revision_id],
+                projections: vec![Projection::Relations],
+                max_chars: 8_000,
+            })
+            .await
+            .expect("read refreshed Episode relations")
+            .remove(0);
+        assert!(topic.relations.iter().any(|relation| {
+            relation.relation_type == "includes" && relation.to_page_id == assistant.page.page_id
+        }));
 
         let _ = tokio::fs::remove_dir_all(root).await;
     }

@@ -1,5 +1,5 @@
 import { formatDate, formatMemorySize, responseJson } from "/presentation.js";
-import { renderMessageContent, renderRichText } from "/rich-text.js";
+import { renderRichText } from "/rich-text.js";
 import { initCuriosityUi } from "/curiosity-ui.js";
 
 export function initProfileUi(state, sendMessage) {
@@ -12,8 +12,7 @@ export function initProfileUi(state, sendMessage) {
   const composer = document.querySelector("#composer");
   const emptyState = document.querySelector("#empty-state");
   const archiveDialog = document.querySelector("#archive-dialog");
-  const archiveMemory = document.querySelector("#archive-memory");
-  const archivePages = document.querySelector("#archive-pages");
+  const archiveLoadState = document.querySelector("#archive-load-state");
   const archiveInfo = document.querySelector("#archive-info");
   const orientationForm = document.querySelector("#orientation-form");
   const orientationText = document.querySelector("#orientation-text");
@@ -82,17 +81,18 @@ export function initProfileUi(state, sendMessage) {
   }
 
   async function loadArchive() {
-    archiveMemory.textContent = "正在读取";
+    archiveLoadState.textContent = "正在读取工作状态";
     try {
       archivePayload = await responseJson(
         await fetch("/api/archive"),
-        "无法读取档案",
+        "无法读取工作状态",
       );
       state.profile = archivePayload.profile;
       state.autonomyPermitted = archivePayload.autonomyPermitted;
       renderArchive();
+      archiveLoadState.textContent = "";
     } catch (error) {
-      archiveMemory.textContent = error.message;
+      archiveLoadState.textContent = error.message;
     }
   }
 
@@ -108,10 +108,8 @@ export function initProfileUi(state, sendMessage) {
       : profile.status === "calibrating"
         ? "完成初始化对话后，画像会显示在这里。"
         : "尚未开始初始化。";
-    renderMemory(archivePayload.memory);
     renderContext(archivePayload.context);
     curiosityUi.render(archivePayload.curiosity);
-    renderPages(archivePayload.pcp);
     renderInfo(archivePayload);
   }
 
@@ -149,160 +147,14 @@ export function initProfileUi(state, sendMessage) {
     }
   }
 
-  function renderPages(pcp) {
-    archivePages.replaceChildren();
-    if (!pcp.pages.length) {
-      const empty = document.createElement("p");
-      empty.className = "archive-empty";
-      empty.textContent = "还没有 PCP Page。";
-      archivePages.append(empty);
-      return;
-    }
-    const scopeByNamespace = new Map(
-      pcp.scopes.map((scope) => [scope.namespace, scope]),
-    );
-    for (const page of pcp.pages) {
-      const revision = page.revision;
-      const imageAsset = imageAssetFromRevision(revision);
-      const details = document.createElement("details");
-      details.className = "pcp-page";
-      const summary = document.createElement("summary");
-      const heading = document.createElement("span");
-      const title = document.createElement("strong");
-      const namespace = document.createElement("small");
-      const id = document.createElement("code");
-      title.textContent =
-        revision.facets?.kind === "user_orientation"
-          ? "用户画像"
-          : revision.facets?.kind === "image_asset"
-            ? "图片资产"
-          : revision.facets?.role === "user"
-            ? "用户消息"
-            : revision.facets?.role === "assistant"
-              ? "symbiont 回复"
-              : revision.facets?.kind || "Context Page";
-      namespace.textContent =
-        scopeByNamespace.get(revision.namespace)?.displayName ||
-        revision.namespace;
-      id.textContent = shortId(revision.pageId);
-      heading.append(title, namespace);
-      summary.append(heading, id);
-      details.append(summary);
-
-      const body = document.createElement("div");
-      body.className = "pcp-page-body";
-      if (imageAsset?.url) {
-        const content = document.createElement("figure");
-        content.className = "archive-image";
-        const image = document.createElement("img");
-        image.src = imageAsset.url;
-        image.alt = imageAsset.filename || "Image asset";
-        const caption = document.createElement("figcaption");
-        caption.textContent = imageAsset.filename || "Image";
-        content.append(image, caption);
-        body.append(content);
-      } else if (revision.payload?.content) {
-        const content = document.createElement("div");
-        content.className = "pcp-rich-content";
-        renderRichText(content, revision.payload.content);
-        body.append(content);
-      }
-      const metadata = document.createElement("dl");
-      metadata.className = "page-metadata";
-      appendDefinition(metadata, "Page", revision.pageId);
-      appendDefinition(metadata, "Revision", revision.revisionId);
-      appendDefinition(metadata, "Scope", revision.namespace);
-      appendDefinition(metadata, "状态", revision.lifecycleStatus);
-      appendDefinition(
-        metadata,
-        "当前有效性",
-        page.validity
-          ? `${page.validity.standing} · ${page.validity.rationale}`
-          : "未评估",
-      );
-      if (page.validity?.scope) {
-        appendDefinition(metadata, "适用范围", page.validity.scope);
-      }
-      if (page.validity?.basisRevisionIds?.length) {
-        appendDefinition(
-          metadata,
-          "判断依据",
-          page.validity.basisRevisionIds.join("\n"),
-        );
-      }
-      appendDefinition(
-        metadata,
-        "观察时间",
-        formatDate(revision.observedAt || revision.createdAt),
-      );
-      appendDefinition(
-        metadata,
-        "来源",
-        revision.sourceRefs?.length
-          ? revision.sourceRefs
-              .map((source) => source.locator ? `${source.uri} · ${source.locator}` : source.uri)
-              .join("\n")
-          : "无外部来源",
-      );
-      appendDefinition(
-        metadata,
-        "生成",
-        formatProvenance(revision.provenance),
-      );
-      appendDefinition(
-        metadata,
-        "关系",
-        page.relations.length
-          ? page.relations.map((relation) => relation.relationType).join(", ")
-          : "无",
-      );
-      appendDefinition(metadata, "修订", `${page.history.length} 个版本`);
-      body.append(metadata);
-      details.append(body);
-      archivePages.append(details);
-    }
-  }
-
-  function renderMemory(entries) {
-    archiveMemory.replaceChildren();
-    if (!entries.length) {
-      const empty = document.createElement("p");
-      empty.className = "archive-empty";
-      empty.textContent = "还没有本地记忆。";
-      archiveMemory.append(empty);
-      return;
-    }
-    for (const entry of [...entries].reverse()) {
-      const article = document.createElement("article");
-      article.className = "memory-entry";
-      const header = document.createElement("header");
-      const role = document.createElement("strong");
-      const time = document.createElement("time");
-      const body = document.createElement("div");
-      body.className = "memory-entry-body";
-      role.textContent =
-        entry.role === "user"
-          ? "你"
-          : entry.role === "memory"
-            ? "明确记忆"
-            : "symbiont-d";
-      time.textContent = formatDate(entry.at);
-      renderMessageContent(body, entry);
-      header.append(role, time);
-      article.append(header, body);
-      archiveMemory.append(article);
-    }
-  }
-
   function renderInfo(payload) {
     const profile = payload.profile;
     const rows = [
       ["初始化", statusText(profile.status)],
       ["方式", modeText(profile.mode)],
       ["最近更新", formatDate(profile.updatedAt)],
-      ["本地记忆", formatMemorySize(payload.memoryChars)],
-      ["PCP Pages", String(payload.pcp.pageCount)],
-      ["可见 Scope", String(payload.pcp.scopes.length)],
+      ["本地上下文", formatMemorySize(payload.memoryChars)],
+      ["持久记忆", "请在 PCP Console 查看"],
       [
         "自主探索许可",
         payload.autonomyPermitted ? "已允许" : "未允许",
@@ -422,42 +274,6 @@ function profileReviewStatusText(status) {
   );
 }
 
-function appendDefinition(parent, term, detail) {
-  const dt = document.createElement("dt");
-  const dd = document.createElement("dd");
-  dt.textContent = term;
-  dd.textContent = detail;
-  parent.append(dt, dd);
-}
-
-function imageAssetFromRevision(revision) {
-  if (revision.facets?.kind !== "image_asset") return null;
-  try {
-    return JSON.parse(revision.payload?.content || "null");
-  } catch {
-    return null;
-  }
-}
-
-function formatProvenance(events) {
-  if (!events?.length) return "未读取";
-  return events
-    .map((event) => {
-      const producer =
-        event.toolOrModel ||
-        event.actor?.actorId ||
-        event.actor?.actorType ||
-        "unknown";
-      const inputCount = event.inputRevisionIds?.length || 0;
-      return `${event.operation} · ${producer} · ${inputCount} 个输入`;
-    })
-    .join("\n");
-}
-
-function shortId(value) {
-  if (!value || value.length < 20) return value || "";
-  return `${value.slice(0, 11)}…${value.slice(-6)}`;
-}
 
 function statusText(status) {
   return (
