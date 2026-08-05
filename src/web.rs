@@ -37,7 +37,7 @@ use crate::{
     },
     curiosity::{CuriositySnapshot, CuriosityStore},
     diagnostics::TraceEventKind,
-    exploration::{ExplorationHandle, ExplorationSnapshot, today_started_at},
+    exploration::{ExplorationHandle, ExplorationSnapshot, ManualExplorationRun, today_started_at},
     identity::{AvatarSlot, IdentitySnapshot, IdentityStore},
     memory::{
         MemoryEntry, MemoryRole, MessageDeliveryState, MessageMetadata, MessageQuote,
@@ -516,6 +516,10 @@ pub fn router(state: AppState) -> Router {
         .route("/api/autonomy", post(update_autonomy))
         .route("/api/exploration/run", post(trigger_exploration))
         .route("/api/exploration/recent", get(recent_explorations))
+        .route(
+            "/api/exploration/receipts/{request_id}/ack",
+            post(acknowledge_exploration_receipt),
+        )
         .route(
             "/api/exploration/{trace_id}/redeliver",
             post(redeliver_exploration),
@@ -1324,7 +1328,11 @@ async fn trigger_exploration(
             daily_token_limit: config.daily_token_limit,
         }));
     }
-    let request_id = state.exploration.trigger(query.override_token_limit).await;
+    let request_id = state
+        .exploration
+        .trigger(query.override_token_limit)
+        .await
+        .map_err(ApiError::internal)?;
     if request_id.is_none() {
         return Err(ApiError::conflict(
             "An exploration request is already queued.",
@@ -1337,6 +1345,19 @@ async fn trigger_exploration(
         autonomous_tokens_today: usage.autonomous_tokens_today,
         daily_token_limit: config.daily_token_limit,
     }))
+}
+
+async fn acknowledge_exploration_receipt(
+    State(state): State<AppState>,
+    AxumPath(request_id): AxumPath<String>,
+) -> Result<Json<ManualExplorationRun>, ApiError> {
+    state
+        .exploration
+        .acknowledge_manual_receipt(&request_id)
+        .await
+        .map_err(ApiError::internal)?
+        .map(Json)
+        .ok_or_else(|| ApiError::not_found("Manual exploration receipt is not available."))
 }
 
 async fn recent_explorations(

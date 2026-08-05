@@ -205,7 +205,8 @@ function appendMessage(entry, options = {}) {
 }
 
 function appendManualExplorationReceipt(receipt) {
-  if (!receipt?.id || manualExplorationReceiptIds.has(receipt.id)) return;
+  if (!receipt?.id) return false;
+  if (manualExplorationReceiptIds.has(receipt.id)) return true;
   manualExplorationReceiptIds.add(receipt.id);
   emptyState.hidden = true;
 
@@ -232,6 +233,7 @@ function appendManualExplorationReceipt(receipt) {
   notice.append(label, message, time);
   conversation.append(notice);
   conversation.scrollTop = conversation.scrollHeight;
+  return true;
 }
 
 function clearResponseWaitIndicators() {

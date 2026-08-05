@@ -52,7 +52,7 @@ use continuation::ContinuationQueue;
 use continuity::ContinuityHost;
 use conversation::ConversationCoordinator;
 use curiosity::CuriosityStore;
-use exploration::{ExplorationHandle, ExplorationIntentQueue};
+use exploration::{ExplorationHandle, ExplorationIntentQueue, ManualExplorationStore};
 use identity::IdentityStore;
 use memory::MemoryStore;
 use pcp_index::PcpIndex;
@@ -179,6 +179,14 @@ async fn main() -> Result<()> {
         ))
         .await?;
     let exploration_intents = Arc::new(exploration_intents);
+    let manual_exploration_runs = Arc::new(
+        ManualExplorationStore::open(resolve_data_path(
+            &workspace,
+            "SYMBIONT_EXPLORATION_RECEIPTS_PATH",
+            "exploration-receipts.json",
+        ))
+        .await?,
+    );
 
     let codex_config = CodexConfig {
         binary: env::var("CODEX_BIN").unwrap_or_else(|_| "codex".to_owned()),
@@ -265,8 +273,10 @@ async fn main() -> Result<()> {
         Arc::clone(&sensing),
         conversation.clone(),
         Arc::clone(&exploration_intents),
+        Arc::clone(&manual_exploration_runs),
         exploration_intent_receiver,
-    );
+    )
+    .await;
     let reflection = ReflectionHandle::start(
         Arc::clone(&reflection_store),
         Arc::clone(&pcp_index),

@@ -8,6 +8,7 @@ import {
   manualCompletionSince,
   manualRunLabel,
   manualRunPending,
+  unpresentedManualCompletions,
 } from "/exploration-receipt.js";
 
 const PENDING_MANUAL_KEY = "symbiont-d:pending-manual-exploration:v1";
@@ -27,6 +28,7 @@ export function initExplorationUi(state, { announceManualCompletion } = {}) {
   let queued = false;
   let budgetResolver = null;
   let pendingManualRequestId = readPendingManualRequest();
+  const acknowledgingReceiptIds = new Set();
 
   async function load() {
     status.textContent = "正在读取";
@@ -110,6 +112,28 @@ export function initExplorationUi(state, { announceManualCompletion } = {}) {
     );
   }
 
+  async function acknowledgeManualCompletion(completion) {
+    if (!completion?.id || acknowledgingReceiptIds.has(completion.id)) return;
+    acknowledgingReceiptIds.add(completion.id);
+    try {
+      const receipt = await responseJson(
+        await fetch(
+          `/api/exploration/receipts/${encodeURIComponent(completion.id)}/ack`,
+          { method: "POST" },
+        ),
+        "确认探索通知失败",
+      );
+      const projected = state.exploration?.manualReceipts?.find(
+        (candidate) => candidate.id === receipt.id,
+      );
+      if (projected) projected.presentedAt = receipt.presentedAt;
+    } catch {
+      // Keep the durable receipt unacknowledged so the next runtime poll retries.
+    } finally {
+      acknowledgingReceiptIds.delete(completion.id);
+    }
+  }
+
   function confirmBudget(payload) {
     budgetUsed.textContent = formatTokens(payload.autonomousTokensToday || 0);
     budgetLimit.textContent = formatTokens(payload.dailyTokenLimit || 0);
@@ -172,15 +196,24 @@ export function initExplorationUi(state, { announceManualCompletion } = {}) {
       const exploration = state.exploration;
       const runAt = exploration?.lastRunAt || null;
       if (manualRunPending(exploration)) queued = false;
-      if (pendingManualRequestId) {
-        const completion = manualCompletionSince(
+      const completions = unpresentedManualCompletions(exploration);
+      if (
+        pendingManualRequestId &&
+        !completions.some((completion) => completion.id === pendingManualRequestId)
+      ) {
+        const legacyCompletion = manualCompletionSince(
           exploration,
           pendingManualRequestId,
         );
-        if (completion) {
+        if (legacyCompletion) completions.push(legacyCompletion);
+      }
+      for (const completion of completions) {
+        if (completion.id === pendingManualRequestId) {
           pendingManualRequestId = null;
           rememberPendingManualRequest(null);
-          announceManualCompletion?.(completion);
+        }
+        if (announceManualCompletion?.(completion)) {
+          void acknowledgeManualCompletion(completion);
         }
       }
       renderQuickRun();

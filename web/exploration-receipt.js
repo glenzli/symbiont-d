@@ -3,18 +3,32 @@ export function manualCompletionSince(exploration, requestId) {
   if (
     !requestId ||
     run?.id !== requestId ||
+    run.presentedAt ||
     !["messaged", "silent", "failed"].includes(run.status) ||
     !run.completedAt
   ) {
     return null;
   }
-  return {
-    id: run.id,
-    completedAt: run.completedAt,
-    outcome: run.outcome || run.status,
-    reason: run.reason || null,
-    resultRevisionId: run.resultRevisionId || null,
-  };
+  return completionFrom(run);
+}
+
+export function unpresentedManualCompletions(exploration) {
+  const seen = new Set();
+  const completions = [];
+  for (const run of exploration?.manualReceipts || []) {
+    if (
+      !run?.id ||
+      seen.has(run.id) ||
+      run.presentedAt ||
+      !["messaged", "silent", "failed"].includes(run.status) ||
+      !run.completedAt
+    ) {
+      continue;
+    }
+    seen.add(run.id);
+    completions.push(completionFrom(run));
+  }
+  return completions;
 }
 
 export function manualRunPending(exploration) {
@@ -31,4 +45,14 @@ export function manualRunLabel(run) {
       background_interrupted: "探索暂时让路，稍后继续",
     }[run?.reason] || "手动探索已加入队列"
   );
+}
+
+function completionFrom(run) {
+  return {
+    id: run.id,
+    completedAt: run.completedAt,
+    outcome: run.outcome || run.status,
+    reason: run.reason || null,
+    resultRevisionId: run.resultRevisionId || null,
+  };
 }
