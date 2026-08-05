@@ -52,7 +52,7 @@ export function initIdentityUi(state) {
 
   function render() {
     document.querySelectorAll(".message-avatar").forEach((container) => {
-      const role = container.closest(".message")?.dataset.role;
+      const role = container.closest("[data-role]")?.dataset.role;
       applyAvatar(container, role === "user" ? "user" : "symbiont");
     });
     applyImage(symbiontPreview, null, "symbiont");

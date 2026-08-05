@@ -119,6 +119,7 @@ const quoteUi = initQuoteUi({
 });
 const topicUi = initTopicUi({
   conversation,
+  applyAvatar: identityUi.applyAvatar,
   focusComposer() {
     input.focus();
     resizeComposer();
