@@ -136,12 +136,11 @@ pub(super) fn interaction_reflection_prompt(
          Do not write Current Map, Open Loops, or orientation; maintenance owns them. Schedule a \
          follow-up only when waiting could change value. The publication gate will still decide \
          whether to speak.\n\n\
-         At most one proactive act: `symbiont.request_exploration` for a question needing evidence, \
-         or `symbiont.propose_proactive_message` for a ready thought. Use `intervention` only when \
-         a live decision, risk, timing, or shared question should be raised now. Use `note` for a \
-         credible fresh long-term connection that does not require action. A note may plainly \
-         begin a new direction; never pretend it is a reply, \
-         report, recap, or feed item.\n\n\
+         At most one proactive act: request evidence with `symbiont.request_exploration`, or use \
+         `symbiont.propose_proactive_message`. `intervention` changes a live decision, risk, or \
+         timing; `note` adds a durable long-term connection; `discussion` opens a recent external \
+         event worth thought even if familiar and unrelated. Notes and discussions may begin a new \
+         direction. Never fake continuity or write a report, recap, or feed.\n\n\
          When new evidence materially corrects, limits, disputes, replaces, or retracts a durable \
          earlier Page, find and read the exact candidate, then call `pcp.assess_validity`. Assess \
          only consequential claims or state, not ordinary messages. Anchor the judgment to exact \

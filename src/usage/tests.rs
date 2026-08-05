@@ -401,8 +401,8 @@ async fn groups_recent_autonomous_runs_into_exploration_cycles() {
                     arguments: json!({
                         "message": "A signal worth surfacing.",
                         "reason": "It changes the current decision.",
-                        "kind": "note",
-                        "source_revision_ids": ["rev_0123456789abcdef0123456789abcdef"]
+                        "kind": "discussion",
+                        "source_revision_ids": []
                     }),
                     result: json!({"success": true}),
                 }],
@@ -437,6 +437,10 @@ async fn groups_recent_autonomous_runs_into_exploration_cycles() {
         Some("Recovery semantics matter more than static recall.")
     );
     assert!(runs[0].surfaced);
+    assert_eq!(
+        runs[0].outreach_kind,
+        Some(crate::outreach::OutreachKind::Discussion)
+    );
     assert_eq!(
         runs[0].message.as_deref(),
         Some("A signal worth surfacing.")

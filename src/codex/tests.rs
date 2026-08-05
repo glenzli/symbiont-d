@@ -205,12 +205,15 @@ fn ambient_sensing_sees_only_a_temporary_candidate_surface() {
     let prompt = sensing_prompt("<silent/>");
     assert!(prompt.contains("not memory"));
     assert!(prompt.contains("submit_sensing_candidates"));
+    assert!(prompt.contains("user may already know"));
+    assert!(prompt.contains("community experience"));
     let candidate_schema =
         &specs[0]["tools"][0]["inputSchema"]["properties"]["candidates"]["items"];
     assert_eq!(
         candidate_schema["required"],
         json!(["title", "summary", "source_class", "sources"])
     );
+    assert!(candidate_schema["properties"]["event_at"].is_object());
     assert!(candidate_schema["properties"]["possible_connection"].is_object());
     assert!(candidate_schema["properties"].get("relevance").is_none());
 }
@@ -392,8 +395,10 @@ fn autonomous_exploration_separates_reconnaissance_from_conversation() {
     assert!(scout.contains("high-recall evidence discovery"));
     assert!(scout.contains("host-enforced read-only"));
     assert!(scout.contains("submit_exploration_finding"));
-    assert!(scout.contains("strongest reason the proposed connection may be wrong"));
+    assert!(scout.contains("strongest reason the proposed connection"));
     assert!(scout.contains("already answered, invalidated"));
+    assert!(scout.contains("user may already know the headline"));
+    assert!(scout.contains("empty list"));
     assert!(!scout.contains("propose_proactive_message"));
 
     let finding = ExplorationScoutFinding {
@@ -415,8 +420,26 @@ fn autonomous_exploration_separates_reconnaissance_from_conversation() {
     assert!(review.contains("It is valid to maintain a Hunch and remain silent"));
     assert!(review.contains("propose_proactive_message"));
     assert!(review.contains("Choose `note`"));
+    assert!(review.contains("Choose `discussion`"));
+    assert!(review.contains("user may already know it"));
     assert!(review.contains("Unanswered prior initiations suppress repetition"));
-    assert!(review.contains("If the connection remains forced, remain silent"));
+    assert!(review.contains("If a claimed connection remains forced"));
+
+    let tools = SymbiontTools::specifications();
+    let proactive = tools[0]["tools"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|tool| tool["name"] == "propose_proactive_message")
+        .unwrap();
+    assert_eq!(
+        proactive["inputSchema"]["properties"]["kind"]["enum"],
+        json!(["intervention", "note", "discussion"])
+    );
+    assert_eq!(
+        proactive["inputSchema"]["properties"]["source_revision_ids"]["minItems"],
+        0
+    );
 }
 
 #[test]
@@ -436,9 +459,10 @@ fn reflection_prompt_preserves_facts_uncertainty_and_profile_boundaries() {
     assert!(prompt.contains("never promote temporary behavior directly"));
     assert!(prompt.contains("publication gate will still decide whether to speak"));
     assert!(prompt.contains("propose_proactive_message"));
-    assert!(prompt.contains("Use `intervention` only"));
-    assert!(prompt.contains("Use `note`"));
-    assert!(prompt.contains("feed item"));
+    assert!(prompt.contains("`intervention` changes"));
+    assert!(prompt.contains("`note` adds"));
+    assert!(prompt.contains("`discussion` opens"));
+    assert!(prompt.contains("feed"));
     assert!(prompt.contains("pcp.assess_validity"));
     assert!(prompt.contains("not ordinary messages"));
     assert!(
@@ -1145,6 +1169,28 @@ async fn hunch_tools_preserve_model_owned_state_and_record_autonomous_exploratio
         )
         .await;
     assert_eq!(candidate.response["success"], true);
+
+    let discussion = tools
+        .execute_for_model(
+            &json!({
+                "namespace": "symbiont",
+                "tool": "propose_proactive_message",
+                "arguments": {
+                    "message": "这件近期发生的事本身值得聊聊。",
+                    "reason": "Community reaction has created a concrete tension.",
+                    "kind": "discussion",
+                    "source_revision_ids": []
+                }
+            }),
+            Some("test-model"),
+            "autonomous",
+        )
+        .await;
+    assert_eq!(
+        discussion.response["success"], true,
+        "{}",
+        discussion.response
+    );
 
     let _ = tokio::fs::remove_dir_all(root).await;
 }

@@ -248,7 +248,7 @@ function safeHttpUrl(value) {
 function sourceClassLabel(value) {
   return {
     research: "研究与方法",
-    products_and_tools: "产品与工具",
+    products_and_tools: "产品、评测与使用",
     projects_and_ecosystems: "项目与生态",
     institutions_and_policy: "机构与政策",
     industry_and_markets: "产业与市场",
@@ -267,9 +267,11 @@ function renderRun(run) {
   const outcome = document.createElement("strong");
   const time = document.createElement("time");
   outcome.textContent = run.surfaced
-    ? run.outreachKind === "note"
-      ? "留了一条新消息"
-      : "发起了一次介入"
+    ? run.outreachKind === "discussion"
+      ? "发起了一个讨论"
+      : run.outreachKind === "note"
+        ? "留了一条新消息"
+        : "发起了一次介入"
     : "完成，决定不打扰";
   time.dateTime = run.completedAt;
   time.textContent = new Date(run.completedAt).toLocaleString([], {

@@ -11,6 +11,7 @@ pub const PROPOSE_OUTREACH_TOOL: &str = "propose_proactive_message";
 pub enum OutreachKind {
     Intervention,
     Note,
+    Discussion,
 }
 
 impl OutreachKind {
@@ -18,12 +19,14 @@ impl OutreachKind {
         match self {
             Self::Intervention => "intervention",
             Self::Note => "note",
+            Self::Discussion => "discussion",
         }
     }
 
     pub fn from_arguments(arguments: &Value) -> Self {
         match arguments.get("kind").and_then(Value::as_str) {
             Some("note") => Self::Note,
+            Some("discussion") => Self::Discussion,
             _ => Self::Intervention,
         }
     }
@@ -51,15 +54,20 @@ impl OutreachCandidate {
             .map(str::trim)
             .filter(|value| !value.is_empty())?
             .to_owned();
+        let kind = OutreachKind::from_arguments(arguments);
         let source_revision_ids = arguments
             .get("source_revision_ids")
-            .and_then(Value::as_array)?
-            .iter()
-            .filter_map(Value::as_str)
-            .map(str::to_owned)
-            .collect::<Vec<_>>();
-        (!source_revision_ids.is_empty()).then_some(Self {
-            kind: OutreachKind::from_arguments(arguments),
+            .and_then(Value::as_array)
+            .map(|values| {
+                values
+                    .iter()
+                    .filter_map(Value::as_str)
+                    .map(str::to_owned)
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default();
+        (kind == OutreachKind::Discussion || !source_revision_ids.is_empty()).then_some(Self {
+            kind,
             message,
             reason,
             source_revision_ids,
@@ -72,7 +80,9 @@ pub fn has_budget(kind: OutreachKind, config: &AutonomyConfig, usage: &UsageHead
         OutreachKind::Intervention => {
             usage.autonomous_interventions_today < config.daily_interrupt_limit as u64
         }
-        OutreachKind::Note => usage.autonomous_notes_today < config.daily_note_limit as u64,
+        OutreachKind::Note | OutreachKind::Discussion => {
+            usage.autonomous_notes_today < config.daily_note_limit as u64
+        }
     }
 }
 
@@ -114,6 +124,34 @@ mod tests {
 
         assert!(!has_budget(OutreachKind::Intervention, &config, &usage));
         assert!(has_budget(OutreachKind::Note, &config, &usage));
+        assert!(has_budget(OutreachKind::Discussion, &config, &usage));
         assert!(!all_budgets_exhausted(&config, &usage));
+    }
+
+    #[test]
+    fn discussion_candidates_do_not_require_a_conversation_anchor() {
+        let candidate = OutreachCandidate::from_tool_arguments(&json!({
+            "message": "A recent event is worth discussing.",
+            "reason": "Community experience has changed the interesting question.",
+            "kind": "discussion",
+            "source_revision_ids": []
+        }))
+        .expect("discussion candidate");
+
+        assert_eq!(candidate.kind, OutreachKind::Discussion);
+        assert!(candidate.source_revision_ids.is_empty());
+    }
+
+    #[test]
+    fn notes_still_require_a_conversation_anchor() {
+        assert!(
+            OutreachCandidate::from_tool_arguments(&json!({
+                "message": "A long-term connection.",
+                "reason": "It bears on an existing question.",
+                "kind": "note",
+                "source_revision_ids": []
+            }))
+            .is_none()
+        );
     }
 }

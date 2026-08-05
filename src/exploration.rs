@@ -1031,7 +1031,7 @@ fn ambient_sensing_context(messages: &[MemoryEntry], brief: &SensingIntakeBrief)
             "<intake-channel id=\"{}\" label=\"{}\">{}</intake-channel>",
             brief.id, brief.label, brief.brief
         ),
-        "<open-discovery>Also allow one credible, high-information signal outside this channel when it is unusually novel or consequential. Breadth emerges across rotated passes; do not turn one pass into a generic news roundup.</open-discovery>".to_owned(),
+        "<open-discovery>Also allow one credible signal outside this channel when it has factual novelty, changed interpretation, accumulated real-world evidence, or current discussion value. It may be recent rather than same-day and need not be unknown to the user. Breadth emerges across rotated passes; do not turn one pass into a generic news roundup.</open-discovery>".to_owned(),
         "The recent user edge below is an optional downstream ranking hint only. It must not gate intake, define the search domain, or be turned into memory or durable interests.".to_owned(),
         "<recent-user-edge role=\"ranking-hint\">".to_owned(),
     ];
@@ -1133,7 +1133,7 @@ fn conversation_edge(messages: &[MemoryEntry], now: DateTime<Utc>) -> String {
     lines.push(edge_message("last-visible-message", last_visible));
     if unsolicited_since_last_user > 0 {
         lines.push(
-            "<attention-state>The user has not spoken since these unsolicited messages. This is pending attention, not negative feedback. Do not repeat their topic or a close variant. A distinct, credible fresh signal may still be left as a note when it has its own connection to the user's long-term map; do not treat it as an urgent intervention or pretend it continues the unanswered thread.</attention-state>"
+            "<attention-state>The user has not spoken since these unsolicited messages. This is pending attention, not negative feedback. Do not repeat their topic or a close variant. A distinct credible signal may still be left as a note when it has its own connection to the user's long-term map, or as a discussion when it independently deserves conversation; do not treat it as an urgent intervention or pretend it continues the unanswered thread.</attention-state>"
                 .to_owned(),
         );
     }

@@ -465,7 +465,7 @@ impl UsageStore {
                                         WHERE outreach.invocation_id = invocations.id
                                           AND outreach.namespace = 'symbiont'
                                           AND outreach.tool = 'propose_proactive_message'
-                                          AND json_extract(outreach.arguments_json, '$.kind') = 'note'
+                                          AND json_extract(outreach.arguments_json, '$.kind') IN ('note', 'discussion')
                                      )
                                 THEN 1 ELSE 0
                             END

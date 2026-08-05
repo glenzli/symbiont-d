@@ -463,9 +463,9 @@ impl SymbiontTools {
                                 "source_revision_ids": {
                                     "type": "array",
                                     "items": {"type": "string"},
-                                    "minItems": 1,
+                                    "minItems": 0,
                                     "maxItems": 50,
-                                    "description": "Exact conversation Revisions that make this candidate timely."
+                                    "description": "Exact conversation Revisions that make this candidate timely. Use an empty list when an externally grounded discussion candidate has no honest conversation anchor."
                                 },
                                 "related_hunch_revision_ids": {
                                     "type": "array",
@@ -505,6 +505,11 @@ impl SymbiontTools {
                                                 "type": "string",
                                                 "maxLength": 1000,
                                                 "description": "A compact factual account of the development."
+                                            },
+                                            "event_at": {
+                                                "type": "string",
+                                                "maxLength": 64,
+                                                "description": "Optional RFC 3339 timestamp or YYYY-MM-DD date for the underlying release, publication, or event. Age is context, not an eligibility gate."
                                             },
                                             "source_class": {
                                                 "type": "string",
@@ -549,7 +554,7 @@ impl SymbiontTools {
                     {
                         "type": "function",
                         "name": PROPOSE_OUTREACH_TOOL,
-                        "description": "During background Reflection or autonomous exploration, propose at most one exact user-visible message. Use `intervention` only when the user should see it now because it changes a live decision, risk, timing, or shared question. Use `note` for a credible, fresh development that genuinely connects to the user's long-term work but does not require action. This is a candidate, not guaranteed delivery. A note may honestly open a new direction; never report internal work or pretend it continues an unrelated exchange.",
+                        "description": "During background Reflection or autonomous exploration, propose at most one exact user-visible message. Use `intervention` only when the user should see it now because it changes a live decision, risk, timing, or shared question. Use `note` for a credible development that genuinely connects to the user's long-term work but does not require action. Use `discussion` for a recent external development worth thinking about together even if the user may already know it and no durable connection should be invented. This is a candidate, not guaranteed delivery. Never report internal work or pretend it continues an unrelated exchange.",
                         "inputSchema": {
                             "type": "object",
                             "properties": {
@@ -563,15 +568,15 @@ impl SymbiontTools {
                                 },
                                 "kind": {
                                     "type": "string",
-                                    "enum": ["intervention", "note"],
+                                    "enum": ["intervention", "note", "discussion"],
                                     "description": "The attention posture for this candidate."
                                 },
                                 "source_revision_ids": {
                                     "type": "array",
                                     "items": {"type": "string"},
-                                    "minItems": 1,
+                                    "minItems": 0,
                                     "maxItems": 50,
-                                    "description": "Exact recent conversation Revisions that make this message timely."
+                                    "description": "Exact recent conversation Revisions that make this message timely. Required for intervention and note; discussion may use an empty list when grounded only in external evidence."
                                 }
                             },
                             "required": ["message", "reason", "kind", "source_revision_ids"],
@@ -1565,10 +1570,9 @@ impl SymbiontTools {
             "submit_exploration_finding" => {
                 require_scout_origin(run_origin, tool)?;
                 let source_revision_ids = string_array(arguments, "source_revision_ids")?;
-                if source_revision_ids.is_empty() {
-                    anyhow::bail!("an exploration finding requires conversation Revisions");
+                if !source_revision_ids.is_empty() {
+                    self.ensure_reflection_sources(&source_revision_ids).await?;
                 }
-                self.ensure_reflection_sources(&source_revision_ids).await?;
                 let related_hunch_revision_ids =
                     string_array(arguments, "related_hunch_revision_ids")?;
                 if related_hunch_revision_ids.len() > 8 {
@@ -1644,6 +1648,11 @@ impl SymbiontTools {
                             "ambient sensing candidate possible_connection exceeds 800 characters"
                         );
                     }
+                    if optional_text(candidate, "event_at")
+                        .is_some_and(|event_at| event_at.chars().count() > 64)
+                    {
+                        anyhow::bail!("ambient sensing candidate event_at exceeds 64 characters");
+                    }
                     let sources = candidate
                         .get("sources")
                         .and_then(Value::as_array)
@@ -1670,7 +1679,9 @@ impl SymbiontTools {
             PROPOSE_OUTREACH_TOOL => {
                 require_proactive_origin(run_origin, tool)?;
                 let source_revision_ids = string_array(arguments, "source_revision_ids")?;
-                self.ensure_reflection_sources(&source_revision_ids).await?;
+                if !source_revision_ids.is_empty() {
+                    self.ensure_reflection_sources(&source_revision_ids).await?;
+                }
                 let message = required_text(arguments, "message")?;
                 if message.chars().count() > 4_000 {
                     anyhow::bail!("proactive message cannot exceed 4000 characters");
@@ -1680,8 +1691,13 @@ impl SymbiontTools {
                     anyhow::bail!("proactive message reason cannot exceed 1200 characters");
                 }
                 let kind = required_text(arguments, "kind")?;
-                if !matches!(kind, "intervention" | "note") {
-                    anyhow::bail!("proactive message kind must be intervention or note");
+                if !matches!(kind, "intervention" | "note" | "discussion") {
+                    anyhow::bail!(
+                        "proactive message kind must be intervention, note, or discussion"
+                    );
+                }
+                if kind != "discussion" && source_revision_ids.is_empty() {
+                    anyhow::bail!("{kind} proactive messages require conversation Revisions");
                 }
                 Ok((
                     serde_json::to_string(&json!({

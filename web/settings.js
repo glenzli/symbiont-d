@@ -110,7 +110,7 @@ export function initSettings(state, triggerExploration) {
     autonomyEnabled.checked = state.autonomy.enabled;
     autonomyInterval.value = String(state.autonomy.intervalMinutes);
     dailyInterruptLimit.value = String(state.autonomy.dailyInterruptLimit);
-    dailyNoteLimit.value = String(state.autonomy.dailyNoteLimit ?? 2);
+    dailyNoteLimit.value = String(state.autonomy.dailyNoteLimit ?? 4);
     dailyTokenLimit.value = tokensToMillions(
       state.autonomy.dailyTokenLimit || 0,
     );
@@ -448,7 +448,7 @@ function explorationStatusText(exploration, usage, autonomy) {
     return `今日预算已用尽 · ${formatTokens(usage?.autonomousTokensToday || 0)}`;
   }
   if (phase === "message_limit") {
-    return `今日主动消息额度已用尽 · 介入 ${usage?.autonomousInterventionsToday || 0}/${autonomy?.dailyInterruptLimit || 0} · 留话 ${usage?.autonomousNotesToday || 0}/${autonomy?.dailyNoteLimit ?? 2}`;
+    return `今日主动消息额度已用尽 · 介入 ${usage?.autonomousInterventionsToday || 0}/${autonomy?.dailyInterruptLimit || 0} · 留话 ${usage?.autonomousNotesToday || 0}/${autonomy?.dailyNoteLimit ?? 4}`;
   }
   if (phase === "error") return exploration.lastError || "探索运行出错";
   const candidates = exploration.pendingCandidateCount

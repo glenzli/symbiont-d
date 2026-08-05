@@ -9,9 +9,9 @@ use tokio::{
 
 const DEFAULT_DAILY_TOKEN_LIMIT: u64 = 100_000;
 const MAX_DAILY_TOKEN_LIMIT: u64 = 100_000_000;
-const DEFAULT_DAILY_NOTE_LIMIT: u8 = 2;
+const DEFAULT_DAILY_NOTE_LIMIT: u8 = 4;
 const MAX_DAILY_OUTREACH_LIMIT: u8 = 20;
-const DEFAULT_ATTENTION_POSTURE: &str = "我不想每天自己刷新闻。除了会改变当前决策的信号，也请留意可信、新鲜，并且和我的长期问题、项目或思考方式真正相关的外部变化；它不必立刻导出行动。若要切换方向，请明确说出来，不要假装在接续上一段对话。";
+const DEFAULT_ATTENTION_POSTURE: &str = "我不想每天自己刷新闻。除了会改变当前决策的信号，也请留意可信、仍在有效讨论周期，并且值得共同形成判断的外部变化。用户可能已经知道，事情也不必发生在当天；它可以和长期问题、项目或思考方式有关，也可以只是有真实讨论价值。若要切换方向，请明确说出来，不要假装在接续上一段对话。";
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
