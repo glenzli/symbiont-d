@@ -25,6 +25,7 @@ mod profile;
 mod reconciliation;
 mod reflection;
 mod rollover;
+mod runtime_log;
 mod sensing;
 mod symbiont_context;
 mod topics;
@@ -63,7 +64,6 @@ use sensing::SensingStore;
 use symbiont_context::SymbiontContextStore;
 use tokio::{net::TcpListener, sync::Mutex};
 use tracing::info;
-use tracing_subscriber::EnvFilter;
 use usage::UsageStore;
 use web::AppState;
 use web_fetch::WebFetcher;
@@ -72,15 +72,17 @@ const DEFAULT_BIND: &str = "127.0.0.1:4317";
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    tracing_subscriber::fmt()
-        .with_env_filter(
-            EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("symbiont_d=info")),
-        )
-        .with_target(false)
-        .compact()
-        .init();
-
     let workspace = env::current_dir().context("resolve the current workspace")?;
+    runtime_log::init(resolve_data_path(
+        &workspace,
+        "SYMBIONT_RUNTIME_LOG_PATH",
+        "logs/runtime.log",
+    ))?;
+    tracing::info!(
+        target: runtime_log::TARGET,
+        event = "service_starting",
+        "symbiont-d is starting"
+    );
     let memory_path = resolve_memory_path(&workspace);
     let memory = Arc::new(MemoryStore::open(memory_path).await?);
     let profile = Arc::new(
@@ -360,6 +362,12 @@ async fn main() -> Result<()> {
         .with_context(|| format!("bind the local interface at {bind}"))?;
 
     info!("symbiont-d is listening at http://{bind}");
+    tracing::info!(
+        target: runtime_log::TARGET,
+        event = "service_ready",
+        bind = %bind,
+        "symbiont-d is ready"
+    );
     axum::serve(listener, app).await.context("serve symbiont-d")
 }
 

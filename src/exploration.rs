@@ -5,7 +5,14 @@ pub use intent::{
     ExplorationIntentStatus, NewExplorationIntent,
 };
 
-use std::{collections::VecDeque, sync::Arc, time::Duration};
+use std::{
+    collections::VecDeque,
+    sync::{
+        Arc,
+        atomic::{AtomicU64, Ordering},
+    },
+    time::Duration,
+};
 
 use anyhow::{Context, Result};
 use chrono::{DateTime, Days, Local, LocalResult, NaiveDateTime, NaiveTime, TimeZone, Utc};
@@ -43,6 +50,8 @@ const EXPLORATION_MESSAGE_EXCERPT_CHARS: usize = 700;
 const EXPLORATION_EDGE_EXCERPT_CHARS: usize = 900;
 const SENSING_CHAT_TAIL: usize = 2;
 const SENSING_MESSAGE_EXCERPT_CHARS: usize = 320;
+const RETRY_DELAY: Duration = Duration::from_secs(2);
+static MANUAL_RUN_SEQUENCE: AtomicU64 = AtomicU64::new(1);
 
 #[derive(Clone, Copy, Debug, Serialize)]
 #[serde(rename_all = "snake_case")]
@@ -67,6 +76,52 @@ pub struct ExplorationActivity {
     pub lane: String,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ManualExplorationStatus {
+    Queued,
+    Exploring,
+    Messaged,
+    Silent,
+    Failed,
+}
+
+impl ManualExplorationStatus {
+    fn is_terminal(self) -> bool {
+        matches!(self, Self::Messaged | Self::Silent | Self::Failed)
+    }
+}
+
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ManualExplorationRun {
+    pub id: String,
+    pub status: ManualExplorationStatus,
+    pub requested_at: String,
+    pub started_at: Option<String>,
+    pub completed_at: Option<String>,
+    pub attempts: u32,
+    pub reason: Option<String>,
+    pub outcome: Option<String>,
+    pub result_revision_id: Option<String>,
+}
+
+impl ManualExplorationRun {
+    fn queued(id: String, requested_at: String) -> Self {
+        Self {
+            id,
+            status: ManualExplorationStatus::Queued,
+            requested_at,
+            started_at: None,
+            completed_at: None,
+            attempts: 0,
+            reason: None,
+            outcome: None,
+            result_revision_id: None,
+        }
+    }
+}
+
 #[derive(Clone, Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ExplorationSnapshot {
@@ -80,6 +135,7 @@ pub struct ExplorationSnapshot {
     pub current_trigger: Option<String>,
     pub last_trigger: Option<String>,
     pub pending_candidate_count: usize,
+    pub manual_run: Option<ManualExplorationRun>,
 }
 
 impl Default for ExplorationSnapshot {
@@ -95,13 +151,18 @@ impl Default for ExplorationSnapshot {
             current_trigger: None,
             last_trigger: None,
             pending_candidate_count: 0,
+            manual_run: None,
         }
     }
 }
 
 #[derive(Clone, Debug)]
 enum ExplorationTrigger {
-    Manual { bypass_token_limit: bool },
+    Manual {
+        request_id: String,
+        requested_at: String,
+        bypass_token_limit: bool,
+    },
     DeferredFollowUp,
     Intent(ExplorationIntent),
 }
@@ -131,7 +192,8 @@ impl ExplorationTrigger {
         matches!(
             self,
             Self::Manual {
-                bypass_token_limit: true
+                bypass_token_limit: true,
+                ..
             }
         )
     }
@@ -143,6 +205,17 @@ impl ExplorationTrigger {
     fn intent(&self) -> Option<&ExplorationIntent> {
         match self {
             Self::Intent(intent) => Some(intent),
+            _ => None,
+        }
+    }
+
+    fn manual_request(&self) -> Option<(&str, &str)> {
+        match self {
+            Self::Manual {
+                request_id,
+                requested_at,
+                ..
+            } => Some((request_id, requested_at)),
             _ => None,
         }
     }
@@ -234,10 +307,40 @@ impl ExplorationHandle {
         self.sensing.candidates().await
     }
 
-    pub fn trigger(&self, bypass_token_limit: bool) -> bool {
-        self.trigger
-            .try_send(ExplorationTrigger::Manual { bypass_token_limit })
-            .is_ok()
+    pub async fn trigger(&self, bypass_token_limit: bool) -> Option<String> {
+        let requested_at = timestamp(Utc::now());
+        let request_id = format!(
+            "explore_{:x}_{:x}",
+            Utc::now().timestamp_micros(),
+            MANUAL_RUN_SEQUENCE.fetch_add(1, Ordering::Relaxed)
+        );
+        let mut snapshot = self.state.write().await;
+        if snapshot
+            .manual_run
+            .as_ref()
+            .is_some_and(|run| !run.status.is_terminal())
+        {
+            return None;
+        }
+        let trigger = ExplorationTrigger::Manual {
+            request_id: request_id.clone(),
+            requested_at: requested_at.clone(),
+            bypass_token_limit,
+        };
+        if self.trigger.try_send(trigger).is_err() {
+            return None;
+        }
+        snapshot.manual_run = Some(ManualExplorationRun::queued(
+            request_id.clone(),
+            requested_at,
+        ));
+        tracing::info!(
+            target: crate::runtime_log::TARGET,
+            event = "manual_exploration_accepted",
+            request_id,
+            "manual exploration was queued"
+        );
+        Some(request_id)
     }
 
     pub fn trigger_follow_up(&self) -> bool {
@@ -290,7 +393,7 @@ async fn run_scheduler(
         let headline = match usage.headline(&today_started_at()).await {
             Ok(headline) => headline,
             Err(error) => {
-                set_error(&state, error.to_string()).await;
+                set_error(&state, None, error.to_string()).await;
                 sleep(POLICY_REFRESH).await;
                 continue;
             }
@@ -331,7 +434,7 @@ async fn run_scheduler(
                         Ok(Some(claimed)) => trigger = Some(ExplorationTrigger::Intent(claimed)),
                         Ok(None) => continue,
                         Err(error) => {
-                            set_error(&state, error.to_string()).await;
+                            set_error(&state, trigger.as_ref(), error.to_string()).await;
                             continue;
                         }
                     }
@@ -340,6 +443,7 @@ async fn run_scheduler(
                     .as_ref()
                     .and_then(ExplorationTrigger::intent)
                     .map(|intent| intent.id.clone());
+                let run_trigger = trigger.clone();
                 let result = run_once(
                     Arc::clone(&state),
                     config.clone(),
@@ -353,11 +457,34 @@ async fn run_scheduler(
                     Arc::clone(&usage),
                     Arc::clone(&sensing),
                     conversation.clone(),
-                    trigger,
+                    trigger.clone(),
                 )
                 .await;
                 match result {
                     Ok(completion) => {
+                        if completion.status == ExplorationIntentStatus::Superseded
+                            && matches!(trigger, Some(ExplorationTrigger::Manual { .. }))
+                        {
+                            let reason = completion
+                                .retry_reason
+                                .as_deref()
+                                .unwrap_or("background_interrupted");
+                            tracing::info!(
+                                target: crate::runtime_log::TARGET,
+                                event = "manual_exploration_requeued",
+                                request_id = run_trigger
+                                    .as_ref()
+                                    .and_then(ExplorationTrigger::manual_request)
+                                    .map(|(id, _)| id)
+                                    .unwrap_or("unknown"),
+                                reason,
+                                "manual exploration yielded to higher-priority work"
+                            );
+                            pending_triggers
+                                .push_front(trigger.expect("manual retry retains its trigger"));
+                            sleep(RETRY_DELAY).await;
+                            continue;
+                        }
                         if completion.status != ExplorationIntentStatus::Superseded {
                             last_run_at = Some(Utc::now());
                         }
@@ -385,7 +512,7 @@ async fn run_scheduler(
                                 )
                                 .await;
                         }
-                        set_error(&state, error.to_string()).await;
+                        set_error(&state, trigger.as_ref(), error.to_string()).await;
                     }
                 }
                 continue;
@@ -518,6 +645,7 @@ async fn run_once(
     let completes_deferred_follow_up =
         matches!(&trigger, Some(ExplorationTrigger::DeferredFollowUp));
     let scheduled = trigger.is_none();
+    let started_at = timestamp(Utc::now());
     {
         let mut snapshot = state.write().await;
         snapshot.phase = ExplorationPhase::Exploring;
@@ -540,6 +668,30 @@ async fn run_once(
                 .map(ExplorationTrigger::as_str)
                 .unwrap_or("scheduled")
                 .to_owned(),
+        );
+        if let Some((request_id, _)) = trigger
+            .as_ref()
+            .and_then(ExplorationTrigger::manual_request)
+            && let Some(run) = snapshot
+                .manual_run
+                .as_mut()
+                .filter(|run| run.id == request_id)
+        {
+            run.status = ManualExplorationStatus::Exploring;
+            run.started_at.get_or_insert_with(|| started_at.clone());
+            run.attempts = run.attempts.saturating_add(1);
+            run.reason = None;
+        }
+    }
+    if let Some((request_id, _)) = trigger
+        .as_ref()
+        .and_then(ExplorationTrigger::manual_request)
+    {
+        tracing::info!(
+            target: crate::runtime_log::TARGET,
+            event = "manual_exploration_started",
+            request_id,
+            "manual exploration started"
         );
     }
 
@@ -582,16 +734,14 @@ async fn run_once(
         stop_activity_relay(runtime_tx, activity_task).await?;
         settle_sensing_only(
             &state,
+            trigger.as_ref(),
             ExplorationIntentStatus::Superseded,
             "superseded",
             pending_candidate_count,
+            Some("conversation_active"),
         )
         .await;
-        return Ok(ExplorationRunCompletion {
-            status: ExplorationIntentStatus::Superseded,
-            trace_id: None,
-            result_revision_id: None,
-        });
+        return Ok(ExplorationRunCompletion::superseded("conversation_active"));
     };
     let input_epoch = *input_events.borrow();
     let mut reviewed_candidates = Vec::new();
@@ -609,16 +759,14 @@ async fn run_once(
             stop_activity_relay(runtime_tx, activity_task).await?;
             settle_sensing_only(
                 &state,
+                trigger.as_ref(),
                 ExplorationIntentStatus::Superseded,
                 "superseded",
                 pending_candidate_count,
+                Some("codex_busy"),
             )
             .await;
-            return Ok(ExplorationRunCompletion {
-                status: ExplorationIntentStatus::Superseded,
-                trace_id: None,
-                result_revision_id: None,
-            });
+            return Ok(ExplorationRunCompletion::superseded("codex_busy"));
         };
         let sensing_outcome = client
             .sense(
@@ -662,16 +810,14 @@ async fn run_once(
             stop_activity_relay(runtime_tx, activity_task).await?;
             settle_sensing_only(
                 &state,
+                trigger.as_ref(),
                 ExplorationIntentStatus::Superseded,
                 "superseded",
                 pending_candidate_count,
+                Some("newer_user_input"),
             )
             .await;
-            return Ok(ExplorationRunCompletion {
-                status: ExplorationIntentStatus::Superseded,
-                trace_id: None,
-                result_revision_id: None,
-            });
+            return Ok(ExplorationRunCompletion::superseded("newer_user_input"));
         }
         let headline = match usage.headline(&today_started_at()).await {
             Ok(headline) => headline,
@@ -684,6 +830,7 @@ async fn run_once(
             stop_activity_relay(runtime_tx, activity_task).await?;
             settle_sensing_only(
                 &state,
+                trigger.as_ref(),
                 ExplorationIntentStatus::Silent,
                 if pending_candidate_count == 0 {
                     "no_candidates"
@@ -691,12 +838,14 @@ async fn run_once(
                     "candidates_waiting"
                 },
                 pending_candidate_count,
+                None,
             )
             .await;
             return Ok(ExplorationRunCompletion {
                 status: ExplorationIntentStatus::Silent,
                 trace_id,
                 result_revision_id: None,
+                retry_reason: None,
             });
         }
         reviewed_candidates = match sensing.review_batch(REVIEW_BATCH_SIZE).await {
@@ -710,15 +859,18 @@ async fn run_once(
             stop_activity_relay(runtime_tx, activity_task).await?;
             settle_sensing_only(
                 &state,
+                trigger.as_ref(),
                 ExplorationIntentStatus::Silent,
                 "no_candidates",
                 pending_candidate_count,
+                None,
             )
             .await;
             return Ok(ExplorationRunCompletion {
                 status: ExplorationIntentStatus::Silent,
                 trace_id,
                 result_revision_id: None,
+                retry_reason: None,
             });
         }
     }
@@ -758,16 +910,14 @@ async fn run_once(
         stop_activity_relay(runtime_tx, activity_task).await?;
         settle_sensing_only(
             &state,
+            trigger.as_ref(),
             ExplorationIntentStatus::Superseded,
             "superseded",
             pending_candidate_count,
+            Some("newer_user_input"),
         )
         .await;
-        return Ok(ExplorationRunCompletion {
-            status: ExplorationIntentStatus::Superseded,
-            trace_id: None,
-            result_revision_id: None,
-        });
+        return Ok(ExplorationRunCompletion::superseded("newer_user_input"));
     }
     let Ok(mut client) = codex.try_lock() else {
         let pending_candidate_count = sensing.count().await.unwrap_or_default();
@@ -775,16 +925,14 @@ async fn run_once(
         stop_activity_relay(runtime_tx, activity_task).await?;
         settle_sensing_only(
             &state,
+            trigger.as_ref(),
             ExplorationIntentStatus::Superseded,
             "superseded",
             pending_candidate_count,
+            Some("codex_busy"),
         )
         .await;
-        return Ok(ExplorationRunCompletion {
-            status: ExplorationIntentStatus::Superseded,
-            trace_id: None,
-            result_revision_id: None,
-        });
+        return Ok(ExplorationRunCompletion::superseded("codex_busy"));
     };
     let outcome = client
         .explore(
@@ -886,8 +1034,6 @@ async fn run_once(
             .await?;
     }
 
-    let mut snapshot = state.write().await;
-    snapshot.last_run_at = Some(timestamp(Utc::now()));
     let status = if superseded {
         ExplorationIntentStatus::Superseded
     } else if published.is_some() {
@@ -895,7 +1041,7 @@ async fn run_once(
     } else {
         ExplorationIntentStatus::Silent
     };
-    snapshot.last_outcome = Some(match status {
+    let outcome_label = match status {
         ExplorationIntentStatus::Messaged => outcome
             .outreach
             .as_ref()
@@ -903,28 +1049,79 @@ async fn run_once(
             .unwrap_or_else(|| "messaged".to_owned()),
         ExplorationIntentStatus::Superseded => "superseded".to_owned(),
         _ => "silent".to_owned(),
-    });
-    snapshot.last_error = None;
-    snapshot.current_activity = None;
-    snapshot.current_trigger = None;
-    snapshot.last_trigger = Some(
-        trigger
-            .as_ref()
-            .map(ExplorationTrigger::as_str)
-            .unwrap_or("scheduled")
-            .to_owned(),
-    );
-    snapshot.pending_candidate_count = sensing.count().await?;
+    };
+    let completed_at = timestamp(Utc::now());
     let result_revision_id = published
         .as_ref()
         .and_then(|message| message.revision_id.clone());
+    let retry_reason = (status == ExplorationIntentStatus::Superseded).then(|| {
+        if outcome.interrupted {
+            "newer_user_input".to_owned()
+        } else {
+            "superseded".to_owned()
+        }
+    });
+    let mut snapshot = state.write().await;
+    if status != ExplorationIntentStatus::Superseded {
+        snapshot.last_run_at = Some(completed_at.clone());
+        snapshot.last_outcome = Some(outcome_label.clone());
+        snapshot.last_trigger = Some(
+            trigger
+                .as_ref()
+                .map(ExplorationTrigger::as_str)
+                .unwrap_or("scheduled")
+                .to_owned(),
+        );
+    }
+    snapshot.last_error = None;
+    snapshot.current_activity = None;
+    snapshot.current_trigger = None;
+    snapshot.pending_candidate_count = sensing.count().await?;
+    if let Some((request_id, _)) = trigger
+        .as_ref()
+        .and_then(ExplorationTrigger::manual_request)
+        && let Some(run) = snapshot
+            .manual_run
+            .as_mut()
+            .filter(|run| run.id == request_id)
+    {
+        if status == ExplorationIntentStatus::Superseded {
+            run.status = ManualExplorationStatus::Queued;
+            run.reason.clone_from(&retry_reason);
+        } else {
+            run.status = match status {
+                ExplorationIntentStatus::Messaged => ManualExplorationStatus::Messaged,
+                ExplorationIntentStatus::Silent => ManualExplorationStatus::Silent,
+                _ => ManualExplorationStatus::Failed,
+            };
+            run.completed_at = Some(completed_at.clone());
+            run.reason = None;
+            run.outcome = Some(outcome_label.clone());
+            run.result_revision_id.clone_from(&result_revision_id);
+        }
+    }
     if let Some(message) = published {
         snapshot.latest_message = Some(message);
+    }
+    drop(snapshot);
+    if let Some((request_id, _)) = trigger
+        .as_ref()
+        .and_then(ExplorationTrigger::manual_request)
+        && status != ExplorationIntentStatus::Superseded
+    {
+        tracing::info!(
+            target: crate::runtime_log::TARGET,
+            event = "manual_exploration_completed",
+            request_id,
+            outcome = outcome_label,
+            "manual exploration completed"
+        );
     }
     Ok(ExplorationRunCompletion {
         status,
         trace_id,
         result_revision_id,
+        retry_reason,
     })
 }
 
@@ -932,6 +1129,18 @@ struct ExplorationRunCompletion {
     status: ExplorationIntentStatus,
     trace_id: Option<String>,
     result_revision_id: Option<String>,
+    retry_reason: Option<String>,
+}
+
+impl ExplorationRunCompletion {
+    fn superseded(reason: &str) -> Self {
+        Self {
+            status: ExplorationIntentStatus::Superseded,
+            trace_id: None,
+            result_revision_id: None,
+            retry_reason: Some(reason.to_owned()),
+        }
+    }
 }
 
 fn exploration_working_context(
@@ -1067,22 +1276,43 @@ async fn stop_activity_relay(
 
 async fn settle_sensing_only(
     state: &RwLock<ExplorationSnapshot>,
+    trigger: Option<&ExplorationTrigger>,
     status: ExplorationIntentStatus,
     outcome: &str,
     pending_candidate_count: usize,
+    reason: Option<&str>,
 ) {
     let mut snapshot = state.write().await;
-    snapshot.last_run_at = if status == ExplorationIntentStatus::Superseded {
-        None
-    } else {
-        Some(timestamp(Utc::now()))
-    };
-    snapshot.last_outcome = Some(outcome.to_owned());
+    if status != ExplorationIntentStatus::Superseded {
+        snapshot.last_run_at = Some(timestamp(Utc::now()));
+        snapshot.last_outcome = Some(outcome.to_owned());
+        snapshot.last_trigger = Some(
+            trigger
+                .map(ExplorationTrigger::as_str)
+                .unwrap_or("scheduled")
+                .to_owned(),
+        );
+    }
     snapshot.last_error = None;
     snapshot.current_activity = None;
     snapshot.current_trigger = None;
-    snapshot.last_trigger = Some("scheduled".to_owned());
     snapshot.pending_candidate_count = pending_candidate_count;
+    if let Some((request_id, _)) = trigger.and_then(ExplorationTrigger::manual_request)
+        && let Some(run) = snapshot
+            .manual_run
+            .as_mut()
+            .filter(|run| run.id == request_id)
+    {
+        if status == ExplorationIntentStatus::Superseded {
+            run.status = ManualExplorationStatus::Queued;
+            run.reason = reason.map(str::to_owned);
+        } else {
+            run.status = ManualExplorationStatus::Silent;
+            run.completed_at = Some(timestamp(Utc::now()));
+            run.reason = None;
+            run.outcome = Some(outcome.to_owned());
+        }
+    }
 }
 
 fn conversation_edge(messages: &[MemoryEntry], now: DateTime<Utc>) -> String {
@@ -1186,13 +1416,34 @@ fn bounded_message_excerpt(content: &str, max_chars: usize) -> String {
     format!("{head}\n[… middle omitted …]\n{tail}")
 }
 
-async fn set_error(state: &RwLock<ExplorationSnapshot>, error: String) {
+async fn set_error(
+    state: &RwLock<ExplorationSnapshot>,
+    trigger: Option<&ExplorationTrigger>,
+    error: String,
+) {
     let mut snapshot = state.write().await;
     snapshot.phase = ExplorationPhase::Error;
     snapshot.current_activity = None;
     snapshot.current_trigger = None;
-    snapshot.last_outcome = Some("error".to_owned());
-    snapshot.last_error = Some(error);
+    snapshot.last_error = Some(error.clone());
+    if let Some((request_id, _)) = trigger.and_then(ExplorationTrigger::manual_request)
+        && let Some(run) = snapshot
+            .manual_run
+            .as_mut()
+            .filter(|run| run.id == request_id)
+    {
+        run.status = ManualExplorationStatus::Failed;
+        run.completed_at = Some(timestamp(Utc::now()));
+        run.reason = Some("runtime_error".to_owned());
+        run.outcome = Some("failed".to_owned());
+        tracing::warn!(
+            target: crate::runtime_log::TARGET,
+            event = "manual_exploration_failed",
+            request_id,
+            error,
+            "manual exploration failed"
+        );
+    }
 }
 
 pub fn today_started_at() -> String {
@@ -1262,8 +1513,10 @@ mod tests {
 
     use super::{
         ExplorationIntent, ExplorationIntentOrigin, ExplorationIntentStatus, ExplorationPhase,
-        ExplorationTrigger, Gate, ambient_sensing_context, bounded_message_excerpt,
-        conversation_edge, evaluate_gate, exploration_working_context, quiet_end, today_started_at,
+        ExplorationSnapshot, ExplorationTrigger, Gate, ManualExplorationRun,
+        ManualExplorationStatus, ambient_sensing_context, bounded_message_excerpt,
+        conversation_edge, evaluate_gate, exploration_working_context, quiet_end, set_error,
+        settle_sensing_only, today_started_at,
     };
     use crate::{
         autonomy::{AutonomyConfig, QuietHours},
@@ -1342,6 +1595,62 @@ mod tests {
             ),
             Gate::Run
         ));
+    }
+
+    #[tokio::test]
+    async fn a_deferred_manual_run_keeps_the_last_completed_projection_intact() {
+        let trigger = ExplorationTrigger::Manual {
+            request_id: "explore_test".to_owned(),
+            requested_at: "2026-08-05T15:00:00Z".to_owned(),
+            bypass_token_limit: false,
+        };
+        let state = tokio::sync::RwLock::new(ExplorationSnapshot {
+            last_run_at: Some("2026-08-05T14:00:00Z".to_owned()),
+            last_outcome: Some("messaged_discussion".to_owned()),
+            last_trigger: Some("scheduled".to_owned()),
+            manual_run: Some(ManualExplorationRun::queued(
+                "explore_test".to_owned(),
+                "2026-08-05T15:00:00Z".to_owned(),
+            )),
+            ..ExplorationSnapshot::default()
+        });
+
+        settle_sensing_only(
+            &state,
+            Some(&trigger),
+            ExplorationIntentStatus::Superseded,
+            "superseded",
+            0,
+            Some("codex_busy"),
+        )
+        .await;
+
+        let snapshot = state.read().await;
+        assert_eq!(
+            snapshot.last_run_at.as_deref(),
+            Some("2026-08-05T14:00:00Z")
+        );
+        assert_eq!(
+            snapshot.last_outcome.as_deref(),
+            Some("messaged_discussion")
+        );
+        assert_eq!(snapshot.last_trigger.as_deref(), Some("scheduled"));
+        let manual = snapshot.manual_run.as_ref().unwrap();
+        assert_eq!(manual.status, ManualExplorationStatus::Queued);
+        assert_eq!(manual.reason.as_deref(), Some("codex_busy"));
+        assert!(manual.completed_at.is_none());
+        drop(snapshot);
+
+        set_error(&state, Some(&trigger), "transport failed".to_owned()).await;
+        let snapshot = state.read().await;
+        assert_eq!(
+            snapshot.last_outcome.as_deref(),
+            Some("messaged_discussion")
+        );
+        let manual = snapshot.manual_run.as_ref().unwrap();
+        assert_eq!(manual.status, ManualExplorationStatus::Failed);
+        assert_eq!(manual.outcome.as_deref(), Some("failed"));
+        assert!(manual.completed_at.is_some());
     }
 
     #[test]

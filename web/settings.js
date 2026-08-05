@@ -5,6 +5,7 @@ import {
   responseJson,
   tokensToMillions,
 } from "/presentation.js";
+import { manualRunLabel, manualRunPending } from "/exploration-receipt.js";
 
 export function initSettings(state, triggerExploration) {
   const dialog = document.querySelector("#settings-dialog");
@@ -136,7 +137,7 @@ export function initSettings(state, triggerExploration) {
       state.autonomy,
     );
     runExploration.disabled =
-      !state.autonomyPermitted || state.exploration?.phase === "exploring";
+      !state.autonomyPermitted || manualRunPending(state.exploration);
   }
 
   function renderAutonomy() {
@@ -435,6 +436,9 @@ export function initSettings(state, triggerExploration) {
 
 function explorationStatusText(exploration, usage, autonomy) {
   if (!exploration) return "正在读取";
+  if (manualRunPending(exploration)) {
+    return manualRunLabel(exploration.manualRun);
+  }
   const phase = exploration.phase;
   if (phase === "exploring") {
     return exploration.currentActivity?.label || "正在探索";

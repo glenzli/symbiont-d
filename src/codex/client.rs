@@ -353,10 +353,23 @@ impl CodexClient {
                 Ok(Ok(client)) => return Ok(client),
                 Ok(Err(error)) => {
                     warn!(attempt, %error, "Codex app-server startup attempt failed");
+                    tracing::warn!(
+                        target: crate::runtime_log::TARGET,
+                        event = "codex_start_failed",
+                        attempt,
+                        error = %error,
+                        "Codex app-server startup attempt failed"
+                    );
                     last_error = Some(error);
                 }
                 Err(_) => {
                     warn!(attempt, "Codex app-server startup attempt timed out");
+                    tracing::warn!(
+                        target: crate::runtime_log::TARGET,
+                        event = "codex_start_timeout",
+                        attempt,
+                        "Codex app-server startup attempt timed out"
+                    );
                     last_error = Some(anyhow::anyhow!(
                         "Codex app-server startup timed out after {} seconds",
                         APP_SERVER_START_TIMEOUT.as_secs()
@@ -461,6 +474,11 @@ impl CodexClient {
         let dependencies = self.dependencies.clone();
         let rate_limits = Arc::clone(&self.rate_limits);
 
+        tracing::info!(
+            target: crate::runtime_log::TARGET,
+            event = "codex_restart_started",
+            "Codex app-server restart started"
+        );
         if let Err(error) = self._child.start_kill() {
             debug!(%error, "could not immediately stop the failed Codex app-server");
         }
@@ -468,6 +486,11 @@ impl CodexClient {
 
         let replacement = Self::start_with_retries(config, dependencies, rate_limits).await?;
         *self = replacement;
+        tracing::info!(
+            target: crate::runtime_log::TARGET,
+            event = "codex_restart_completed",
+            "Codex app-server restart completed"
+        );
         Ok(())
     }
 
@@ -1236,6 +1259,13 @@ impl CodexClient {
             Ok(outcome) => Ok(outcome),
             Err(error) if is_app_server_transport_failure(&error) => {
                 let original_error = error.to_string();
+                tracing::warn!(
+                    target: crate::runtime_log::TARGET,
+                    event = "codex_transport_failed",
+                    origin,
+                    error = original_error,
+                    "Codex transport failed; automatic recovery will start"
+                );
                 self.restart_app_server().await.map_err(|recovery_error| {
                     anyhow::anyhow!(
                         "与 Codex 的通信异常（{original_error}），且自动重建连接失败：{recovery_error}"

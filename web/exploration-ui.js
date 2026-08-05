@@ -4,9 +4,15 @@ import {
   responseJson,
 } from "/presentation.js";
 import { renderRichText } from "/rich-text.js";
-import { manualCompletionSince } from "/exploration-receipt.js";
+import {
+  manualCompletionSince,
+  manualRunLabel,
+  manualRunPending,
+} from "/exploration-receipt.js";
 
-export function initExplorationUi(state, { announceManualSilence } = {}) {
+const PENDING_MANUAL_KEY = "symbiont-d:pending-manual-exploration:v1";
+
+export function initExplorationUi(state, { announceManualCompletion } = {}) {
   const dialog = document.querySelector("#exploration-dialog");
   const status = document.querySelector("#exploration-dialog-status");
   const history = document.querySelector("#exploration-history");
@@ -20,7 +26,7 @@ export function initExplorationUi(state, { announceManualSilence } = {}) {
   let triggering = false;
   let queued = false;
   let budgetResolver = null;
-  let pendingManualCompletion = null;
+  let pendingManualRequestId = readPendingManualRequest();
 
   async function load() {
     status.textContent = "正在读取";
@@ -68,7 +74,7 @@ export function initExplorationUi(state, { announceManualSilence } = {}) {
   }
 
   async function trigger() {
-    if (triggering || queued || state.exploration?.phase === "exploring") {
+    if (triggering || queued || manualRunPending(state.exploration)) {
       return { accepted: false, alreadyQueued: true };
     }
     triggering = true;
@@ -81,9 +87,8 @@ export function initExplorationUi(state, { announceManualSilence } = {}) {
         payload = await requestExploration(true);
       }
       if (payload.accepted) {
-        pendingManualCompletion = {
-          priorRunAt: state.exploration?.lastRunAt || null,
-        };
+        pendingManualRequestId = payload.requestId;
+        rememberPendingManualRequest(pendingManualRequestId);
         queued = true;
         window.setTimeout(() => {
           queued = false;
@@ -122,16 +127,18 @@ export function initExplorationUi(state, { announceManualSilence } = {}) {
   }
 
   function renderQuickRun() {
-    const exploring = state.exploration?.phase === "exploring";
-    const stateLabel = exploring
-      ? "探索中"
+    const manualRun = state.exploration?.manualRun;
+    const manualPending = manualRunPending(state.exploration);
+    const exploring = manualRun?.status === "exploring";
+    const stateLabel = manualPending
+      ? manualRunLabel(manualRun)
       : queued
         ? "探索已加入队列"
         : triggering
           ? "正在检查探索条件"
           : "立即进行一次探索";
     quickRun.disabled =
-      !state.autonomyPermitted || triggering || queued || exploring;
+      !state.autonomyPermitted || triggering || queued || manualPending;
     quickRun.dataset.state = exploring
       ? "exploring"
       : queued || triggering
@@ -164,15 +171,16 @@ export function initExplorationUi(state, { announceManualSilence } = {}) {
     runtimeUpdated() {
       const exploration = state.exploration;
       const runAt = exploration?.lastRunAt || null;
-      if (exploration?.phase === "exploring") queued = false;
-      if (pendingManualCompletion) {
+      if (manualRunPending(exploration)) queued = false;
+      if (pendingManualRequestId) {
         const completion = manualCompletionSince(
           exploration,
-          pendingManualCompletion.priorRunAt,
+          pendingManualRequestId,
         );
         if (completion) {
-          pendingManualCompletion = null;
-          if (completion.outcome === "silent") announceManualSilence?.(completion);
+          pendingManualRequestId = null;
+          rememberPendingManualRequest(null);
+          announceManualCompletion?.(completion);
         }
       }
       renderQuickRun();
@@ -427,6 +435,9 @@ function intentStatusLabel(status) {
 
 function currentStatus(exploration) {
   if (!exploration) return "状态未知";
+  if (manualRunPending(exploration)) {
+    return manualRunLabel(exploration.manualRun);
+  }
   if (exploration.phase === "exploring") {
     return exploration.currentActivity?.label || "正在自主探索";
   }
@@ -440,6 +451,23 @@ function currentStatus(exploration) {
   if (exploration.phase === "disabled") return "自主探索已关闭";
   if (exploration.phase === "needs_setup") return "等待完成初始化";
   return "等待首次探索";
+}
+
+function readPendingManualRequest() {
+  try {
+    return window.sessionStorage.getItem(PENDING_MANUAL_KEY);
+  } catch {
+    return null;
+  }
+}
+
+function rememberPendingManualRequest(requestId) {
+  try {
+    if (requestId) window.sessionStorage.setItem(PENDING_MANUAL_KEY, requestId);
+    else window.sessionStorage.removeItem(PENDING_MANUAL_KEY);
+  } catch {
+    // Session persistence is only a reload aid; live polling remains authoritative.
+  }
 }
 
 function triggerLabel(trigger) {

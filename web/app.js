@@ -76,7 +76,7 @@ const MAX_IMAGES = 4;
 const MAX_IMAGE_BYTES = 15 * 1024 * 1024;
 
 const explorationUi = initExplorationUi(appState, {
-  announceManualSilence: appendManualExplorationReceipt,
+  announceManualCompletion: appendManualExplorationReceipt,
 });
 const settingsUi = initSettings(appState, explorationUi.trigger);
 const identityUi = initIdentityUi(appState);
@@ -215,9 +215,14 @@ function appendManualExplorationReceipt(receipt) {
   notice.setAttribute("role", "status");
 
   const label = document.createElement("strong");
-  label.textContent = "探索完成";
+  label.textContent = receipt.outcome === "failed" ? "探索未完成" : "探索完成";
   const message = document.createElement("span");
-  message.textContent = "本次没有发现值得打扰你的新情报。";
+  message.textContent =
+    receipt.outcome === "failed"
+      ? "运行中出现异常，可以稍后重新探索。"
+      : receipt.outcome.startsWith("messaged")
+        ? "已带回一条值得讨论的情报。"
+        : "本次没有发现值得打扰你的新情报。";
   const time = document.createElement("time");
   time.dateTime = receipt.completedAt;
   time.textContent = new Date(receipt.completedAt).toLocaleTimeString([], {

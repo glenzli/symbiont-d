@@ -333,6 +333,7 @@ struct ExplorationTriggerQuery {
 #[serde(rename_all = "camelCase")]
 struct ExplorationTriggerResponse {
     accepted: bool,
+    request_id: Option<String>,
     requires_confirmation: bool,
     autonomous_tokens_today: u64,
     daily_token_limit: u64,
@@ -1317,19 +1318,21 @@ async fn trigger_exploration(
     if at_token_limit && !query.override_token_limit {
         return Ok(Json(ExplorationTriggerResponse {
             accepted: false,
+            request_id: None,
             requires_confirmation: true,
             autonomous_tokens_today: usage.autonomous_tokens_today,
             daily_token_limit: config.daily_token_limit,
         }));
     }
-    let accepted = state.exploration.trigger(query.override_token_limit);
-    if !accepted {
+    let request_id = state.exploration.trigger(query.override_token_limit).await;
+    if request_id.is_none() {
         return Err(ApiError::conflict(
             "An exploration request is already queued.",
         ));
     }
     Ok(Json(ExplorationTriggerResponse {
-        accepted,
+        accepted: true,
+        request_id,
         requires_confirmation: false,
         autonomous_tokens_today: usage.autonomous_tokens_today,
         daily_token_limit: config.daily_token_limit,
