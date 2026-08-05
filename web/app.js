@@ -11,7 +11,7 @@ import { initCodexContextUi } from "/codex-context-ui.js";
 import { initMessageActions } from "/message-actions.js";
 import { initMessageSync } from "/message-sync.js";
 import { initPermissionUi } from "/permission-ui.js";
-import { initQuoteUi } from "/quote-ui.js";
+import { initQuoteUi, quoteDraft } from "/quote-ui.js";
 import { initSettings } from "/settings.js";
 import { initTopbarUi } from "/topbar-ui.js";
 import { initTopicUi } from "/topic-ui.js";
@@ -41,6 +41,7 @@ const appState = {
   bridge: {
     codexTaskAccess: false,
   },
+  signals: [],
   permissions: [],
 };
 
@@ -70,7 +71,9 @@ let composerNoticeTimer = null;
 let responseWaitTimer = null;
 let responseDelayTimer = null;
 let stoppingResponse = false;
+let selectedSignalId = null;
 const manualExplorationReceiptIds = new Set();
+const displayedSignalIds = new Set();
 
 const MAX_IMAGES = 4;
 const MAX_IMAGE_BYTES = 15 * 1024 * 1024;
@@ -202,6 +205,85 @@ function appendMessage(entry, options = {}) {
     conversation.scrollTop = conversation.scrollHeight;
   }
   return element;
+}
+
+function appendInputSignal(signal, options = {}) {
+  if (!signal?.id || displayedSignalIds.has(signal.id)) return null;
+  displayedSignalIds.add(signal.id);
+  emptyState.hidden = true;
+
+  const article = document.createElement("article");
+  article.className = "message input-signal";
+  article.dataset.signalId = signal.id;
+  const layout = document.createElement("div");
+  layout.className = "message-layout";
+  const avatar = document.createElement("div");
+  avatar.className = "message-avatar input-role-avatar";
+  avatar.setAttribute("aria-hidden", "true");
+  avatar.textContent = signal.actor?.avatarSeed?.slice(0, 1).toUpperCase() || "◌";
+  const content = document.createElement("div");
+  content.className = "message-content";
+  const meta = document.createElement("div");
+  meta.className = "message-meta";
+  const speaker = document.createElement("span");
+  speaker.className = "speaker";
+  speaker.textContent = signal.actor?.name || "广域观察";
+  const time = document.createElement("time");
+  time.dateTime = signal.observedAt || new Date().toISOString();
+  time.textContent = new Date(time.dateTime).toLocaleTimeString([], {
+    hour: "2-digit",
+    minute: "2-digit",
+  });
+  meta.append(speaker, time);
+  const label = document.createElement("p");
+  label.className = "input-signal-label";
+  label.textContent = "外部输入";
+  const body = document.createElement("div");
+  body.className = "message-body";
+  renderMessageContent(body, {
+    content: signal.content || signal.summary || signal.title,
+    parts: [{ type: "markdown", text: signal.content || signal.summary || signal.title }],
+  });
+  const foot = document.createElement("div");
+  foot.className = "input-signal-foot";
+  const title = document.createElement("span");
+  title.textContent = signal.title || "外部信号";
+  const reply = document.createElement("button");
+  reply.type = "button";
+  reply.className = "input-signal-reply";
+  reply.textContent = signal.promotedRevisionId ? "继续讨论" : "回应";
+  reply.addEventListener("click", () => {
+    selectedSignalId = signal.id;
+    input.focus();
+    composerState.textContent = `正在回应：${signal.title || signal.actor?.name || "外部输入"}`;
+  });
+  foot.append(title, reply);
+  if (signal.sources?.length) {
+    const sources = document.createElement("details");
+    sources.className = "input-signal-sources";
+    const summary = document.createElement("summary");
+    summary.textContent = `${signal.sources.length} 个来源`;
+    const list = document.createElement("ul");
+    for (const source of signal.sources) {
+      const item = document.createElement("li");
+      const link = document.createElement("a");
+      link.href = source.url;
+      link.target = "_blank";
+      link.rel = "noreferrer";
+      link.textContent = source.detail || source.url;
+      item.append(link);
+      list.append(item);
+    }
+    sources.append(summary, list);
+    content.append(meta, label, body, foot, sources);
+  } else {
+    content.append(meta, label, body, foot);
+  }
+  layout.append(avatar, content);
+  article.append(layout);
+  conversation.append(article);
+  if (options.scroll !== false) conversation.scrollTop = conversation.scrollHeight;
+  return article;
 }
 
 function appendManualExplorationReceipt(receipt) {
@@ -462,6 +544,10 @@ function applyRuntime(payload) {
     payload.computePolicies || appState.computePolicies;
   appState.permissions = payload.permissions || appState.permissions;
   appState.bridge = payload.bridge || appState.bridge;
+  if (payload.signals) {
+    appState.signals = payload.signals;
+    for (const signal of payload.signals) appendInputSignal(signal, { scroll: false });
+  }
   renderUsage();
   renderRuntimeStatus();
   identityUi.render();
@@ -480,7 +566,18 @@ async function bootstrap() {
     if (!response.ok) throw new Error("无法载入当前会话。");
     const state = await response.json();
     Object.assign(appState, state);
-    state.messages.forEach((message) => appendMessage(message));
+    const timeline = [
+      ...state.messages.map((message) => ({ kind: "message", at: message.at, value: message })),
+      ...(state.signals || []).map((signal) => ({
+        kind: "signal",
+        at: signal.observedAt,
+        value: signal,
+      })),
+    ].sort((left, right) => String(left.at).localeCompare(String(right.at)));
+    timeline.forEach((item) => {
+      if (item.kind === "signal") appendInputSignal(item.value, { scroll: false });
+      else appendMessage(item.value, { scroll: false });
+    });
     turnDispositionUi.applyAll(state.turnDispositions);
     messageSync.completeBootstrap(state.messages);
     memorySize.textContent = formatMemorySize(state.memoryChars);
@@ -584,6 +681,7 @@ async function sendMessage(
   quotes = [],
   topic = null,
   codexTaskIds = [],
+  signalId = selectedSignalId,
 ) {
   if (!text.trim() && !images.length && !quotes.length && !codexTaskIds.length) return;
   if (busy) {
@@ -594,6 +692,7 @@ async function sendMessage(
       quotes,
       topic,
       codexTaskIds,
+      signalId,
     );
     return;
   }
@@ -621,7 +720,7 @@ async function sendMessage(
   try {
     const response = await fetch("/api/chat", {
       method: "POST",
-      body: chatBody(text, images, minimumLane, quotes, topic, codexTaskIds),
+      body: chatBody(text, images, minimumLane, quotes, topic, codexTaskIds, signalId),
     });
     const result = await consumeStream(response, pending, outgoing);
     if (result.interrupted) {
@@ -666,6 +765,7 @@ async function sendMessage(
         extractQuotes(first),
         extractTopic(first),
         codexTaskIds,
+        signalId,
       );
     });
   } finally {
@@ -674,6 +774,7 @@ async function sendMessage(
     signalTyping(false);
     setBusy(false);
     if (!composer.hidden) input.focus();
+    if (selectedSignalId === signalId) selectedSignalId = null;
   }
 }
 
@@ -684,6 +785,7 @@ async function appendToActiveResponse(
   quotes,
   topic,
   codexTaskIds = [],
+  signalId = selectedSignalId,
 ) {
   const outgoing = appendMessage(localUserEntry(text, images, quotes, topic), {
     deliveryState: "pending",
@@ -697,7 +799,7 @@ async function appendToActiveResponse(
   try {
     const response = await fetch("/api/chat/append", {
       method: "POST",
-      body: chatBody(text, images, minimumLane, quotes, topic, codexTaskIds),
+      body: chatBody(text, images, minimumLane, quotes, topic, codexTaskIds, signalId),
     });
     const entry = await response.json();
     if (!response.ok) throw new Error(entry.error || "无法追加消息。");
@@ -768,14 +870,19 @@ function chatBody(
   quotes = [],
   topic = null,
   codexTaskIds = [],
+  signalId = null,
 ) {
   const body = new FormData();
   body.append("message", text);
   body.append("computeLane", minimumLane);
   if (topic?.id) body.append("topicId", topic.id);
-  for (const quote of quotes) body.append("quote", JSON.stringify(quote));
+  for (const quote of quotes) {
+    const draft = quoteDraft(quote);
+    if (draft) body.append("quote", JSON.stringify(draft));
+  }
   for (const image of images) body.append("image", image.file, image.file.name);
   for (const taskId of codexTaskIds) body.append("codexTaskId", taskId);
+  if (signalId) body.append("signalId", signalId);
   return body;
 }
 

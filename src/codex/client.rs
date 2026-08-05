@@ -22,17 +22,18 @@ use super::{
     approvals::{approval_response, automatic_server_request_response, permission_request},
     autonomous::{
         finding_from_invocations, review_prompt, scout_prompt, sensing_candidates_from_invocations,
-        sensing_prompt,
+        sensing_prompt, sensing_review_from_invocations, sensing_review_prompt,
     },
     interaction_output::{
         ChatDisposition, InteractiveDeltaGate, interaction_disposition_prompt,
         interpret_interactive_output,
     },
     prompts::{
-        additional_context_value, ambient_sense_developer_instructions, context_fragments,
-        context_maintenance_prompt, developer_instructions, interaction_reflection_prompt,
-        memory_reconciliation_prompt, pcp_maintenance_developer_instructions,
-        pcp_maintenance_worker_prompt, profile_review_prompt, summary_maintenance_prompt,
+        additional_context_value, ambient_review_developer_instructions,
+        ambient_sense_developer_instructions, context_fragments, context_maintenance_prompt,
+        developer_instructions, interaction_reflection_prompt, memory_reconciliation_prompt,
+        pcp_maintenance_developer_instructions, pcp_maintenance_worker_prompt,
+        profile_review_prompt, summary_maintenance_prompt,
     },
     tool_dedup::{ToolCallPlan, TurnToolDeduplicator},
     tools::{EscalationRequest, SymbiontTools, tool_result},
@@ -163,6 +164,12 @@ pub struct SensingOutcome {
     pub interrupted: bool,
 }
 
+pub struct SensingReviewOutcome {
+    pub decisions: Vec<super::autonomous::SensingReviewDecision>,
+    pub invocations: Vec<InvocationRecord>,
+    pub interrupted: bool,
+}
+
 #[derive(Clone, Debug)]
 pub struct HunchRevisionRef {
     pub page_id: String,
@@ -262,6 +269,7 @@ struct TurnOverrides {
 #[derive(Clone, Copy)]
 enum BackgroundThread {
     AmbientSense,
+    AmbientReview,
     AutonomousScout,
     AutonomousReview,
     Maintenance,
@@ -272,6 +280,7 @@ enum BackgroundThread {
 enum ToolSurface {
     Full,
     AmbientSense,
+    AmbientReview,
     AutonomousScout,
     PcpMaintenance,
 }
@@ -285,6 +294,7 @@ pub struct CodexClient {
     next_id: u64,
     interactive_thread_id: String,
     ambient_sense_thread_id: String,
+    ambient_review_thread_id: String,
     autonomous_scout_thread_id: String,
     autonomous_review_thread_id: String,
     maintenance_thread_id: String,
@@ -414,6 +424,7 @@ impl CodexClient {
             next_id: 1,
             interactive_thread_id: String::new(),
             ambient_sense_thread_id: String::new(),
+            ambient_review_thread_id: String::new(),
             autonomous_scout_thread_id: String::new(),
             autonomous_review_thread_id: String::new(),
             maintenance_thread_id: String::new(),
@@ -449,6 +460,9 @@ impl CodexClient {
             .await?;
         client.ambient_sense_thread_id = client
             .start_thread(&config.workspace, ToolSurface::AmbientSense)
+            .await?;
+        client.ambient_review_thread_id = client
+            .start_thread(&config.workspace, ToolSurface::AmbientReview)
             .await?;
         client.autonomous_scout_thread_id = client
             .start_thread(&config.workspace, ToolSurface::AutonomousScout)
@@ -794,6 +808,54 @@ impl CodexClient {
         }
         Ok(SensingOutcome {
             candidates,
+            invocations,
+            interrupted: outcome.interrupted,
+        })
+    }
+
+    pub async fn review_sensing(
+        &mut self,
+        candidates: &[crate::sensing::SensingCandidate],
+        compute: &ComputeConfig,
+        profile: &ProfileSnapshot,
+        input_events: watch::Receiver<u64>,
+        events: mpsc::Sender<RuntimeEvent>,
+    ) -> Result<SensingReviewOutcome> {
+        let thread_id = self.ambient_review_thread_id.clone();
+        let outcome = self
+            .run_request(
+                thread_id.clone(),
+                text_input_items(&sensing_review_prompt(
+                    candidates,
+                    AUTONOMOUS_SILENT_MARKER,
+                )?),
+                ComputeLane::Conversation,
+                "ambient_review",
+                compute,
+                profile,
+                "",
+                None,
+                None,
+                false,
+                Some(input_events),
+                &events,
+            )
+            .await?;
+        if !outcome.interrupted {
+            self.renew_background_thread(&thread_id, BackgroundThread::AmbientReview)
+                .await;
+        }
+        let decisions = if outcome.interrupted {
+            Vec::new()
+        } else {
+            sensing_review_from_invocations(&outcome.invocations)?
+        };
+        let mut invocations = outcome.invocations;
+        for invocation in &mut invocations {
+            invocation.produced_message = false;
+        }
+        Ok(SensingReviewOutcome {
+            decisions,
             invocations,
             interrupted: outcome.interrupted,
         })
@@ -1203,6 +1265,7 @@ impl CodexClient {
         let workspace = self.workspace.clone();
         let tool_surface = match slot {
             BackgroundThread::AmbientSense => ToolSurface::AmbientSense,
+            BackgroundThread::AmbientReview => ToolSurface::AmbientReview,
             BackgroundThread::AutonomousScout => ToolSurface::AutonomousScout,
             BackgroundThread::AutonomousReview | BackgroundThread::Maintenance => ToolSurface::Full,
             BackgroundThread::PcpMaintenance => ToolSurface::PcpMaintenance,
@@ -1211,6 +1274,7 @@ impl CodexClient {
             Ok(next) => {
                 match slot {
                     BackgroundThread::AmbientSense => self.ambient_sense_thread_id = next,
+                    BackgroundThread::AmbientReview => self.ambient_review_thread_id = next,
                     BackgroundThread::AutonomousScout => self.autonomous_scout_thread_id = next,
                     BackgroundThread::AutonomousReview => self.autonomous_review_thread_id = next,
                     BackgroundThread::Maintenance => self.maintenance_thread_id = next,
@@ -1474,7 +1538,7 @@ impl CodexClient {
             // message can interrupt their work immediately.
             (Vec::new(), false)
         };
-        let mut fragments = if origin == "pcp_maintenance" {
+        let mut fragments = if matches!(origin, "pcp_maintenance" | "ambient_review") {
             Vec::new()
         } else {
             context_fragments(
@@ -1497,10 +1561,10 @@ impl CodexClient {
             input: input.clone(),
             fragments: fragments.clone(),
             working_context: working_context.cloned(),
-            developer_instructions: if origin == "pcp_maintenance" {
-                pcp_maintenance_developer_instructions().to_owned()
-            } else {
-                developer_instructions()
+            developer_instructions: match origin {
+                "pcp_maintenance" => pcp_maintenance_developer_instructions().to_owned(),
+                "ambient_review" => ambient_review_developer_instructions().to_owned(),
+                _ => developer_instructions(),
             },
             native_thread: NativeThreadSnapshot {
                 thread_id: thread_id.to_owned(),
@@ -1919,12 +1983,14 @@ impl CodexClient {
     ) -> Result<String> {
         let instructions = match tool_surface {
             ToolSurface::AmbientSense => ambient_sense_developer_instructions().to_owned(),
+            ToolSurface::AmbientReview => ambient_review_developer_instructions().to_owned(),
             ToolSurface::PcpMaintenance => pcp_maintenance_developer_instructions().to_owned(),
             ToolSurface::Full | ToolSurface::AutonomousScout => developer_instructions(),
         };
         let dynamic_tools = match tool_surface {
             ToolSurface::Full => SymbiontTools::specifications(),
             ToolSurface::AmbientSense => SymbiontTools::sensing_specifications(),
+            ToolSurface::AmbientReview => SymbiontTools::sensing_review_specifications(),
             ToolSurface::AutonomousScout => SymbiontTools::scout_specifications(),
             ToolSurface::PcpMaintenance => SymbiontTools::pcp_maintenance_specifications(),
         };

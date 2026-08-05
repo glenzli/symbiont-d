@@ -506,6 +506,11 @@ impl SymbiontTools {
                                                 "maxLength": 1000,
                                                 "description": "A compact factual account of the development."
                                             },
+                                            "proposed_input": {
+                                                "type": "string",
+                                                "maxLength": 1800,
+                                                "description": "Self-contained natural input in this sensing model's own voice. It is still private intake and may be rejected."
+                                            },
                                             "event_at": {
                                                 "type": "string",
                                                 "maxLength": 64,
@@ -542,12 +547,39 @@ impl SymbiontTools {
                                                 }
                                             }
                                         },
-                                        "required": ["title", "summary", "source_class", "sources"],
+                                        "required": ["title", "summary", "proposed_input", "source_class", "sources"],
                                         "additionalProperties": false
                                     }
                                 }
                             },
                             "required": ["candidates"],
+                            "additionalProperties": false
+                        }
+                    },
+                    {
+                        "type": "function",
+                        "name": "review_sensing_candidates",
+                        "description": "During ambient sensing review only, assign one terminal disposition to each supplied transient candidate. This does not publish a message or write durable state.",
+                        "inputSchema": {
+                            "type": "object",
+                            "properties": {
+                                "decisions": {
+                                    "type": "array",
+                                    "minItems": 1,
+                                    "maxItems": 3,
+                                    "items": {
+                                        "type": "object",
+                                        "properties": {
+                                            "candidate_id": {"type": "string", "maxLength": 160},
+                                            "disposition": {"type": "string", "enum": ["discard", "hold", "broadcast", "investigate"]},
+                                            "reason": {"type": "string", "maxLength": 800}
+                                        },
+                                        "required": ["candidate_id", "disposition", "reason"],
+                                        "additionalProperties": false
+                                    }
+                                }
+                            },
+                            "required": ["decisions"],
                             "additionalProperties": false
                         }
                     },
@@ -1043,7 +1075,7 @@ impl SymbiontTools {
         };
         for namespace in namespaces {
             let allowed = match namespace.get("name").and_then(Value::as_str) {
-                Some("symbiont") => &["fetch_url", "submit_exploration_finding"][..],
+                Some("symbiont") => &["submit_exploration_finding"][..],
                 Some("pcp") => &[
                     "describe",
                     "list_scopes",
@@ -1071,7 +1103,36 @@ impl SymbiontTools {
         };
         for namespace in namespaces {
             let allowed = match namespace.get("name").and_then(Value::as_str) {
-                Some("symbiont") => &["submit_sensing_candidates", "fetch_url"][..],
+                Some("symbiont") => &["submit_sensing_candidates"][..],
+                _ => &[][..],
+            };
+            if let Some(tools) = namespace.get_mut("tools").and_then(Value::as_array_mut) {
+                tools.retain(|tool| {
+                    tool.get("name")
+                        .and_then(Value::as_str)
+                        .is_some_and(|name| allowed.contains(&name))
+                });
+            }
+        }
+        if let Some(namespaces) = specifications.as_array_mut() {
+            namespaces.retain(|namespace| {
+                namespace
+                    .get("tools")
+                    .and_then(Value::as_array)
+                    .is_some_and(|tools| !tools.is_empty())
+            });
+        }
+        specifications
+    }
+
+    pub(super) fn sensing_review_specifications() -> Value {
+        let mut specifications = Self::specifications();
+        let Some(namespaces) = specifications.as_array_mut() else {
+            return specifications;
+        };
+        for namespace in namespaces {
+            let allowed = match namespace.get("name").and_then(Value::as_str) {
+                Some("symbiont") => &["review_sensing_candidates"][..],
                 _ => &[][..],
             };
             if let Some(tools) = namespace.get_mut("tools").and_then(Value::as_array_mut) {
@@ -1213,15 +1274,14 @@ impl SymbiontTools {
         if run_origin.starts_with("reconciliation_") && tool != "complete_reconciliation" {
             anyhow::bail!("{tool} is outside the dedicated durable-memory reconciliation boundary");
         }
-        if run_origin == "autonomous_scout"
-            && !matches!(tool, "submit_exploration_finding" | "fetch_url")
-        {
+        if run_origin == "autonomous_scout" && tool != "submit_exploration_finding" {
             anyhow::bail!("{tool} is outside the read-only autonomous reconnaissance boundary");
         }
-        if run_origin == "ambient_sense"
-            && !matches!(tool, "submit_sensing_candidates" | "fetch_url")
-        {
+        if run_origin == "ambient_sense" && tool != "submit_sensing_candidates" {
             anyhow::bail!("{tool} is outside the ambient sensing intake boundary");
+        }
+        if run_origin == "ambient_review" && tool != "review_sensing_candidates" {
+            anyhow::bail!("{tool} is outside the ambient sensing review boundary");
         }
         match tool {
             "complete_orientation" => {
@@ -1621,7 +1681,11 @@ impl SymbiontTools {
                     anyhow::bail!("ambient sensing accepts one to three candidates");
                 }
                 for candidate in candidates {
-                    for (field, limit) in [("title", 240), ("summary", 1_000)] {
+                    for (field, limit) in [
+                        ("title", 240),
+                        ("summary", 1_000),
+                        ("proposed_input", 1_800),
+                    ] {
                         if required_text(candidate, field)?.chars().count() > limit {
                             anyhow::bail!(
                                 "ambient sensing candidate {field} exceeds {limit} characters"
@@ -1672,6 +1736,41 @@ impl SymbiontTools {
                     serde_json::to_string(&json!({
                         "accepted": true,
                         "candidateCount": candidates.len()
+                    }))?,
+                    None,
+                ))
+            }
+            "review_sensing_candidates" => {
+                if run_origin != "ambient_review" {
+                    anyhow::bail!("review_sensing_candidates is available only to ambient review");
+                }
+                let decisions = arguments
+                    .get("decisions")
+                    .and_then(Value::as_array)
+                    .context("review_sensing_candidates requires decisions")?;
+                if decisions.is_empty() || decisions.len() > 3 {
+                    anyhow::bail!("ambient sensing review accepts one to three decisions");
+                }
+                let mut ids = std::collections::HashSet::new();
+                for decision in decisions {
+                    let candidate_id = required_text(decision, "candidate_id")?;
+                    if candidate_id.chars().count() > 160 || !ids.insert(candidate_id) {
+                        anyhow::bail!("ambient sensing review contains an invalid candidate_id");
+                    }
+                    if !matches!(
+                        required_text(decision, "disposition")?,
+                        "discard" | "hold" | "broadcast" | "investigate"
+                    ) {
+                        anyhow::bail!("ambient sensing review has an unknown disposition");
+                    }
+                    if required_text(decision, "reason")?.chars().count() > 800 {
+                        anyhow::bail!("ambient sensing review reason exceeds 800 characters");
+                    }
+                }
+                Ok((
+                    serde_json::to_string(&json!({
+                        "accepted": true,
+                        "decisionCount": decisions.len()
                     }))?,
                     None,
                 ))

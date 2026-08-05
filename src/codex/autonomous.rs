@@ -1,7 +1,10 @@
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 
-use crate::{sensing::SensingCandidateDraft, usage::InvocationRecord};
+use crate::{
+    sensing::{SensingCandidate, SensingCandidateDraft},
+    usage::InvocationRecord,
+};
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct ExplorationEvidence {
@@ -19,6 +22,22 @@ pub struct ExplorationScoutFinding {
     pub source_revision_ids: Vec<String>,
     #[serde(default)]
     pub related_hunch_revision_ids: Vec<String>,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SensingReviewDisposition {
+    Discard,
+    Hold,
+    Broadcast,
+    Investigate,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+pub struct SensingReviewDecision {
+    pub candidate_id: String,
+    pub disposition: SensingReviewDisposition,
+    pub reason: String,
 }
 
 impl ExplorationScoutFinding {
@@ -50,14 +69,48 @@ After the optional finding tool call, return exactly `{silent_marker}`. Never pu
 
 pub fn sensing_prompt(silent_marker: &str) -> String {
     format!(
-        r#"Run one low-cost ambient sensing pass. No user message is waiting. Begin from the supplied rotating intake channel, not from the user's projects, profile, or recent topics. Look for credible fresh or recently active external developments with information or discussion value in their own right. A development does not need to have happened today, and the user may already know its headline; later community experience, independent evaluation, adoption, failure, or a clearer interpretive tension can make it timely again. The optional recent user edge may help rank two otherwise comparable signals, but it must not define what can enter the inbox. Prefer primary or authoritative sources for factual claims and credible independent or community sources for reception and reproducibility. Keep the selected candidates source- and subject-diverse; do not submit several versions of one story.
+        r#"Run one low-cost ambient sensing pass. No user message is waiting. Begin from the supplied rotating intake channel, not from the user's projects, profile, or recent topics. Use live web search to look for credible fresh or recently active external developments with information or discussion value in their own right. A development does not need to have happened today, and the user may already know its headline; later community experience, independent evaluation, adoption, failure, or a clearer interpretive tension can make it timely again. The optional recent user edge may help rank two otherwise comparable signals, but it must not define what can enter the inbox. Prefer primary or authoritative sources for factual claims and credible independent or community sources for reception and reproducibility. Keep the selected candidates source- and subject-diverse; do not submit several versions of one story.
 
 This stage is host-enforced intake only. It has no PCP access and must not alter Hunches, profile, Current Map, Open Loops, Pages, Relations, or validity. Never draft, propose, or send a user-visible message. Do not report that scanning occurred.
 
-Call `symbiont.submit_sensing_candidates` at most once, with one to three compact candidates, only when each has a concrete source and is credible enough for stronger review through factual novelty, changed interpretation, or current discussion value. Do not infer that the user is unaware. A known connection to the user is not required: omit `possible_connection` when none is apparent instead of inventing one. Include `event_at` when the underlying release, publication, or event date is known so later stages can distinguish age from timeliness. Classify the broad source domain without over-interpreting it. The candidate pool is a temporary external inbox; it is not memory, a finding, or a recommendation. Include source URLs and the factual detail each source supports. It is entirely valid to submit nothing.
+Call `symbiont.submit_sensing_candidates` at most once, with one to three compact candidates, only when each has a concrete source and is credible enough for stronger review through factual novelty, changed interpretation, or current discussion value. Do not infer that the user is unaware. A known connection to the user is not required: omit `possible_connection` when none is apparent instead of inventing one. Include `event_at` when the underlying release, publication, or event date is known so later stages can distinguish age from timeliness. Classify the broad source domain without over-interpreting it. For each candidate, write `proposed_input`: a self-contained, natural two-to-four sentence input that could appear under your own input-only model role. State the object, the essential evidence or uncertainty, and the actual tension worth noticing. This is not a published message and may still be rejected; never claim that it has been sent. The candidate pool is a temporary external inbox; it is not memory, a finding, or a recommendation. Include source URLs and the factual detail each source supports. It is entirely valid to submit nothing.
 
 After optional tool use, return exactly `{silent_marker}`. Never put user-visible prose in the final response."#
     )
+}
+
+pub fn sensing_review_prompt(
+    candidates: &[SensingCandidate],
+    silent_marker: &str,
+) -> Result<String> {
+    let candidates = serde_json::to_string_pretty(candidates)
+        .context("encode ambient sensing review candidates")?;
+    Ok(format!(
+        r#"Review the following short-lived external-signal candidates for symbiont-d. No user
+message is waiting. You are a gate, not a co-author: candidates come from input-only model roles
+and their wording must remain attributable to those roles if it is broadcast.
+
+For every candidate, independently inspect its source support and choose exactly one disposition:
+
+- `discard`: duplicate, unsupported, unsafe, or strong noise;
+- `hold`: credible but not ready for the timeline;
+- `broadcast`: worth appearing now as the input role's self-contained message;
+- `investigate`: needs directed work by the continuous symbiont before any user-visible outcome.
+
+`broadcast` does not require a current-project connection. It may be important, surprising,
+interesting, or create a real question. Do not infer that the user is unaware of an event. Be
+conservative about interruption volume, but do not turn relevance into the only gate. Never rewrite
+`proposed_input`; if its factual framing needs substantive changes, choose `investigate` or reject
+it. The candidate pool is not memory and this review must not write PCP, Hunches, profile, or other
+state.
+
+Call `symbiont.review_sensing_candidates` exactly once. After the tool call, return exactly
+`{silent_marker}`.
+
+<ambient-candidates>
+{candidates}
+</ambient-candidates>"#
+    ))
 }
 
 pub fn review_prompt(finding: &ExplorationScoutFinding, silent_marker: &str) -> Result<String> {
@@ -122,6 +175,31 @@ pub fn sensing_candidates_from_invocations(
                 .context("ambient sensing completion omitted candidates")
                 .and_then(|value| {
                     serde_json::from_value(value).context("parse ambient sensing candidates")
+                })
+        })
+        .transpose()
+        .map(Option::unwrap_or_default)
+}
+
+pub fn sensing_review_from_invocations(
+    invocations: &[InvocationRecord],
+) -> Result<Vec<SensingReviewDecision>> {
+    invocations
+        .iter()
+        .flat_map(|invocation| &invocation.trace_steps)
+        .rev()
+        .find(|step| {
+            step.succeeded
+                && step.namespace == "symbiont"
+                && step.tool == "review_sensing_candidates"
+        })
+        .map(|step| {
+            step.arguments
+                .get("decisions")
+                .cloned()
+                .context("sensing review completion omitted decisions")
+                .and_then(|value| {
+                    serde_json::from_value(value).context("parse sensing review decisions")
                 })
         })
         .transpose()

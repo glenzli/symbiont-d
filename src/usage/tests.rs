@@ -324,6 +324,8 @@ async fn groups_recent_autonomous_runs_into_exploration_cycles() {
     let path = std::env::temp_dir().join(format!("symbiont-exploration-{nonce}.sqlite3"));
     let store = UsageStore::open(path.clone()).await.unwrap();
     let started = Utc::now();
+    let sensing_started =
+        (started - Duration::seconds(1)).to_rfc3339_opts(SecondsFormat::Millis, true);
     let root_started = started.to_rfc3339_opts(SecondsFormat::Millis, true);
     let child_started =
         (started + Duration::seconds(1)).to_rfc3339_opts(SecondsFormat::Millis, true);
@@ -331,8 +333,19 @@ async fn groups_recent_autonomous_runs_into_exploration_cycles() {
     store
         .record_all(&[
             autonomous_invocation(
-                "explore-root",
+                "sense-root",
                 None,
+                "ambient_sense",
+                &sensing_started,
+                &root_started,
+                30,
+                false,
+                Vec::new(),
+                Vec::new(),
+            ),
+            autonomous_invocation(
+                "explore-root",
+                Some("sense-root"),
                 "autonomous_scout",
                 &root_started,
                 &child_started,
@@ -384,7 +397,7 @@ async fn groups_recent_autonomous_runs_into_exploration_cycles() {
             ),
             autonomous_invocation(
                 "explore-child",
-                Some("explore-root"),
+                Some("sense-root"),
                 "autonomous",
                 &child_started,
                 &completed,
@@ -420,11 +433,13 @@ async fn groups_recent_autonomous_runs_into_exploration_cycles() {
 
     let runs = store.recent_explorations(5).await.unwrap();
     assert_eq!(runs.len(), 1);
-    assert_eq!(runs[0].trace_id, "explore-root");
-    assert_eq!(runs[0].model_runs.len(), 2);
-    assert_eq!(runs[0].model_runs[0].stage, "scout");
-    assert_eq!(runs[0].model_runs[1].stage, "review");
-    assert_eq!(runs[0].total_tokens, 200);
+    assert_eq!(runs[0].trace_id, "sense-root");
+    assert_eq!(runs[0].scope, "exploration");
+    assert_eq!(runs[0].model_runs.len(), 3);
+    assert_eq!(runs[0].model_runs[0].stage, "sense");
+    assert_eq!(runs[0].model_runs[1].stage, "scout");
+    assert_eq!(runs[0].model_runs[2].stage, "review");
+    assert_eq!(runs[0].total_tokens, 230);
     assert_eq!(runs[0].pcp_recall_calls, 1);
     assert_eq!(runs[0].web_searches, 1);
     assert_eq!(runs[0].search_queries, vec!["current signal"]);
@@ -446,10 +461,123 @@ async fn groups_recent_autonomous_runs_into_exploration_cycles() {
         Some("A signal worth surfacing.")
     );
     let headline = store.headline("2025-12-31T16:00:00Z").await.unwrap();
-    assert_eq!(headline.autonomous_tokens_today, 200);
+    assert_eq!(headline.autonomous_tokens_today, 230);
     assert_eq!(headline.autonomous_messages_today, 1);
     assert_eq!(headline.autonomous_notes_today, 1);
     assert_eq!(headline.autonomous_interventions_today, 0);
+
+    std::fs::remove_file(path).unwrap();
+}
+
+#[tokio::test]
+async fn keeps_a_terminal_sensing_pass_in_recent_exploration_history() {
+    let nonce = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_nanos();
+    let path = std::env::temp_dir().join(format!("symbiont-sensing-history-{nonce}.sqlite3"));
+    let store = UsageStore::open(path.clone()).await.unwrap();
+    let started = Utc::now();
+    let started_at = started.to_rfc3339_opts(SecondsFormat::Millis, true);
+    let completed_at =
+        (started + Duration::seconds(2)).to_rfc3339_opts(SecondsFormat::Millis, true);
+    store
+        .record_all(&[autonomous_invocation(
+            "sense-only",
+            None,
+            "ambient_sense",
+            &started_at,
+            &completed_at,
+            40,
+            false,
+            vec![ToolTraceStep {
+                sequence: 0,
+                namespace: "symbiont".to_owned(),
+                tool: "fetch_url".to_owned(),
+                started_at: started_at.clone(),
+                completed_at: completed_at.clone(),
+                duration_ms: 2_000,
+                succeeded: false,
+                arguments: json!({
+                    "url": "https://example.com/release",
+                    "purpose": "Check a recent release"
+                }),
+                result: json!({"error": "background policy"}),
+            }],
+            Vec::new(),
+        )])
+        .await
+        .unwrap();
+
+    let runs = store.recent_explorations(5).await.unwrap();
+    assert_eq!(runs.len(), 1);
+    assert_eq!(runs[0].trace_id, "sense-only");
+    assert_eq!(runs[0].scope, "sensing");
+    assert_eq!(runs[0].model_runs[0].stage, "sense");
+    assert_eq!(runs[0].sensing_candidate_count, 0);
+    assert_eq!(runs[0].web_searches, 1);
+    assert_eq!(
+        runs[0].focus.as_ref().map(|focus| focus.title.as_str()),
+        Some("Check a recent release")
+    );
+    assert_eq!(
+        store
+            .latest_exploration_completed_at()
+            .await
+            .unwrap()
+            .as_deref(),
+        Some(completed_at.as_str())
+    );
+
+    std::fs::remove_file(path).unwrap();
+}
+
+#[tokio::test]
+async fn does_not_duplicate_legacy_sensing_before_a_full_exploration() {
+    let nonce = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_nanos();
+    let path = std::env::temp_dir().join(format!("symbiont-legacy-sensing-{nonce}.sqlite3"));
+    let store = UsageStore::open(path.clone()).await.unwrap();
+    let started = Utc::now();
+    let sense_started = started.to_rfc3339_opts(SecondsFormat::Millis, true);
+    let sense_completed =
+        (started + Duration::seconds(1)).to_rfc3339_opts(SecondsFormat::Millis, true);
+    let scout_completed =
+        (started + Duration::seconds(3)).to_rfc3339_opts(SecondsFormat::Millis, true);
+    store
+        .record_all(&[
+            autonomous_invocation(
+                "legacy-sense",
+                None,
+                "ambient_sense",
+                &sense_started,
+                &sense_completed,
+                20,
+                false,
+                Vec::new(),
+                Vec::new(),
+            ),
+            autonomous_invocation(
+                "legacy-scout",
+                None,
+                "autonomous_scout",
+                &sense_completed,
+                &scout_completed,
+                80,
+                false,
+                Vec::new(),
+                Vec::new(),
+            ),
+        ])
+        .await
+        .unwrap();
+
+    let runs = store.recent_explorations(5).await.unwrap();
+    assert_eq!(runs.len(), 1);
+    assert_eq!(runs[0].trace_id, "legacy-scout");
+    assert_eq!(runs[0].scope, "exploration");
 
     std::fs::remove_file(path).unwrap();
 }

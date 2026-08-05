@@ -14,6 +14,32 @@ pub struct SensingSource {
     pub detail: String,
 }
 
+/// Immutable presentation identity for a model that can only contribute input.
+///
+/// It is captured with each candidate so later compute-setting changes never
+/// relabel a signal that has already appeared in the conversation timeline.
+#[derive(Clone, Debug, Deserialize, Serialize)]
+pub struct InputRoleSnapshot {
+    pub id: String,
+    pub name: String,
+    pub model: String,
+    pub effort: String,
+    pub avatar_seed: String,
+}
+
+impl InputRoleSnapshot {
+    pub fn ambient(model: &str, effort: &str) -> Self {
+        let normalized = normalize(model);
+        Self {
+            id: format!("ambient_{normalized}"),
+            name: format!("{model} · 广域观察"),
+            model: model.to_owned(),
+            effort: effort.to_owned(),
+            avatar_seed: normalized,
+        }
+    }
+}
+
 #[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum SensingSourceClass {
@@ -45,6 +71,7 @@ impl SensingSourceClass {
 pub struct SensingCandidateDraft {
     pub title: String,
     pub summary: String,
+    pub proposed_input: String,
     #[serde(default)]
     pub event_at: Option<String>,
     #[serde(default)]
@@ -59,6 +86,7 @@ pub struct SensingCandidate {
     pub id: String,
     pub title: String,
     pub summary: String,
+    pub proposed_input: String,
     #[serde(default)]
     pub event_at: Option<String>,
     #[serde(default)]
@@ -66,9 +94,10 @@ pub struct SensingCandidate {
     #[serde(default, alias = "relevance")]
     pub possible_connection: Option<String>,
     pub sources: Vec<SensingSource>,
+    pub actor: InputRoleSnapshot,
     pub observed_at: String,
     pub expires_at: String,
-    fingerprint: String,
+    pub(crate) fingerprint: String,
 }
 
 #[derive(Default, Deserialize, Serialize)]
@@ -126,8 +155,13 @@ pub struct SensingStore {
 impl SensingStore {
     pub async fn open(path: PathBuf) -> Result<Self> {
         let mut pool = match fs::read_to_string(&path).await {
-            Ok(content) => serde_json::from_str(&content)
-                .with_context(|| format!("parse sensing candidate pool {}", path.display()))?,
+            Ok(content) => match serde_json::from_str(&content) {
+                Ok(pool) => pool,
+                Err(error) => {
+                    tracing::warn!(%error, path = %path.display(), "discarding stale transient sensing candidate pool after schema change");
+                    CandidatePool::default()
+                }
+            },
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => CandidatePool::default(),
             Err(error) => {
                 return Err(error)
@@ -149,7 +183,11 @@ impl SensingStore {
     ///
     /// Candidates are deliberately not durable memory. A fresh pass supersedes
     /// the prior pool, even when its earlier candidates were not promoted.
-    pub async fn replace(&self, drafts: Vec<SensingCandidateDraft>) -> Result<usize> {
+    pub async fn replace(
+        &self,
+        drafts: Vec<SensingCandidateDraft>,
+        actor: InputRoleSnapshot,
+    ) -> Result<usize> {
         let now = Utc::now();
         let mut pool = self.pool.write().await;
         pool.candidates.clear();
@@ -168,6 +206,7 @@ impl SensingStore {
                 id: format!("sense_{}_{}", now.timestamp_millis(), sequence),
                 title: draft.title.trim().to_owned(),
                 summary: draft.summary.trim().to_owned(),
+                proposed_input: draft.proposed_input.trim().to_owned(),
                 event_at: draft
                     .event_at
                     .map(|event_at| event_at.trim().to_owned())
@@ -178,6 +217,7 @@ impl SensingStore {
                     .map(|connection| connection.trim().to_owned())
                     .filter(|connection| !connection.is_empty()),
                 sources: draft.sources,
+                actor: actor.clone(),
                 observed_at: timestamp(now),
                 expires_at: timestamp(now + Duration::hours(CANDIDATE_TTL_HOURS)),
                 fingerprint,
@@ -279,6 +319,11 @@ pub fn format_candidate_pool(candidates: &[SensingCandidate]) -> String {
             candidate.title,
             candidate.summary
         ));
+        lines.push(format!("proposed-input: {}", candidate.proposed_input));
+        lines.push(format!(
+            "input-role: {} ({}, {})",
+            candidate.actor.name, candidate.actor.model, candidate.actor.effort
+        ));
         if let Some(connection) = &candidate.possible_connection {
             lines.push(format!("possible-connection: {connection}"));
         } else {
@@ -334,7 +379,7 @@ mod tests {
     use std::time::{SystemTime, UNIX_EPOCH};
 
     use super::{
-        SensingCandidateDraft, SensingSource, SensingSourceClass, SensingStore,
+        InputRoleSnapshot, SensingCandidateDraft, SensingSource, SensingSourceClass, SensingStore,
         format_candidate_pool,
     };
 
@@ -342,6 +387,7 @@ mod tests {
         SensingCandidateDraft {
             title: title.to_owned(),
             summary: "A short factual change.".to_owned(),
+            proposed_input: "A short model input.".to_owned(),
             event_at: None,
             source_class: SensingSourceClass::Research,
             possible_connection: None,
@@ -360,16 +406,23 @@ mod tests {
             .as_nanos();
         let path = std::env::temp_dir().join(format!("symbiont-sensing-{nonce}.json"));
         let store = SensingStore::open(path.clone()).await.unwrap();
+        let actor = InputRoleSnapshot::ambient("test", "low");
         assert_eq!(
             store
-                .replace(vec![candidate("Old signal", "https://example.test/old")])
+                .replace(
+                    vec![candidate("Old signal", "https://example.test/old")],
+                    actor.clone()
+                )
                 .await
                 .unwrap(),
             1
         );
         assert_eq!(
             store
-                .replace(vec![candidate("New signal", "https://example.test/news")])
+                .replace(
+                    vec![candidate("New signal", "https://example.test/news")],
+                    actor
+                )
                 .await
                 .unwrap(),
             1
@@ -412,11 +465,15 @@ mod tests {
             .as_nanos();
         let path = std::env::temp_dir().join(format!("symbiont-sensing-open-{nonce}.json"));
         let store = SensingStore::open(path.clone()).await.unwrap();
+        let actor = InputRoleSnapshot::ambient("test", "low");
         store
-            .replace(vec![candidate(
-                "Unfamiliar but credible signal",
-                "https://example.test/open",
-            )])
+            .replace(
+                vec![candidate(
+                    "Unfamiliar but credible signal",
+                    "https://example.test/open",
+                )],
+                actor,
+            )
             .await
             .unwrap();
         let pool = format_candidate_pool(&store.review_batch(1).await.unwrap());
@@ -433,9 +490,10 @@ mod tests {
             .as_nanos();
         let path = std::env::temp_dir().join(format!("symbiont-sensing-event-{nonce}.json"));
         let store = SensingStore::open(path.clone()).await.unwrap();
+        let actor = InputRoleSnapshot::ambient("test", "low");
         let mut draft = candidate("Still-active recent event", "https://example.test/event");
         draft.event_at = Some("2026-07-24".to_owned());
-        store.replace(vec![draft]).await.unwrap();
+        store.replace(vec![draft], actor).await.unwrap();
 
         let pool = format_candidate_pool(&store.review_batch(1).await.unwrap());
         assert!(pool.contains("event-at=\"2026-07-24\""));
@@ -448,6 +506,7 @@ mod tests {
         let draft: SensingCandidateDraft = serde_json::from_value(serde_json::json!({
             "title": "Legacy signal",
             "summary": "Previously stored shape",
+            "proposed_input": "A model input",
             "relevance": "A tentative old connection",
             "sources": [{"url": "https://example.test/legacy", "detail": "Primary"}]
         }))
@@ -460,7 +519,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn legacy_candidate_pool_remains_readable_after_the_open_intake_upgrade() {
+    async fn stale_candidate_pool_is_discarded_after_a_schema_change() {
         let nonce = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .unwrap()
@@ -486,12 +545,7 @@ mod tests {
         .unwrap();
 
         let store = SensingStore::open(path.clone()).await.unwrap();
-        let candidate = store.review_batch(1).await.unwrap().remove(0);
-        assert_eq!(candidate.source_class, SensingSourceClass::OpenDiscovery);
-        assert_eq!(
-            candidate.possible_connection.as_deref(),
-            Some("An old tentative connection")
-        );
+        assert!(store.review_batch(1).await.unwrap().is_empty());
         std::fs::remove_file(path).unwrap();
     }
 }

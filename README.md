@@ -37,7 +37,7 @@
                PCP Runtime
 ```
 
-- **与 Codex：** Symbiont-d 可以把选定的 Codex 对话作为一次性、只读的自然上下文，也可以导出一份上下文包供你带到 Codex。它不替你派发、接管或伪造 Codex 任务。
+- **与 Codex：** Symbiont-d 可以把选定的 Codex 对话作为一次性、只读的自然上下文，也可以按当前用途召回相关主题的现有认识、用户确认与来源证据，供你带到 Codex。需要核验时再展开原始讨论。它不替你派发、接管或伪造 Codex 任务。
 - **与 PCP：** Symbiont-d 是 Host，负责判断何时写入、复核、修订或撤回记忆；[Paged Context Protocol (PCP)](https://github.com/glenzli/paged-context-protocol) Runtime 提供持久的 Pages、不可变 Revision、来源、关系和检索能力。
 - **与本地数据：** 数据默认留在本机。PCP Console 是独立的只读观察界面；Symbiont-d 自身只呈现与当前协作有关的工作状态。
 
@@ -102,7 +102,7 @@ outside world / your conversation / selected Codex context
                      PCP Runtime
 ```
 
-- **With Codex:** Symbiont-d can attach a selected Codex conversation as bounded, read-only context for one turn, or export a context packet for you to bring into Codex. It does not dispatch, take over, or impersonate Codex tasks.
+- **With Codex:** Symbiont-d can attach a selected Codex conversation as bounded, read-only context for one turn, or recall the current understanding, user confirmations, and source evidence for a topic according to the work at hand. The original exchange is expanded only when verification needs it. It does not dispatch, take over, or impersonate Codex tasks.
 - **With PCP:** Symbiont-d is the Host. It decides when memory is written, reviewed, revised, or retracted. The [Paged Context Protocol (PCP)](https://github.com/glenzli/paged-context-protocol) Runtime provides durable Pages, immutable Revisions, provenance, relations, and retrieval.
 - **With local data:** Data stays local by default. PCP Console is a separate read-only observation surface; Symbiont-d presents only the working state relevant to the current collaboration.
 

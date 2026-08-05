@@ -22,7 +22,10 @@ use tokio_stream::{StreamExt, wrappers::ReceiverStream};
 use crate::{
     asset::{AssetStore, MAX_IMAGE_BYTES, MAX_IMAGES_PER_MESSAGE, SavedImage},
     autonomy::{AutonomyConfig, AutonomyStore},
-    bridge::{BridgeContextPacket, BridgeSettingsDraft, BridgeSnapshot, CodexBridge},
+    bridge::{
+        BridgeContextPacket, BridgeExpandRequest, BridgeRecallBundle, BridgeRecallExpansion,
+        BridgeRecallRequest, BridgeSettingsDraft, BridgeSnapshot, CodexBridge,
+    },
     codex::{
         ChatDisposition, ChatInput, ChatOutcome, CodexClient, RateLimitInfo, RuntimeEvent,
         import_generated_images,
@@ -53,6 +56,7 @@ use crate::{
         ReflectionSnapshot, TurnDisposition,
     },
     sensing::{SensingCandidate, SensingSource},
+    signals::{SignalEvent, SignalStore},
     symbiont_context::{
         ContextAuthor, ContextDocumentKind, SymbiontContextSnapshot, SymbiontContextStore,
     },
@@ -108,6 +112,7 @@ pub struct AppState {
     usage: Arc<UsageStore>,
     rate_limits: Arc<RwLock<Option<RateLimitInfo>>>,
     exploration: ExplorationHandle,
+    signals: Arc<SignalStore>,
     reflection: ReflectionHandle,
     reconciliation: ReconciliationHandle,
     pcp_index: Arc<PcpIndex>,
@@ -133,6 +138,7 @@ impl AppState {
         usage: Arc<UsageStore>,
         rate_limits: Arc<RwLock<Option<RateLimitInfo>>>,
         exploration: ExplorationHandle,
+        signals: Arc<SignalStore>,
         reflection: ReflectionHandle,
         reconciliation: ReconciliationHandle,
         pcp_index: Arc<PcpIndex>,
@@ -159,6 +165,7 @@ impl AppState {
             usage,
             rate_limits,
             exploration,
+            signals,
             reflection,
             reconciliation,
             pcp_index,
@@ -177,6 +184,7 @@ struct ChatRequest {
     quotes: Vec<MessageQuote>,
     topic: Option<TopicContext>,
     external_contexts: Vec<ExternalContext>,
+    signal_revision_id: Option<String>,
     minimum_lane: Option<crate::compute::ComputeLane>,
 }
 
@@ -186,6 +194,7 @@ struct IncomingChatRequest {
     quotes: Vec<MessageQuoteDraft>,
     topic_id: Option<String>,
     codex_task_ids: Vec<String>,
+    signal_id: Option<String>,
     minimum_lane: Option<crate::compute::ComputeLane>,
 }
 
@@ -200,6 +209,7 @@ struct CodexTasksQuery {
 #[serde(rename_all = "camelCase")]
 struct BootstrapResponse {
     messages: Vec<MemoryEntry>,
+    signals: Vec<SignalEvent>,
     turn_dispositions: Vec<TurnDisposition>,
     memory_chars: usize,
     status: &'static str,
@@ -241,6 +251,7 @@ struct RuntimeResponse {
     conversation: ConversationSnapshot,
     compute_policies: Vec<ComputeTopicPolicy>,
     messages: Vec<MemoryEntry>,
+    signals: Vec<SignalEvent>,
     turn_dispositions: Vec<TurnDisposition>,
     permissions: Vec<PermissionRequestView>,
     bridge: BridgeSnapshot,
@@ -546,6 +557,8 @@ pub fn router(state: AppState) -> Router {
         .route("/api/topics/{topic_id}", get(topic_detail))
         .route("/api/bridge/config", post(update_bridge_config))
         .route("/api/bridge/context", get(bridge_context))
+        .route("/api/bridge/recall", get(bridge_recall))
+        .route("/api/bridge/expand", get(bridge_expand))
         .route("/api/codex/tasks", get(codex_tasks))
         .route("/api/codex/tasks/{thread_id}", get(codex_task))
         .route("/api/traces/{trace_id}", get(trace_detail))
@@ -757,6 +770,11 @@ async fn bootstrap(State(state): State<AppState>) -> Result<Json<BootstrapRespon
         .into_iter()
         .filter(|entry| matches!(entry.role, MemoryRole::User | MemoryRole::Assistant))
         .collect();
+    let signals = state
+        .signals
+        .visible(100)
+        .await
+        .map_err(ApiError::internal)?;
     let turn_dispositions = state
         .reflection
         .store()
@@ -783,6 +801,7 @@ async fn bootstrap(State(state): State<AppState>) -> Result<Json<BootstrapRespon
 
     Ok(Json(BootstrapResponse {
         messages,
+        signals,
         turn_dispositions,
         memory_chars,
         status: "connected",
@@ -1020,6 +1039,30 @@ async fn bridge_context(
         .map_err(ApiError::internal)
 }
 
+async fn bridge_recall(
+    State(state): State<AppState>,
+    Query(query): Query<BridgeRecallRequest>,
+) -> Result<Json<BridgeRecallBundle>, ApiError> {
+    state
+        .bridge
+        .recall(query)
+        .await
+        .map(Json)
+        .map_err(ApiError::internal)
+}
+
+async fn bridge_expand(
+    State(state): State<AppState>,
+    Query(query): Query<BridgeExpandRequest>,
+) -> Result<Json<BridgeRecallExpansion>, ApiError> {
+    state
+        .bridge
+        .expand(query)
+        .await
+        .map(Json)
+        .map_err(ApiError::internal)
+}
+
 async fn codex_tasks(
     State(state): State<AppState>,
     Query(query): Query<CodexTasksQuery>,
@@ -1084,6 +1127,11 @@ async fn runtime(
         .live_messages_after(query.after_revision_id.as_deref(), 20)
         .await
         .map_err(ApiError::internal)?;
+    let signals = state
+        .signals
+        .visible(100)
+        .await
+        .map_err(ApiError::internal)?;
     let turn_dispositions = state
         .reflection
         .store()
@@ -1100,6 +1148,7 @@ async fn runtime(
         conversation: state.conversation.snapshot().await,
         compute_policies: state.compute_policies.snapshot().await,
         messages,
+        signals,
         turn_dispositions,
         permissions: state.permissions.snapshot().await,
         bridge: state.bridge.snapshot().await,
@@ -1823,6 +1872,7 @@ async fn parse_chat_request(mut multipart: Multipart) -> Result<IncomingChatRequ
     let mut quotes = Vec::new();
     let mut topic_id = None;
     let mut codex_task_ids = Vec::new();
+    let mut signal_id = None;
     let mut minimum_lane = None;
     while let Some(field) = multipart
         .next_field()
@@ -1895,6 +1945,21 @@ async fn parse_chat_request(mut multipart: Multipart) -> Result<IncomingChatRequ
                     codex_task_ids.push(value.to_owned());
                 }
             }
+            Some("signalId") => {
+                if signal_id.is_some() {
+                    return Err(ApiError::bad_request(
+                        "A message can respond to at most one input signal.",
+                    ));
+                }
+                let value = field.text().await.map_err(|error| {
+                    ApiError::bad_request(format!("Invalid input signal: {error}"))
+                })?;
+                let value = value.trim();
+                if value.is_empty() || value.len() > 160 {
+                    return Err(ApiError::bad_request("Invalid input signal."));
+                }
+                signal_id = Some(value.to_owned());
+            }
             _ => {}
         }
     }
@@ -1904,6 +1969,7 @@ async fn parse_chat_request(mut multipart: Multipart) -> Result<IncomingChatRequ
         quotes,
         topic_id,
         codex_task_ids,
+        signal_id,
         minimum_lane,
     })
 }
@@ -1953,7 +2019,7 @@ async fn prepare_chat_request(
         ),
         None => None,
     };
-    let mut external_contexts = Vec::with_capacity(incoming.codex_task_ids.len());
+    let mut external_contexts = Vec::with_capacity(incoming.codex_task_ids.len() + 1);
     if !incoming.codex_task_ids.is_empty() {
         require_task_access(state).await?;
         for task_id in incoming.codex_task_ids {
@@ -1965,12 +2031,44 @@ async fn prepare_chat_request(
             external_contexts.push(codex_task_context(detail));
         }
     }
+    let signal_revision_id = match incoming.signal_id {
+        Some(signal_id) => {
+            let signal = state
+                .signals
+                .get(&signal_id)
+                .await
+                .map_err(ApiError::internal)?
+                .ok_or_else(|| {
+                    ApiError::bad_request("This input signal is no longer available.")
+                })?;
+            let revision_id = match signal.promoted_revision_id.as_deref() {
+                Some(revision_id) => revision_id.to_owned(),
+                None => {
+                    state
+                        .continuity
+                        .ingest_external_signal(&signal)
+                        .await
+                        .map_err(ApiError::internal)?
+                        .revision_id
+                }
+            };
+            state
+                .signals
+                .mark_promoted(&signal_id, revision_id.clone())
+                .await
+                .map_err(ApiError::internal)?;
+            external_contexts.push(signal_context(&signal));
+            Some(revision_id)
+        }
+        None => None,
+    };
     Ok(ChatRequest {
         message,
         images,
         quotes,
         topic,
         external_contexts,
+        signal_revision_id,
         minimum_lane,
     })
 }
@@ -2000,7 +2098,7 @@ async fn store_user_message(
             MessageLinks {
                 responds_to: None,
                 continues_from: None,
-                input_revision_ids: Vec::new(),
+                input_revision_ids: request.signal_revision_id.into_iter().collect(),
                 surfaced_hunch_revision_ids: Vec::new(),
                 quotes: request.quotes.clone(),
                 topic: request.topic.as_ref().map(TopicContext::message_reference),
@@ -2462,6 +2560,26 @@ fn codex_task_context(detail: crate::codex::CodexTaskDetail) -> ExternalContext 
             detail.task.title,
             cwd.unwrap_or_default(),
             transcript
+        ),
+    }
+}
+
+fn signal_context(signal: &SignalEvent) -> ExternalContext {
+    ExternalContext {
+        source: "symbiont_input_signal".to_owned(),
+        title: format!("{} · {}", signal.actor.name, signal.title),
+        content: format!(
+            "Input-only model role: {} ({}, {}). This is an external signal the user chose to reply to; respond as symbiont-d, do not impersonate the input role.\n\n{}\n\nSources:\n{}",
+            signal.actor.name,
+            signal.actor.model,
+            signal.actor.effort,
+            signal.content,
+            signal
+                .sources
+                .iter()
+                .map(|source| format!("- {} — {}", source.url, source.detail))
+                .collect::<Vec<_>>()
+                .join("\n")
         ),
     }
 }

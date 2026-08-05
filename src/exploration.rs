@@ -8,7 +8,7 @@ pub use intent::{
 pub use manual_run::{ManualExplorationRun, ManualExplorationStatus, ManualExplorationStore};
 
 use std::{
-    collections::VecDeque,
+    collections::{HashSet, VecDeque},
     sync::{
         Arc,
         atomic::{AtomicU64, Ordering},
@@ -27,8 +27,8 @@ use tokio::{
 
 use crate::{
     autonomy::{AutonomyConfig, AutonomyStore, QuietHours},
-    codex::{CodexClient, RuntimeEvent},
-    compute::ComputeStore,
+    codex::{CodexClient, RuntimeEvent, SensingReviewDisposition},
+    compute::{ComputeLane, ComputeStore},
     continuity::{ContinuityHost, MessageLinks},
     conversation::ConversationCoordinator,
     curiosity::CuriosityStore,
@@ -37,9 +37,10 @@ use crate::{
     profile::{ProfileStore, SetupStatus},
     reflection::ReflectionStore,
     sensing::{
-        REVIEW_BATCH_SIZE, SensingCandidate, SensingIntakeBrief, SensingStore,
+        InputRoleSnapshot, REVIEW_BATCH_SIZE, SensingCandidate, SensingIntakeBrief, SensingStore,
         format_candidate_pool,
     },
+    signals::SignalStore,
     symbiont_context::SymbiontContextStore,
     usage::{UsageHeadline, UsageStore},
 };
@@ -200,6 +201,7 @@ impl ExplorationHandle {
         reflection: Arc<ReflectionStore>,
         usage: Arc<UsageStore>,
         sensing: Arc<SensingStore>,
+        signals: Arc<SignalStore>,
         conversation: ConversationCoordinator,
         intents: Arc<ExplorationIntentQueue>,
         manual_runs: Arc<ManualExplorationStore>,
@@ -252,6 +254,7 @@ impl ExplorationHandle {
             reflection,
             usage,
             Arc::clone(&sensing),
+            Arc::clone(&signals),
             conversation,
             Arc::clone(&intents),
             Arc::clone(&manual_runs),
@@ -348,6 +351,7 @@ async fn run_scheduler(
     reflection: Arc<ReflectionStore>,
     usage: Arc<UsageStore>,
     sensing: Arc<SensingStore>,
+    signals: Arc<SignalStore>,
     conversation: ConversationCoordinator,
     intents: Arc<ExplorationIntentQueue>,
     manual_runs: Arc<ManualExplorationStore>,
@@ -436,6 +440,7 @@ async fn run_scheduler(
                     Arc::clone(&reflection),
                     Arc::clone(&usage),
                     Arc::clone(&sensing),
+                    Arc::clone(&signals),
                     conversation.clone(),
                     trigger.clone(),
                 )
@@ -620,6 +625,7 @@ async fn run_once(
     reflection: Arc<ReflectionStore>,
     usage: Arc<UsageStore>,
     sensing: Arc<SensingStore>,
+    signals: Arc<SignalStore>,
     conversation: ConversationCoordinator,
     trigger: Option<ExplorationTrigger>,
 ) -> Result<ExplorationRunCompletion> {
@@ -723,6 +729,7 @@ async fn run_once(
     };
     let input_epoch = *input_events.borrow();
     let mut reviewed_candidates = Vec::new();
+    let mut sensing_trace_id = None;
     if scheduled {
         let intake_brief = match sensing.next_intake_brief().await {
             Ok(brief) => brief,
@@ -764,7 +771,7 @@ async fn run_once(
                 return Err(error);
             }
         };
-        let trace_id = sensing_outcome
+        sensing_trace_id = sensing_outcome
             .invocations
             .first()
             .map(|invocation| invocation.id.clone());
@@ -773,7 +780,9 @@ async fn run_once(
             return Err(error);
         }
         if !sensing_outcome.interrupted {
-            if let Err(error) = sensing.replace(sensing_outcome.candidates).await {
+            let sense_lane = compute.lane(ComputeLane::Sense);
+            let actor = InputRoleSnapshot::ambient(&sense_lane.model, &sense_lane.effort);
+            if let Err(error) = sensing.replace(sensing_outcome.candidates, actor).await {
                 stop_activity_relay(runtime_tx, activity_task).await?;
                 return Err(error);
             }
@@ -799,36 +808,6 @@ async fn run_once(
             .await?;
             return Ok(ExplorationRunCompletion::superseded("newer_user_input"));
         }
-        let headline = match usage.headline(&today_started_at()).await {
-            Ok(headline) => headline,
-            Err(error) => {
-                stop_activity_relay(runtime_tx, activity_task).await?;
-                return Err(error);
-            }
-        };
-        if all_budgets_exhausted(&autonomy_config, &headline) {
-            stop_activity_relay(runtime_tx, activity_task).await?;
-            settle_sensing_only(
-                &state,
-                &manual_runs,
-                trigger.as_ref(),
-                ExplorationIntentStatus::Silent,
-                if pending_candidate_count == 0 {
-                    "no_candidates"
-                } else {
-                    "candidates_waiting"
-                },
-                pending_candidate_count,
-                None,
-            )
-            .await?;
-            return Ok(ExplorationRunCompletion {
-                status: ExplorationIntentStatus::Silent,
-                trace_id,
-                result_revision_id: None,
-                retry_reason: None,
-            });
-        }
         reviewed_candidates = match sensing.review_batch(REVIEW_BATCH_SIZE).await {
             Ok(candidates) => candidates,
             Err(error) => {
@@ -850,11 +829,107 @@ async fn run_once(
             .await?;
             return Ok(ExplorationRunCompletion {
                 status: ExplorationIntentStatus::Silent,
-                trace_id,
+                trace_id: sensing_trace_id,
                 result_revision_id: None,
                 retry_reason: None,
             });
         }
+
+        let Ok(mut client) = codex.try_lock() else {
+            stop_activity_relay(runtime_tx, activity_task).await?;
+            settle_sensing_only(
+                &state,
+                &manual_runs,
+                trigger.as_ref(),
+                ExplorationIntentStatus::Superseded,
+                "superseded",
+                pending_candidate_count,
+                Some("codex_busy"),
+            )
+            .await?;
+            return Ok(ExplorationRunCompletion::superseded("codex_busy"));
+        };
+        let review = client
+            .review_sensing(
+                &reviewed_candidates,
+                &compute,
+                &profile,
+                input_events.clone(),
+                runtime_tx.clone(),
+            )
+            .await;
+        drop(client);
+        let review = match review {
+            Ok(outcome) => outcome,
+            Err(error) => {
+                stop_activity_relay(runtime_tx, activity_task).await?;
+                return Err(error);
+            }
+        };
+        if let Err(error) = usage.record_all(&review.invocations).await {
+            stop_activity_relay(runtime_tx, activity_task).await?;
+            return Err(error);
+        }
+        if review.interrupted {
+            stop_activity_relay(runtime_tx, activity_task).await?;
+            settle_sensing_only(
+                &state,
+                &manual_runs,
+                trigger.as_ref(),
+                ExplorationIntentStatus::Superseded,
+                "superseded",
+                pending_candidate_count,
+                Some("newer_user_input"),
+            )
+            .await?;
+            return Ok(ExplorationRunCompletion::superseded("newer_user_input"));
+        }
+
+        let candidates_by_id = reviewed_candidates
+            .iter()
+            .map(|candidate| (candidate.id.as_str(), candidate))
+            .collect::<std::collections::HashMap<_, _>>();
+        let mut investigate_ids = HashSet::new();
+        let mut broadcast_count = 0usize;
+        for decision in review.decisions {
+            let Some(candidate) = candidates_by_id.get(decision.candidate_id.as_str()) else {
+                continue;
+            };
+            match decision.disposition {
+                SensingReviewDisposition::Broadcast => {
+                    signals.publish(candidate, decision.reason).await?;
+                    broadcast_count += 1;
+                }
+                SensingReviewDisposition::Investigate => {
+                    investigate_ids.insert(decision.candidate_id);
+                }
+                SensingReviewDisposition::Discard | SensingReviewDisposition::Hold => {}
+            }
+        }
+        if investigate_ids.is_empty() {
+            stop_activity_relay(runtime_tx, activity_task).await?;
+            settle_sensing_only(
+                &state,
+                &manual_runs,
+                trigger.as_ref(),
+                ExplorationIntentStatus::Silent,
+                if broadcast_count > 0 {
+                    "input_signals_broadcast"
+                } else {
+                    "reviewed_silent"
+                },
+                pending_candidate_count,
+                None,
+            )
+            .await?;
+            return Ok(ExplorationRunCompletion {
+                status: ExplorationIntentStatus::Silent,
+                trace_id: sensing_trace_id,
+                result_revision_id: None,
+                retry_reason: None,
+            });
+        }
+        reviewed_candidates.retain(|candidate| investigate_ids.contains(&candidate.id));
     }
     let recent_explorations = match usage.recent_explorations(EXPLORATION_JOURNAL_RUNS).await {
         Ok(runs) => runs,
@@ -932,6 +1007,12 @@ async fn run_once(
         .await
         .context("join exploration activity relay")?;
     let mut outcome = outcome?;
+    if let Some(root_trace_id) = sensing_trace_id.as_ref() {
+        for invocation in &mut outcome.invocations {
+            invocation.parent_id = Some(root_trace_id.clone());
+        }
+        outcome.metadata.trace_id = Some(root_trace_id.clone());
+    }
     let trace_id = outcome.metadata.trace_id.clone().or_else(|| {
         outcome
             .invocations

@@ -11,6 +11,7 @@ mod tool_dedup;
 mod tools;
 mod trace;
 
+pub use autonomous::SensingReviewDisposition;
 pub use client::{
     ChatInput, ChatOutcome, CodexClient, CodexConfig, GeneratedImageOutput,
     PcpMaintenanceModelRequest, RateLimitInfo, ReconciliationModelRequest, RuntimeEvent,

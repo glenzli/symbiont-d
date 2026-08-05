@@ -11,6 +11,7 @@ use super::trace::{self, TraceBundle};
 #[serde(rename_all = "camelCase")]
 pub struct ExplorationRunSummary {
     pub trace_id: String,
+    pub scope: String,
     pub started_at: String,
     pub completed_at: String,
     pub duration_ms: u64,
@@ -24,6 +25,7 @@ pub struct ExplorationRunSummary {
     pub reasoning_summaries: Vec<String>,
     pub web_searches: u64,
     pub search_queries: Vec<String>,
+    pub sensing_candidate_count: usize,
     pub pcp_recall_calls: u64,
     pub pcp_write_calls: u64,
     pub details_retained: bool,
@@ -52,10 +54,23 @@ pub(super) fn read_recent(
     let mut statement = connection
         .prepare(
             "
-            SELECT id
-            FROM invocations
-            WHERE origin IN ('autonomous_scout', 'autonomous') AND parent_id IS NULL
-            ORDER BY started_at DESC
+            SELECT root.id
+            FROM invocations root
+            WHERE root.origin IN ('ambient_sense', 'autonomous_scout', 'autonomous')
+              AND root.parent_id IS NULL
+              AND (
+                    root.origin != 'ambient_sense'
+                    OR NOT EXISTS (
+                        SELECT 1
+                        FROM invocations legacy_scout
+                        WHERE legacy_scout.origin = 'autonomous_scout'
+                          AND legacy_scout.parent_id IS NULL
+                          AND legacy_scout.started_at >= root.completed_at
+                          AND julianday(legacy_scout.started_at)
+                                <= julianday(root.completed_at) + (120.0 / 86400.0)
+                    )
+              )
+            ORDER BY root.started_at DESC
             LIMIT ?1
             ",
         )
@@ -85,6 +100,9 @@ fn summarize(bundle: TraceBundle) -> ExplorationRunSummary {
     let mut search_queries = Vec::new();
     let mut web_searches = 0_u64;
     let mut finding_focus = None;
+    let mut sensing_focus = None;
+    let mut fetch_focus = None;
+    let mut sensing_candidate_count = 0_usize;
 
     for run in &bundle.runs {
         for step in &run.steps {
@@ -110,6 +128,40 @@ fn summarize(bundle: TraceBundle) -> ExplorationRunSummary {
                         detail: detail.filter(|detail| detail != &title),
                         title,
                     });
+                }
+            }
+            if step.succeeded
+                && step.namespace == "symbiont"
+                && step.tool == "submit_sensing_candidates"
+                && let Some(candidates) = step
+                    .arguments
+                    .get("candidates")
+                    .and_then(serde_json::Value::as_array)
+            {
+                sensing_candidate_count += candidates.len();
+                if sensing_focus.is_none()
+                    && let Some(candidate) = candidates.first()
+                    && let Some(title) = compact_argument(candidate, "title", 180)
+                {
+                    sensing_focus = Some(ExplorationFocusSummary {
+                        detail: compact_argument(candidate, "summary", 360)
+                            .filter(|detail| detail != &title),
+                        title,
+                    });
+                }
+            }
+            if step.namespace == "symbiont" && step.tool == "fetch_url" {
+                web_searches += 1;
+                if let Some(purpose) = compact_argument(&step.arguments, "purpose", 220) {
+                    if !search_queries.iter().any(|existing| existing == &purpose) {
+                        search_queries.push(purpose.clone());
+                    }
+                    if fetch_focus.is_none() {
+                        fetch_focus = Some(ExplorationFocusSummary {
+                            title: purpose,
+                            detail: compact_argument(&step.arguments, "url", 280),
+                        });
+                    }
                 }
             }
         }
@@ -177,6 +229,7 @@ fn summarize(bundle: TraceBundle) -> ExplorationRunSummary {
             display_name: run.display_name.clone(),
             effort: run.effort.clone(),
             stage: match (run.origin.as_str(), run.parent_id.is_some()) {
+                ("ambient_sense", _) => "sense",
                 ("autonomous_scout", _) => "scout",
                 ("autonomous", true) => "review",
                 _ => "explore",
@@ -189,9 +242,22 @@ fn summarize(bundle: TraceBundle) -> ExplorationRunSummary {
 
     reasoning_summaries.truncate(24);
     search_queries.truncate(12);
-    let focus = finding_focus.or_else(|| fallback_focus(&search_queries, &reasoning_summaries));
+    let scope = if bundle
+        .runs
+        .iter()
+        .any(|run| matches!(run.origin.as_str(), "autonomous_scout" | "autonomous"))
+    {
+        "exploration"
+    } else {
+        "sensing"
+    };
+    let focus = finding_focus
+        .or(sensing_focus)
+        .or(fetch_focus)
+        .or_else(|| fallback_focus(&search_queries, &reasoning_summaries));
     ExplorationRunSummary {
         trace_id: bundle.trace_id,
+        scope: scope.to_owned(),
         started_at,
         completed_at,
         duration_ms,
@@ -205,6 +271,7 @@ fn summarize(bundle: TraceBundle) -> ExplorationRunSummary {
         reasoning_summaries,
         web_searches,
         search_queries,
+        sensing_candidate_count,
         pcp_recall_calls: bundle.pcp_recall_calls,
         pcp_write_calls: bundle.pcp_write_calls,
         details_retained: bundle.details_retained,

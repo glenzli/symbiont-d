@@ -538,6 +538,92 @@ html[data-native-shell="macos"] .topbar {
   margin: 0 0 17px;
 }
 
+.message.input-signal {
+  width: min(680px, 88%);
+  margin: 4px 0 20px 20px;
+}
+
+.input-signal .message-content {
+  padding: 11px 13px 10px;
+  border: 1px solid color-mix(in srgb, var(--border-strong) 76%, #6f8799);
+  border-radius: 11px;
+  background: color-mix(in srgb, var(--surface-subtle) 88%, #edf3f5);
+}
+
+.message-avatar.input-role-avatar {
+  display: grid;
+  place-items: center;
+  border: 1px solid color-mix(in srgb, var(--border-strong) 74%, #6f8799);
+  color: #547184;
+  background: #f4f8f9;
+  font-size: 12px;
+  font-weight: 700;
+}
+
+.input-signal-label {
+  margin: 3px 0 7px;
+  color: var(--text-faint);
+  font-size: 9px;
+  letter-spacing: .06em;
+}
+
+.input-signal .message-body {
+  font-size: 13px;
+}
+
+.input-signal-foot {
+  margin-top: 10px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  color: var(--text-soft);
+  font-size: 10px;
+}
+
+.input-signal-foot > span {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.input-signal-reply {
+  flex: 0 0 auto;
+  padding: 4px 8px;
+  border: 1px solid var(--border-strong);
+  border-radius: 999px;
+  color: var(--text-soft);
+  background: transparent;
+  cursor: pointer;
+  font: inherit;
+}
+
+.input-signal-reply:hover {
+  border-color: var(--text-soft);
+  color: var(--text);
+  background: var(--surface);
+}
+
+.input-signal-sources {
+  margin-top: 8px;
+  color: var(--text-faint);
+  font-size: 9px;
+}
+
+.input-signal-sources summary {
+  cursor: pointer;
+}
+
+.input-signal-sources ul {
+  margin: 5px 0 0;
+  padding-left: 16px;
+}
+
+.input-signal-sources a {
+  color: inherit;
+}
+
 .conversation-notice {
   width: min(740px, 92%);
   min-height: 30px;

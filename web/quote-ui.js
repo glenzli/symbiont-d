@@ -108,17 +108,7 @@ export function initQuoteUi({
   }
 
   function drafts() {
-    return quotes.map((quote) => ({
-      sourceRevisionId: quote.sourceRevisionId,
-      selectedText: quote.text,
-      sourceRole: quote.sourceRole,
-      sourceAt: quote.sourceAt,
-      sourceSha256: quote.sourceSha256,
-      startOffset: quote.startOffset,
-      endOffset: quote.endOffset,
-      wholeMessage: quote.wholeMessage,
-      truncated: quote.truncated,
-    }));
+    return quotes.map(quoteDraft).filter(Boolean);
   }
 
   function parts() {
@@ -274,6 +264,18 @@ function normalizeQuote(value) {
     endOffset: quote.endOffset ?? null,
     wholeMessage: quote.wholeMessage === true,
     truncated: quote.truncated === true || text.length > MAX_QUOTE_CHARS,
+  };
+}
+
+export function quoteDraft(value) {
+  const quote = normalizeQuote(value);
+  if (!quote?.sourceRevisionId || !quote.text) return null;
+  return {
+    sourceRevisionId: quote.sourceRevisionId,
+    selectedText: quote.text,
+    startOffset: quote.startOffset,
+    endOffset: quote.endOffset,
+    wholeMessage: quote.wholeMessage,
   };
 }
 

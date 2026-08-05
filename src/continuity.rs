@@ -34,6 +34,7 @@ use crate::{
         MessageQuote, MessageQuoteDraft, MessageTopicReference,
     },
     profile::{ProfileSnapshot, SetupStatus},
+    signals::SignalEvent,
     working_context::{WORKING_CONTEXT_SCAN_MESSAGES, WorkingContext},
 };
 
@@ -137,6 +138,73 @@ pub struct ImageAssetPage {
 }
 
 impl ContinuityHost {
+    /// Makes a user-addressed input signal durable only after the user chooses to reply to it.
+    ///
+    /// The source remains an immutable external record, separate from the assistant's later
+    /// interpretation and from the transient signal timeline.
+    pub async fn ingest_external_signal(&self, signal: &SignalEvent) -> Result<WriteResult> {
+        let observed_at = now();
+        let actor = Actor {
+            actor_type: ActorType::Model,
+            actor_id: format!("input-role:{}", signal.actor.id),
+        };
+        let payload = serde_json::to_string_pretty(&json!({
+            "title": signal.title,
+            "content": signal.content,
+            "summary": signal.summary,
+            "actor": signal.actor,
+            "event_at": signal.event_at,
+            "observed_at": signal.observed_at,
+            "source_class": signal.source_class,
+            "review_reason": signal.review_reason,
+        }))?;
+        self.store
+            .write_page(WritePageRequest {
+                owner_id: self.store.owner_id().to_owned(),
+                namespace: self.scopes.conversation.clone(),
+                visibility: "private".to_owned(),
+                lifecycle_status: LifecycleStatus::Active,
+                kind: "external_signal".to_owned(),
+                mutability: PageMutability::Sealed,
+                created_by: actor.clone(),
+                observed_at: Some(observed_at.clone()),
+                valid_from: None,
+                valid_to: None,
+                payload: Some(PagePayload {
+                    media_type: "application/vnd.symbiont.external-signal+json".to_owned(),
+                    content: payload,
+                }),
+                source_refs: signal
+                    .sources
+                    .iter()
+                    .map(|source| SourceRef {
+                        source_type: "web".to_owned(),
+                        uri: source.url.clone(),
+                        locator: None,
+                        metadata: Some(json!({"detail": source.detail})),
+                    })
+                    .collect(),
+                facets: Some(json!({
+                    "kind": "external_signal",
+                    "signal_id": signal.id,
+                    "candidate_id": signal.candidate_id,
+                    "source_class": signal.source_class,
+                    "actor_id": signal.actor.id,
+                    "actor_name": signal.actor.name,
+                })),
+                provenance: vec![ProvenanceEvent {
+                    operation: "promote_input_signal".to_owned(),
+                    actor,
+                    timestamp: observed_at,
+                    input_revision_ids: Vec::new(),
+                    tool_or_model: Some(signal.actor.model.clone()),
+                }],
+                initial_relations: Vec::new(),
+                idempotency_key: Some(format!("external-signal:{}", signal.id)),
+            })
+            .await
+    }
+
     pub fn access_session(owner_id: &str) -> AccessSession {
         AccessSession::full_control(
             AccessPrincipal {

@@ -302,18 +302,26 @@ function renderRun(run) {
   const article = document.createElement("article");
   article.className = "exploration-run";
   article.dataset.outcome = run.surfaced ? "messaged" : "silent";
+  const sensingOnly = run.scope === "sensing";
 
   const header = document.createElement("header");
   const identity = document.createElement("span");
   const outcome = document.createElement("strong");
   const time = document.createElement("time");
-  outcome.textContent = run.surfaced
-    ? run.outreachKind === "discussion"
-      ? "发起了一个讨论"
-      : run.outreachKind === "note"
-        ? "留了一条新消息"
-        : "发起了一次介入"
-    : "完成，决定不打扰";
+  outcome.textContent =
+    run.status !== "completed"
+      ? sensingOnly
+        ? "感知未完整结束"
+        : "探索未完整结束"
+      : run.surfaced
+        ? run.outreachKind === "discussion"
+          ? "发起了一个讨论"
+          : run.outreachKind === "note"
+            ? "留了一条新消息"
+            : "发起了一次介入"
+        : sensingOnly
+          ? "完成感知，未进入深入复核"
+          : "完成，决定不打扰";
   time.dateTime = run.completedAt;
   time.textContent = new Date(run.completedAt).toLocaleString([], {
     month: "numeric",
@@ -338,7 +346,7 @@ function renderRun(run) {
     focus.className = "exploration-focus";
     const label = document.createElement("strong");
     const title = document.createElement("p");
-    label.textContent = "这次看了什么";
+    label.textContent = sensingOnly ? "这次感知了什么" : "这次看了什么";
     title.textContent = run.focus.title;
     focus.append(label, title);
     if (run.focus.detail) {
@@ -358,8 +366,14 @@ function renderRun(run) {
     const silent = document.createElement("p");
     silent.className = "exploration-silent";
     silent.textContent = run.detailsRetained
-      ? "模型完成了检索和判断，但没有发现值得介入或留给你的新信号。"
-      : "本次没有发出消息；详细判断过程已过期。";
+      ? sensingOnly
+        ? run.sensingCandidateCount
+          ? `形成了 ${run.sensingCandidateCount} 条临时候选，但本轮没有进入深入复核。`
+          : "完成了外部信息感知，但没有形成值得进入深入复核的候选。"
+        : "模型完成了检索和判断，但没有发现值得介入或留给你的新信号。"
+      : sensingOnly
+        ? "本次感知没有进入深入复核；详细过程已过期。"
+        : "本次没有发出消息；详细判断过程已过期。";
     article.append(silent);
   }
 
@@ -371,7 +385,7 @@ function renderRun(run) {
     const details = document.createElement("details");
     details.className = "exploration-process";
     const summary = document.createElement("summary");
-    summary.textContent = `判断过程摘要 · ${processItems.length} 条`;
+    summary.textContent = `${sensingOnly ? "感知" : "判断"}过程摘要 · ${processItems.length} 条`;
     const list = document.createElement("ol");
     for (const item of processItems) {
       const entry = document.createElement("li");
@@ -388,6 +402,7 @@ function renderRun(run) {
 
   const footer = document.createElement("footer");
   const stageLabels = {
+    sense: "感知",
     scout: "侦察",
     review: "复核",
     explore: "探索",
