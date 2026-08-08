@@ -430,7 +430,7 @@ function renderTopicMessage(message, applyAvatar) {
   avatar.setAttribute("aria-hidden", "true");
   const image = document.createElement("img");
   image.className = "message-avatar-image";
-  image.src = "/symbiont-avatar.png";
+  image.src = "/symbiont-avatar.png?v=icon-20260808";
   image.alt = "";
   const fallback = document.createElement("span");
   fallback.className = "message-avatar-fallback";

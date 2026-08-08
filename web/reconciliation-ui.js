@@ -305,7 +305,7 @@ function runtimeText(runtime) {
   if (runtime.phase === "needs_setup") return "等待完成初始化";
   if (runtime.phase === "token_limit") return "今日后台分析预算已用尽";
   if (runtime.phase === "error") return runtime.lastError || "运行异常";
-  return runtime.lastSummary || "等待检查";
+  return "等待检查";
 }
 
 function proposalKind(kind) {

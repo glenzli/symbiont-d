@@ -1,6 +1,6 @@
 import { responseJson } from "/presentation.js";
 
-const DEFAULT_SYMBIONT_AVATAR_URL = "/symbiont-avatar.png";
+const DEFAULT_SYMBIONT_AVATAR_URL = "/symbiont-avatar.png?v=icon-20260808";
 
 export function initIdentityUi(state) {
   const symbiontPreview = document.querySelector("#avatar-preview");

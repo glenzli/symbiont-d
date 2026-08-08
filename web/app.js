@@ -13,6 +13,7 @@ import { initMessageSync } from "/message-sync.js";
 import { initPermissionUi } from "/permission-ui.js";
 import { initQuoteUi, quoteDraft } from "/quote-ui.js";
 import { initSettings } from "/settings.js";
+import { initUsageUi } from "/usage-ui.js";
 import { initTopbarUi } from "/topbar-ui.js";
 import { initTopicUi } from "/topic-ui.js";
 import { initTraceUi } from "/trace-ui.js";
@@ -82,7 +83,8 @@ const MAX_IMAGE_BYTES = 15 * 1024 * 1024;
 const explorationUi = initExplorationUi(appState, {
   announceManualCompletion: appendManualExplorationReceipt,
 });
-const settingsUi = initSettings(appState, explorationUi.trigger);
+const settingsUi = initSettings(appState);
+const usageUi = initUsageUi(appState);
 const identityUi = initIdentityUi(appState);
 const permissionUi = initPermissionUi(appState);
 const composerContextUi = initComposerContextUi({
@@ -555,7 +557,6 @@ function applyRuntime(payload) {
   renderUsage();
   renderRuntimeStatus();
   identityUi.render();
-  settingsUi.renderAutonomyRuntime();
   reflectionUi.renderRuntime();
   reconciliationUi.runtimeUpdated();
   explorationUi.runtimeUpdated();
@@ -1284,7 +1285,7 @@ function renderAttachmentTray() {
 
 document
   .querySelector("#open-usage")
-  .addEventListener("click", () => settingsUi.open("stats"));
+  .addEventListener("click", () => usageUi.open());
 
 for (const button of document.querySelectorAll("[data-close]")) {
   button.addEventListener("click", () => {

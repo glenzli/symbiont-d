@@ -47,6 +47,14 @@
           ><i data-lucide="list-tree" aria-hidden="true"></i></button>
           <button
             class="top-icon-button"
+            id="open-archive"
+            type="button"
+            title="工作状态"
+            aria-label="工作状态"
+            data-tooltip="工作状态"
+          ><i data-lucide="workflow" aria-hidden="true"></i></button>
+          <button
+            class="top-icon-button"
             id="run-exploration-quick"
             type="button"
             title="立即进行一次探索"
@@ -77,12 +85,7 @@
                 target="_blank"
                 rel="noopener"
                 data-top-menu-action
-              ><i data-lucide="archive" aria-hidden="true"></i><span>PCP Console</span></a>
-              <button
-                id="open-archive"
-                type="button"
-                data-top-menu-action
-              ><i data-lucide="archive" aria-hidden="true"></i><span>工作状态</span></button>
+              ><i data-lucide="terminal" aria-hidden="true"></i><span>PCP Console</span></a>
               <button
                 id="open-settings"
                 type="button"
@@ -299,21 +302,24 @@
         <button class="icon-button" data-close="settings-dialog" type="button" aria-label="关闭">×</button>
       </header>
       <nav class="dialog-tabs" role="tablist" aria-label="设置分类">
-        <button type="button" role="tab" data-settings-tab="autonomy" aria-selected="true">自主</button>
-        <button type="button" role="tab" data-settings-tab="appearance" aria-selected="false">外观</button>
-        <button type="button" role="tab" data-settings-tab="reflection" aria-selected="false">思考</button>
-        <button type="button" role="tab" data-settings-tab="models" aria-selected="false">模型</button>
+        <button type="button" role="tab" data-settings-tab="general" aria-selected="false">常规</button>
+        <button type="button" role="tab" data-settings-tab="exploration" aria-selected="true">探索</button>
         <button type="button" role="tab" data-settings-tab="sources" aria-selected="false">信息入口</button>
-        <button type="button" role="tab" data-settings-tab="bridge" aria-selected="false">连接</button>
-        <button type="button" role="tab" data-settings-tab="stats" aria-selected="false">统计</button>
+        <button type="button" role="tab" data-settings-tab="reflection" aria-selected="false">后台理解</button>
+        <button type="button" role="tab" data-settings-tab="models" aria-selected="false">模型与路由</button>
+        <button type="button" role="tab" data-settings-tab="system" aria-selected="false">连接</button>
       </nav>
 
-      <section class="tab-panel" data-settings-panel="appearance" hidden>
+      <section class="tab-panel" data-settings-panel="general" hidden>
+        <header class="settings-panel-intro">
+          <h3>外观与身份</h3>
+          <p>调整聊天中使用的头像。其他运行策略在探索、认知与系统中配置。</p>
+        </header>
         <div class="avatar-settings">
           <img
             id="avatar-preview"
             class="avatar-settings-preview"
-            src="/symbiont-avatar.png"
+            src="/symbiont-avatar.png?v=icon-20260808"
             alt="symbiont-d 头像"
           >
           <div class="avatar-settings-actions">
@@ -343,8 +349,12 @@
         <input id="user-avatar-input" type="file" accept="image/png,image/jpeg,image/webp,image/gif" hidden>
       </section>
 
-      <section class="tab-panel" data-settings-panel="autonomy">
+      <section class="tab-panel" data-settings-panel="exploration">
         <form id="autonomy-form">
+          <header class="settings-panel-intro">
+            <h3>探索策略</h3>
+            <p>决定何时主动感知外部世界，以及什么值得带回对话。</p>
+          </header>
           <div class="setting-section">
             <label class="toggle-row">
               <span>
@@ -353,13 +363,6 @@
               </span>
               <input id="autonomy-enabled" type="checkbox">
             </label>
-          </div>
-          <div class="autonomy-runtime">
-            <span>
-              <small>运行状态</small>
-              <strong id="autonomy-runtime-state">正在读取</strong>
-            </span>
-            <button id="run-exploration" class="secondary-button" type="button">立即探索</button>
           </div>
           <div class="setting-grid autonomy-setting-grid">
             <label class="field">
@@ -425,10 +428,39 @@
             <button class="primary-button" type="submit">保存</button>
           </footer>
         </form>
+
+      </section>
+
+      <section class="tab-panel" data-settings-panel="sources" hidden>
+        <form id="ambient-form">
+          <header class="settings-panel-intro">
+            <h3>信息入口</h3>
+            <p>配置广域输入的来源。它们只负责提供候选信息；聊天、复核与深入调查仍由 Codex 完成。</p>
+          </header>
+          <section class="compute-policy-section ambient-provider-section">
+            <p id="ambient-empty-state" class="ambient-empty-state" hidden>还没有信息入口。先添加一个 Provider，再为它创建一个观察通道。</p>
+            <div class="ambient-config-group">
+              <div class="ambient-config-heading"><strong>Providers</strong><button id="add-ambient-provider" class="icon-button" type="button" title="添加 Provider">＋</button></div>
+              <div id="ambient-provider-list" class="ambient-config-list"></div>
+            </div>
+            <div class="ambient-config-group">
+              <div class="ambient-config-heading"><strong>观察通道</strong><button id="add-ambient-channel" class="icon-button" type="button" title="添加观察通道">＋</button></div>
+              <div id="ambient-channel-list" class="ambient-config-list"></div>
+            </div>
+          </section>
+          <footer class="dialog-actions">
+            <span id="ambient-save-state" role="status"></span>
+            <button class="primary-button" type="submit">保存</button>
+          </footer>
+        </form>
       </section>
 
       <section class="tab-panel" data-settings-panel="reflection" hidden>
         <form id="reflection-form">
+          <header class="settings-panel-intro">
+            <h3>后台理解</h3>
+            <p>设置对话如何沉降、延续和形成长期可用的理解。</p>
+          </header>
           <div class="setting-section">
             <label class="toggle-row">
               <span>
@@ -437,14 +469,6 @@
               </span>
               <input id="reflection-enabled" type="checkbox">
             </label>
-          </div>
-          <div class="autonomy-runtime">
-            <span>
-              <small>运行状态</small>
-              <strong id="reflection-runtime-state">正在读取</strong>
-              <small id="reflection-health-state">正在检查整理状态</small>
-            </span>
-            <button id="run-reflection" class="secondary-button" type="button">立即整理</button>
           </div>
           <div class="setting-grid">
             <label class="field">
@@ -513,10 +537,15 @@
             <button class="primary-button" type="submit">保存</button>
           </footer>
         </form>
+
       </section>
 
       <section class="tab-panel" data-settings-panel="models" hidden>
         <form id="compute-form">
+          <header class="settings-panel-intro">
+            <h3>模型与路由</h3>
+            <p>为对话、后台理解与探索配置计算层级和话题规则。</p>
+          </header>
           <label class="field routing-field">
             <span>路由方式</span>
             <select id="routing" name="routing">
@@ -572,34 +601,12 @@
         </form>
       </section>
 
-      <section class="tab-panel" data-settings-panel="sources" hidden>
-        <form id="ambient-form">
-          <section class="compute-policy-section ambient-provider-section">
-            <header>
-              <div>
-                <strong>外部信息入口</strong>
-                <small>外部 API 只负责广域输入；Codex 仍负责聊天、复核和深入调查。未配置时不会进行外部调用。</small>
-              </div>
-            </header>
-            <p id="ambient-empty-state" class="ambient-empty-state" hidden>还没有信息入口。先添加一个 Provider，再为它创建一个观察通道。</p>
-            <div class="ambient-config-group">
-              <div class="ambient-config-heading"><strong>Providers</strong><button id="add-ambient-provider" class="icon-button" type="button" title="添加 Provider">＋</button></div>
-              <div id="ambient-provider-list" class="ambient-config-list"></div>
-            </div>
-            <div class="ambient-config-group">
-              <div class="ambient-config-heading"><strong>观察通道</strong><button id="add-ambient-channel" class="icon-button" type="button" title="添加观察通道">＋</button></div>
-              <div id="ambient-channel-list" class="ambient-config-list"></div>
-            </div>
-          </section>
-          <footer class="dialog-actions">
-            <span id="ambient-save-state" role="status"></span>
-            <button class="primary-button" type="submit">保存</button>
-          </footer>
-        </form>
-      </section>
-
-      <section class="tab-panel" data-settings-panel="bridge" hidden>
+      <section class="tab-panel" data-settings-panel="system" hidden>
         <form id="bridge-form">
+          <header class="settings-panel-intro">
+            <h3>连接与权限</h3>
+            <p>控制 symbiont-d 如何读取 Codex 任务，以及 Codex 如何请求相关上下文。</p>
+          </header>
           <div class="setting-section">
             <label class="toggle-row">
               <span>
@@ -619,13 +626,20 @@
           </footer>
         </form>
       </section>
+    </dialog>
 
-      <section class="tab-panel" data-settings-panel="stats" hidden>
-        <div class="stats-heading">
-          <span id="quota-state">正在读取</span>
+    <dialog id="usage-dialog" class="panel-dialog usage-dialog">
+      <header class="dialog-header">
+        <div>
+          <h2>活动与用量</h2>
+          <p>近期模型调用、预算与可查看的执行轨迹。</p>
         </div>
-        <div id="stats-content" class="stats-content" aria-live="polite"></div>
-      </section>
+        <button class="icon-button" data-close="usage-dialog" type="button" aria-label="关闭">×</button>
+      </header>
+      <div class="stats-heading">
+        <span id="quota-state">正在读取</span>
+      </div>
+      <div id="stats-content" class="stats-content" aria-live="polite"></div>
     </dialog>
 
     <dialog id="archive-dialog" class="panel-dialog">
@@ -698,6 +712,14 @@
         </section>
       </section>
       <section class="tab-panel archive-panel reflection-panel" data-archive-panel="reflection" hidden>
+        <div class="work-runtime">
+          <span>
+            <small>运行状态</small>
+            <strong id="reflection-runtime-state">正在读取</strong>
+            <small id="reflection-health-state">正在检查整理状态</small>
+          </span>
+          <button id="run-reflection" class="secondary-button" type="button">立即整理</button>
+        </div>
         <div id="reflection-archive" class="reflection-archive" aria-live="polite"></div>
       </section>
       <section class="tab-panel archive-panel" data-archive-panel="curiosity" hidden>
@@ -829,7 +851,7 @@
       <article class="message">
         <div class="message-layout">
           <div class="message-avatar" aria-hidden="true">
-            <img class="message-avatar-image" src="/symbiont-avatar.png" alt="">
+            <img class="message-avatar-image" src="/symbiont-avatar.png?v=icon-20260808" alt="">
             <span class="message-avatar-fallback" hidden>你</span>
           </div>
           <div class="message-content">

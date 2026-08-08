@@ -76,6 +76,7 @@ const PROFILE_UI_JS: &str = include_str!("../web/profile-ui.js");
 const CURIOSITY_UI_JS: &str = include_str!("../web/curiosity-ui.js");
 const IDENTITY_UI_JS: &str = include_str!("../web/identity-ui.js");
 const SETTINGS_JS: &str = include_str!("../web/settings.js");
+const USAGE_UI_JS: &str = include_str!("../web/usage-ui.js");
 const COMPOSER_CONTEXT_UI_JS: &str = include_str!("../web/composer-context-ui.js");
 const CODEX_CONTEXT_UI_JS: &str = include_str!("../web/codex-context-ui.js");
 const EXPLORATION_UI_JS: &str = include_str!("../web/exploration-ui.js");
@@ -492,6 +493,7 @@ pub fn router(state: AppState) -> Router {
         .route("/curiosity-ui.js", get(curiosity_ui_js))
         .route("/identity-ui.js", get(identity_ui_js))
         .route("/settings.js", get(settings_js))
+        .route("/usage-ui.js", get(usage_ui_js))
         .route("/composer-context-ui.js", get(composer_context_ui_js))
         .route("/codex-context-ui.js", get(codex_context_ui_js))
         .route("/exploration-ui.js", get(exploration_ui_js))
@@ -654,6 +656,13 @@ async fn settings_js() -> impl IntoResponse {
     )
 }
 
+async fn usage_ui_js() -> impl IntoResponse {
+    (
+        [(header::CONTENT_TYPE, "text/javascript; charset=utf-8")],
+        USAGE_UI_JS,
+    )
+}
+
 async fn composer_context_ui_js() -> impl IntoResponse {
     (
         [(header::CONTENT_TYPE, "text/javascript; charset=utf-8")],
@@ -762,7 +771,7 @@ async fn styles_css() -> impl IntoResponse {
 async fn default_avatar() -> Response {
     Response::builder()
         .header(header::CONTENT_TYPE, "image/png")
-        .header(header::CACHE_CONTROL, "public, max-age=86400")
+        .header(header::CACHE_CONTROL, "no-store")
         .header("x-content-type-options", "nosniff")
         .body(Body::from(DEFAULT_AVATAR_PNG))
         .expect("valid default avatar response")

@@ -11,12 +11,15 @@ BUNDLE_RESOURCES := \
 SOURCES := $(wildcard Sources/*.m)
 HEADERS := $(wildcard Sources/*.h)
 
-.PHONY: all app clean test verify
+.PHONY: all app clean icons test verify
 
 all: app
 
-app: $(BINARY) $(INFO_PLIST) $(BUNDLE_RESOURCES)
+app: icons $(BINARY) $(INFO_PLIST) $(BUNDLE_RESOURCES)
 	/usr/bin/codesign --force --sign - "$(BUNDLE_DIR)"
+
+icons:
+	./Resources/build-icons.sh
 
 $(BINARY): $(SOURCES) $(HEADERS)
 	mkdir -p "$(dir $@)"
