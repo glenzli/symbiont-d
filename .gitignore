@@ -6,6 +6,7 @@
 /data/compute.toml
 /data/compute-policies.toml
 /data/ambient-provider.toml
+/data/ambient-provider.runtime.json
 /data/ambient-provider-secrets.toml
 /data/profile.toml
 /data/orientation.md
@@ -17,7 +18,9 @@
 /data/codex-handoffs.json
 /data/exploration-intents.json
 /data/exploration-receipts.json
+/data/exploration-attempts.json
 /data/sensing-candidates.json
+/data/input-signals.json
 /data/*.sqlite3
 /data/*.sqlite3-shm
 /data/*.sqlite3-wal
