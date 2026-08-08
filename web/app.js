@@ -7,7 +7,6 @@ import { initExplorationUi } from "/exploration-ui.js";
 import { initIdentityUi } from "/identity-ui.js";
 import { initComputeModeUi } from "/compute-mode-ui.js";
 import { initComposerContextUi } from "/composer-context-ui.js";
-import { initCodexContextUi } from "/codex-context-ui.js";
 import { initMessageActions } from "/message-actions.js";
 import { initMessageSync } from "/message-sync.js";
 import { initPermissionUi } from "/permission-ui.js";
@@ -61,6 +60,7 @@ const connectionStatus = document.querySelector("#connection-status");
 const memorySize = document.querySelector("#memory-size");
 const tokenTotal = document.querySelector("#token-total");
 const messageTemplate = document.querySelector("#message-template");
+const scrollToLatestButton = document.querySelector("#scroll-to-latest");
 
 let busy = false;
 let activityStartedAt = 0;
@@ -79,6 +79,7 @@ const displayedSignalIds = new Set();
 
 const MAX_IMAGES = 4;
 const MAX_IMAGE_BYTES = 15 * 1024 * 1024;
+const SCROLL_TO_LATEST_THRESHOLD = 120;
 
 const explorationUi = initExplorationUi(appState, {
   announceManualCompletion: appendManualExplorationReceipt,
@@ -93,7 +94,6 @@ const composerContextUi = initComposerContextUi({
   notify: notifyComposer,
   openSettings: settingsUi.open,
 });
-initCodexContextUi(() => input.value, notifyComposer);
 const reflectionUi = initReflectionUi(appState);
 const reconciliationUi = initReconciliationUi(appState);
 const profileUi = initProfileUi(appState, sendMessage);
@@ -112,8 +112,24 @@ const messageActions = initMessageActions({
 const turnDispositionUi = initTurnDispositionUi({
   conversation,
   messageActions,
+  appendEphemeralReaction,
   notify: notifyComposer,
 });
+
+function updateScrollToLatestControl() {
+  const distanceFromLatest =
+    conversation.scrollHeight - conversation.scrollTop - conversation.clientHeight;
+  scrollToLatestButton.hidden = distanceFromLatest <= SCROLL_TO_LATEST_THRESHOLD;
+}
+
+conversation.addEventListener("scroll", updateScrollToLatestControl, {
+  passive: true,
+});
+scrollToLatestButton.addEventListener("click", () => {
+  conversation.scrollTo({ top: conversation.scrollHeight, behavior: "smooth" });
+  requestAnimationFrame(updateScrollToLatestControl);
+});
+
 const quoteUi = initQuoteUi({
   conversation,
   entryFor: messageActions.entryFor,
@@ -211,6 +227,31 @@ function appendMessage(entry, options = {}) {
   return element;
 }
 
+function appendEphemeralReaction({ revisionId, reaction }) {
+  const source = conversation.querySelector(
+    `.message[data-role="user"][data-revision-id="${CSS.escape(revisionId)}"]`,
+  );
+  if (!source || !reaction) return null;
+  const selector = `.message.ephemeral-reaction-message[data-reacts-to="${CSS.escape(revisionId)}"]`;
+  const existing = conversation.querySelector(selector);
+  if (existing) return existing;
+
+  const sourceTime = source.querySelector("time")?.dateTime || new Date().toISOString();
+  const message = appendMessage(
+    {
+      role: "assistant",
+      at: sourceTime,
+      content: reaction,
+      parts: [{ type: "markdown", text: reaction }],
+    },
+    { scroll: false },
+  );
+  message.classList.add("ephemeral-reaction-message");
+  message.dataset.reactsTo = revisionId;
+  source.after(message);
+  return message;
+}
+
 function appendInputSignal(signal, options = {}) {
   if (!signal?.id || displayedSignalIds.has(signal.id)) return null;
   displayedSignalIds.add(signal.id);
@@ -231,7 +272,7 @@ function appendInputSignal(signal, options = {}) {
   meta.className = "message-meta";
   const speaker = document.createElement("span");
   speaker.className = "speaker";
-  speaker.textContent = signal.actor?.name || "广域观察";
+  speaker.textContent = signal.actor?.name || "广域输入";
   const time = document.createElement("time");
   time.dateTime = signal.observedAt || new Date().toISOString();
   time.textContent = new Date(time.dateTime).toLocaleTimeString([], {
@@ -241,7 +282,15 @@ function appendInputSignal(signal, options = {}) {
   meta.append(speaker, time);
   const label = document.createElement("p");
   label.className = "input-signal-label";
-  label.textContent = "外部输入";
+  const observedAt = new Date(signal.observedAt || Date.now());
+  const eventAt = signal.eventAt ? new Date(signal.eventAt) : null;
+  const eventLabel = eventAt && !Number.isNaN(eventAt.getTime())
+    ? `发生于 ${eventAt.toLocaleDateString([], { month: "numeric", day: "numeric" })}`
+    : null;
+  const observedLabel = !Number.isNaN(observedAt.getTime())
+    ? `采集于 ${observedAt.toLocaleDateString([], { month: "numeric", day: "numeric" })}`
+    : null;
+  label.textContent = ["外部输入", eventLabel, observedLabel].filter(Boolean).join(" · ");
   const body = document.createElement("div");
   body.className = "message-body";
   renderMessageContent(body, {
@@ -259,7 +308,7 @@ function appendInputSignal(signal, options = {}) {
   reply.addEventListener("click", () => {
     selectedSignalId = signal.id;
     input.focus();
-    composerState.textContent = `正在回应：${signal.title || signal.actor?.name || "外部输入"}`;
+    composerState.textContent = "已附上这条观察、发生时间和来源";
   });
   foot.append(title, reply);
   if (signal.sources?.length) {
@@ -304,13 +353,15 @@ function appendManualExplorationReceipt(receipt) {
   const label = document.createElement("strong");
   label.textContent =
     receipt.outcome === "failed" ||
-    ["no_input_channel", "channel_failed"].includes(receipt.outcome)
+    ["no_input_channel", "input_cooldown", "channel_failed"].includes(receipt.outcome)
       ? "探索未实际执行"
       : "探索完成";
   const message = document.createElement("span");
   message.textContent =
     receipt.outcome === "no_input_channel"
       ? "没有已配置的广域输入通道，因此没有开始实际探索。"
+      : receipt.outcome === "input_cooldown"
+        ? "广域输入通道已启用，正在等待其下一次观察时间。"
       : receipt.outcome === "channel_failed"
         ? "广域输入通道未能完成，本次没有产生可查看的探索内容。"
       : receipt.outcome === "failed"
@@ -498,8 +549,8 @@ function renderUsage() {
   const limit = appState.autonomy?.dailyTokenLimit || 0;
   const today = formatTokens(appState.usage?.autonomousTokensToday || 0);
   tokenTotal.parentElement.title = limit
-    ? `今日自主探索 ${today} / ${formatTokens(limit)}`
-    : `今日自主探索 ${today} · 未设上限`;
+    ? `今日后台消耗 ${today} / ${formatTokens(limit)}`
+    : `今日后台消耗 ${today} · 未设上限`;
 }
 
 function renderRuntimeStatus() {
@@ -512,11 +563,11 @@ function renderRuntimeStatus() {
   const phase = exploration?.phase;
   if (phase === "exploring") {
     connectionStatus.textContent =
-      exploration.currentActivity?.label || "正在自主探索";
+      exploration.currentActivity?.label || "正在主动探索";
   } else if (phase === "quiet_hours") {
     connectionStatus.textContent = "在线 · 安静时段";
   } else if (phase === "token_limit") {
-    connectionStatus.textContent = "在线 · 今日探索预算已用尽";
+    connectionStatus.textContent = "在线 · 今日主动探索预算已用尽";
   } else if (phase === "message_limit") {
     connectionStatus.textContent = "在线 · 今日主动消息额度已用尽";
   } else if (phase === "error") {
@@ -593,6 +644,15 @@ async function bootstrap() {
     });
     turnDispositionUi.applyAll(state.turnDispositions);
     messageSync.completeBootstrap(state.messages);
+    // Opening a refreshed conversation should resume at its current edge. The
+    // scroll control still preserves a deliberate manual scroll during the
+    // rest of the session.
+    requestAnimationFrame(() => {
+      requestAnimationFrame(() => {
+        conversation.scrollTop = conversation.scrollHeight;
+        updateScrollToLatestControl();
+      });
+    });
     memorySize.textContent = formatMemorySize(state.memoryChars);
     renderUsage();
     renderRuntimeStatus();
@@ -606,6 +666,7 @@ async function bootstrap() {
     profileUi.render();
     permissionUi.render();
     messageSync.start();
+    requestAnimationFrame(updateScrollToLatestControl);
   } catch (error) {
     connectionStatus.textContent = "连接失败";
     appendMessage(

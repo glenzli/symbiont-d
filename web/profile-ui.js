@@ -156,7 +156,7 @@ export function initProfileUi(state, sendMessage) {
       ["本地上下文", formatMemorySize(payload.memoryChars)],
       ["持久记忆", "请在 PCP Console 查看"],
       [
-        "自主探索许可",
+        "主动探索许可",
         payload.autonomyPermitted ? "已允许" : "未允许",
       ],
       ["外部任务访问", "未启用"],

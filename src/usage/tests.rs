@@ -1,6 +1,7 @@
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use chrono::{Duration, SecondsFormat, Utc};
+use rusqlite::Connection;
 use serde_json::json;
 
 use crate::diagnostics::{
@@ -126,6 +127,68 @@ async fn records_and_groups_invocations() {
     assert_eq!(
         trace.runs[0].events[0].details["summary"][0],
         "Look up context."
+    );
+
+    std::fs::remove_file(path).unwrap();
+}
+
+#[tokio::test]
+async fn migrates_legacy_origins_into_stable_activity_fields() {
+    let nonce = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_nanos();
+    let path =
+        std::env::temp_dir().join(format!("symbiont-usage-activity-migration-{nonce}.sqlite3"));
+    let connection = Connection::open(&path).unwrap();
+    connection
+        .execute_batch(
+            "
+            CREATE TABLE invocations (
+                id TEXT PRIMARY KEY, parent_id TEXT, thread_id TEXT NOT NULL,
+                turn_id TEXT NOT NULL UNIQUE, origin TEXT NOT NULL, lane TEXT NOT NULL,
+                requested_model TEXT NOT NULL, effective_model TEXT NOT NULL,
+                model_display_name TEXT NOT NULL, effort TEXT NOT NULL, service_tier TEXT,
+                started_at TEXT NOT NULL, completed_at TEXT NOT NULL, duration_ms INTEGER NOT NULL,
+                status TEXT NOT NULL, input_tokens INTEGER NOT NULL,
+                cached_input_tokens INTEGER NOT NULL, output_tokens INTEGER NOT NULL,
+                reasoning_output_tokens INTEGER NOT NULL, total_tokens INTEGER NOT NULL,
+                tool_calls_json TEXT NOT NULL, produced_message INTEGER NOT NULL
+            );
+            INSERT INTO invocations VALUES (
+                'luna-run', NULL, 'thread', 'turn', 'luna_sense', 'sense',
+                'luna', 'luna', 'Luna', 'low', NULL,
+                '2026-01-01T00:00:00Z', '2026-01-01T00:00:01Z', 1000,
+                'completed', 1, 0, 1, 0, 2, '[]', 0
+            );
+            ",
+        )
+        .unwrap();
+    drop(connection);
+
+    UsageStore::open(path.clone()).await.unwrap();
+
+    let connection = Connection::open(&path).unwrap();
+    let projection = connection
+        .query_row(
+            "SELECT activity, stage, input_source FROM invocations WHERE id = 'luna-run'",
+            [],
+            |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, Option<String>>(2)?,
+                ))
+            },
+        )
+        .unwrap();
+    assert_eq!(
+        projection,
+        (
+            "sensing".to_owned(),
+            "sense".to_owned(),
+            Some("luna".to_owned())
+        )
     );
 
     std::fs::remove_file(path).unwrap();
@@ -485,7 +548,7 @@ async fn keeps_a_terminal_sensing_pass_in_recent_exploration_history() {
         .record_all(&[autonomous_invocation(
             "sense-only",
             None,
-            "ambient_sense",
+            "luna_sense",
             &started_at,
             &completed_at,
             40,
@@ -528,6 +591,8 @@ async fn keeps_a_terminal_sensing_pass_in_recent_exploration_history() {
             .as_deref(),
         Some(completed_at.as_str())
     );
+    let headline = store.headline(&started_at).await.unwrap();
+    assert_eq!(headline.autonomous_tokens_today, 40);
 
     std::fs::remove_file(path).unwrap();
 }

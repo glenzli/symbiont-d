@@ -56,14 +56,15 @@ pub(super) fn read_recent(
             "
             SELECT root.id
             FROM invocations root
-            WHERE root.origin IN ('ambient_sense', 'autonomous_scout', 'autonomous')
+            WHERE root.activity IN ('sensing', 'exploration')
               AND root.parent_id IS NULL
               AND (
-                    root.origin != 'ambient_sense'
+                    root.activity != 'sensing'
                     OR NOT EXISTS (
                         SELECT 1
                         FROM invocations legacy_scout
-                        WHERE legacy_scout.origin = 'autonomous_scout'
+                        WHERE legacy_scout.activity = 'exploration'
+                          AND legacy_scout.stage = 'scout'
                           AND legacy_scout.parent_id IS NULL
                           AND legacy_scout.started_at >= root.completed_at
                           AND julianday(legacy_scout.started_at)
@@ -228,13 +229,7 @@ fn summarize(bundle: TraceBundle) -> ExplorationRunSummary {
             model: run.model.clone(),
             display_name: run.display_name.clone(),
             effort: run.effort.clone(),
-            stage: match (run.origin.as_str(), run.parent_id.is_some()) {
-                ("ambient_sense", _) => "sense",
-                ("autonomous_scout", _) => "scout",
-                ("autonomous", true) => "review",
-                _ => "explore",
-            }
-            .to_owned(),
+            stage: run.stage.clone(),
         })
         .collect();
 
@@ -242,11 +237,7 @@ fn summarize(bundle: TraceBundle) -> ExplorationRunSummary {
 
     reasoning_summaries.truncate(24);
     search_queries.truncate(12);
-    let scope = if bundle
-        .runs
-        .iter()
-        .any(|run| matches!(run.origin.as_str(), "autonomous_scout" | "autonomous"))
-    {
+    let scope = if bundle.runs.iter().any(|run| run.activity == "exploration") {
         "exploration"
     } else {
         "sensing"

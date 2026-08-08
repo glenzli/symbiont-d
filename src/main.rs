@@ -16,6 +16,7 @@ mod curiosity;
 mod diagnostics;
 mod exploration;
 mod identity;
+mod luna_input;
 mod maintenance;
 mod memory;
 mod outreach;
@@ -60,6 +61,7 @@ use exploration::{
     ExplorationAttemptStore, ExplorationHandle, ExplorationIntentQueue, ManualExplorationStore,
 };
 use identity::IdentityStore;
+use luna_input::LunaInput;
 use memory::MemoryStore;
 use pcp_index::PcpIndex;
 use permission::PermissionBroker;
@@ -255,6 +257,7 @@ async fn main() -> Result<()> {
         .await?,
     );
     let ambient_scout = Arc::new(AmbientScout::new(Arc::clone(&ambient_provider))?);
+    let luna_input = Arc::new(LunaInput::new(Arc::clone(&ambient_provider)));
     let signals = Arc::new(
         SignalStore::open(resolve_data_path(
             &workspace,
@@ -303,6 +306,7 @@ async fn main() -> Result<()> {
         Arc::clone(&reflection_store),
         Arc::clone(&usage),
         Arc::clone(&ambient_scout),
+        Arc::clone(&luna_input),
         Arc::clone(&sensing),
         Arc::clone(&signals),
         conversation.clone(),

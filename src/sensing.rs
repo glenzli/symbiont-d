@@ -238,46 +238,58 @@ impl SensingStore {
     ///
     /// Candidates are deliberately not durable memory. A fresh pass supersedes
     /// the prior pool, even when its earlier candidates were not promoted.
+    #[cfg(test)]
     pub async fn replace(
         &self,
         drafts: Vec<SensingCandidateDraft>,
         actor: InputRoleSnapshot,
     ) -> Result<usize> {
+        self.replace_many(vec![(drafts, actor)]).await
+    }
+
+    /// Replaces the transient pool with the results from every input role
+    /// selected in one exploration cycle.
+    pub async fn replace_many(
+        &self,
+        batches: Vec<(Vec<SensingCandidateDraft>, InputRoleSnapshot)>,
+    ) -> Result<usize> {
         let now = Utc::now();
         let mut pool = self.pool.write().await;
         pool.candidates.clear();
         let mut appended = 0;
-        for draft in drafts.into_iter().take(REVIEW_BATCH_SIZE) {
-            let fingerprint = candidate_fingerprint(&draft);
-            if pool
-                .candidates
-                .iter()
-                .any(|candidate| candidate.fingerprint == fingerprint)
-            {
-                continue;
+        for (drafts, actor) in batches {
+            for draft in drafts.into_iter().take(REVIEW_BATCH_SIZE) {
+                let fingerprint = candidate_fingerprint(&draft);
+                if pool
+                    .candidates
+                    .iter()
+                    .any(|candidate| candidate.fingerprint == fingerprint)
+                {
+                    continue;
+                }
+                let sequence = pool.candidates.len();
+                pool.candidates.push(SensingCandidate {
+                    id: format!("sense_{}_{}", now.timestamp_millis(), sequence),
+                    title: draft.title.trim().to_owned(),
+                    summary: draft.summary.trim().to_owned(),
+                    proposed_input: draft.proposed_input.trim().to_owned(),
+                    event_at: draft
+                        .event_at
+                        .map(|event_at| event_at.trim().to_owned())
+                        .filter(|event_at| !event_at.is_empty()),
+                    source_class: draft.source_class,
+                    possible_connection: draft
+                        .possible_connection
+                        .map(|connection| connection.trim().to_owned())
+                        .filter(|connection| !connection.is_empty()),
+                    sources: draft.sources,
+                    actor: actor.clone(),
+                    observed_at: timestamp(now),
+                    expires_at: timestamp(now + Duration::hours(CANDIDATE_TTL_HOURS)),
+                    fingerprint,
+                });
+                appended += 1;
             }
-            let sequence = pool.candidates.len();
-            pool.candidates.push(SensingCandidate {
-                id: format!("sense_{}_{}", now.timestamp_millis(), sequence),
-                title: draft.title.trim().to_owned(),
-                summary: draft.summary.trim().to_owned(),
-                proposed_input: draft.proposed_input.trim().to_owned(),
-                event_at: draft
-                    .event_at
-                    .map(|event_at| event_at.trim().to_owned())
-                    .filter(|event_at| !event_at.is_empty()),
-                source_class: draft.source_class,
-                possible_connection: draft
-                    .possible_connection
-                    .map(|connection| connection.trim().to_owned())
-                    .filter(|connection| !connection.is_empty()),
-                sources: draft.sources,
-                actor: actor.clone(),
-                observed_at: timestamp(now),
-                expires_at: timestamp(now + Duration::hours(CANDIDATE_TTL_HOURS)),
-                fingerprint,
-            });
-            appended += 1;
         }
         drop(pool);
         self.persist().await?;

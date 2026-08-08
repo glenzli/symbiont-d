@@ -86,6 +86,20 @@ impl ExplorationAttemptStore {
         document.skipped.last().cloned()
     }
 
+    pub async fn remove_reason(&self, reason: &str) -> Result<bool> {
+        let mut document = self.document.lock().await;
+        let before = document.clone();
+        document.skipped.retain(|attempt| attempt.reason != reason);
+        if document.skipped.len() == before.skipped.len() {
+            return Ok(false);
+        }
+        if let Err(error) = self.persist_locked(&document).await {
+            *document = before;
+            return Err(error);
+        }
+        Ok(true)
+    }
+
     async fn persist_locked(&self, document: &ExplorationAttemptDocument) -> Result<()> {
         if let Some(parent) = self.path.parent() {
             fs::create_dir_all(parent).await.with_context(|| {
@@ -148,6 +162,36 @@ mod tests {
         assert_eq!(recent[0].reason, "channel_failed");
         assert_eq!(recent[1].reason, "no_input_channel");
         assert_eq!(reopened.latest().await.unwrap().trigger, "manual");
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[tokio::test]
+    async fn can_remove_invalidated_skip_reasons() {
+        let nonce = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("clock")
+            .as_nanos();
+        let path =
+            std::env::temp_dir().join(format!("symbiont-exploration-attempt-prune-{nonce}.json"));
+        let store = ExplorationAttemptStore::open(path.clone())
+            .await
+            .expect("open log");
+        store
+            .record("scheduled", "no_input_channel")
+            .await
+            .expect("record");
+        store
+            .record("scheduled", "channel_failed")
+            .await
+            .expect("record");
+        assert!(
+            store
+                .remove_reason("no_input_channel")
+                .await
+                .expect("prune")
+        );
+        assert_eq!(store.recent(4).await.len(), 1);
+        assert_eq!(store.latest().await.unwrap().reason, "channel_failed");
         let _ = std::fs::remove_file(path);
     }
 }

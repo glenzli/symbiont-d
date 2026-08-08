@@ -1,18 +1,21 @@
 use std::path::PathBuf;
 
 use anyhow::{Context, Result};
-use rusqlite::{Connection, params};
+use rusqlite::{Connection, OptionalExtension, params};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use tokio::task;
 
 use crate::diagnostics::{ContextSnapshot, ExecutionTraceEvent, bounded_trace_value};
 
+#[path = "usage/activity.rs"]
+mod activity;
 #[path = "usage/exploration.rs"]
 mod exploration;
 #[path = "usage/trace.rs"]
 mod trace;
 
+pub use activity::InvocationActivity;
 pub use exploration::ExplorationRunSummary;
 pub use trace::TraceBundle;
 
@@ -68,7 +71,22 @@ pub struct InvocationRecord {
 pub struct UsageSummary {
     pub totals: UsageTotals,
     pub by_model: Vec<ModelUsage>,
-    pub recent: Vec<InvocationRecord>,
+    pub recent: Vec<UsageRecentInvocation>,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct UsageRecentInvocation {
+    pub id: String,
+    pub activity: String,
+    pub stage: String,
+    pub input_source: Option<String>,
+    pub lane: String,
+    pub model_display_name: String,
+    pub effort: String,
+    pub total_tokens: u64,
+    pub duration_ms: u64,
+    pub tool_calls: Vec<String>,
 }
 
 #[derive(Debug, Default, Serialize)]
@@ -117,7 +135,7 @@ impl UsageStore {
                 std::fs::create_dir_all(parent)
                     .with_context(|| format!("create usage directory {}", parent.display()))?;
             }
-            let connection = Connection::open(&path_for_open)
+            let mut connection = Connection::open(&path_for_open)
                 .with_context(|| format!("open usage database {}", path_for_open.display()))?;
             connection
                 .execute_batch(
@@ -130,6 +148,9 @@ impl UsageStore {
                     turn_id TEXT NOT NULL UNIQUE,
                     origin TEXT NOT NULL,
                     lane TEXT NOT NULL,
+                    activity TEXT NOT NULL,
+                    stage TEXT NOT NULL,
+                    input_source TEXT,
                     requested_model TEXT NOT NULL,
                     effective_model TEXT NOT NULL,
                     model_display_name TEXT NOT NULL,
@@ -181,6 +202,7 @@ impl UsageStore {
                 ",
                 )
                 .context("initialize usage database")?;
+            migrate_invocation_activity_projection(&mut connection)?;
             Ok(())
         })
         .await
@@ -198,19 +220,22 @@ impl UsageStore {
                 .transaction()
                 .context("start usage transaction")?;
             for record in records {
+                let classification = InvocationActivity::from_origin(&record.origin);
                 transaction
                     .execute(
                         "
                         INSERT OR REPLACE INTO invocations (
                             id, parent_id, thread_id, turn_id, origin, lane,
+                            activity, stage, input_source,
                             requested_model, effective_model, model_display_name,
                             effort, service_tier, started_at, completed_at,
                             duration_ms, status, input_tokens, cached_input_tokens,
                             output_tokens, reasoning_output_tokens, total_tokens,
                             tool_calls_json, produced_message
                         ) VALUES (
-                            ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11,
-                            ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22
+                            ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12,
+                            ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22, ?23,
+                            ?24, ?25
                         )
                         ",
                         params![
@@ -220,6 +245,9 @@ impl UsageStore {
                             &record.turn_id,
                             &record.origin,
                             &record.lane,
+                            classification.activity,
+                            classification.stage,
+                            classification.input_source,
                             &record.requested_model,
                             &record.effective_model,
                             &record.model_display_name,
@@ -391,12 +419,9 @@ impl UsageStore {
             let mut recent_statement = connection
                 .prepare(
                     "
-                    SELECT id, parent_id, thread_id, turn_id, origin, lane,
-                           requested_model, effective_model, model_display_name,
-                           effort, service_tier, started_at, completed_at,
-                           duration_ms, status, input_tokens, cached_input_tokens,
-                           output_tokens, reasoning_output_tokens, total_tokens,
-                           tool_calls_json, produced_message
+                    SELECT id, activity, stage, input_source, lane,
+                           model_display_name, effort, total_tokens, duration_ms,
+                           tool_calls_json
                     FROM invocations
                     ORDER BY completed_at DESC
                     LIMIT 50
@@ -404,7 +429,7 @@ impl UsageStore {
                 )
                 .context("prepare recent invocation query")?;
             let recent = recent_statement
-                .query_map([], invocation_from_row)
+                .query_map([], usage_recent_from_row)
                 .context("query recent invocations")?
                 .collect::<rusqlite::Result<Vec<_>>>()
                 .context("collect recent invocations")?;
@@ -432,20 +457,14 @@ impl UsageStore {
                         COALESCE(SUM(total_tokens), 0),
                         COALESCE(SUM(
                             CASE
-                                WHEN origin IN (
-                                    'ambient_sense', 'autonomous', 'autonomous_scout', 'maintenance', 'pcp_maintenance',
-                                    'reconciliation_preview', 'reconciliation_apply'
-                                )
+                                WHEN activity IN ('sensing', 'exploration', 'maintenance')
                                      AND completed_at >= ?1
                                 THEN total_tokens ELSE 0
                             END
                         ), 0),
                         COALESCE(SUM(
                             CASE
-                                WHEN origin IN (
-                                    'ambient_sense', 'autonomous', 'autonomous_scout', 'maintenance', 'pcp_maintenance', 'reflection',
-                                    'reconciliation_preview', 'reconciliation_apply'
-                                )
+                                WHEN activity IN ('sensing', 'exploration', 'reflection', 'maintenance')
                                      AND completed_at >= ?1
                                      AND produced_message = 1
                                 THEN 1 ELSE 0
@@ -453,10 +472,7 @@ impl UsageStore {
                         ), 0),
                         COALESCE(SUM(
                             CASE
-                                WHEN origin IN (
-                                    'ambient_sense', 'autonomous', 'autonomous_scout', 'maintenance', 'pcp_maintenance', 'reflection',
-                                    'reconciliation_preview', 'reconciliation_apply'
-                                )
+                                WHEN activity IN ('sensing', 'exploration', 'reflection', 'maintenance')
                                      AND completed_at >= ?1
                                      AND produced_message = 1
                                      AND EXISTS (
@@ -472,10 +488,8 @@ impl UsageStore {
                         ), 0),
                         COALESCE(SUM(
                             CASE
-                                WHEN origin IN (
-                                    'reflection', 'pcp_maintenance',
-                                    'reconciliation_preview', 'reconciliation_apply'
-                                )
+                                WHEN activity = 'reflection'
+                                  OR stage IN ('pcp', 'reconciliation_preview', 'reconciliation_apply')
                                      AND completed_at >= ?1
                                 THEN total_tokens ELSE 0
                             END
@@ -511,7 +525,7 @@ impl UsageStore {
                     "
                     SELECT MAX(completed_at)
                     FROM invocations
-                    WHERE origin IN ('ambient_sense', 'autonomous_scout', 'autonomous')
+                    WHERE activity IN ('sensing', 'exploration')
                       AND parent_id IS NULL
                     ",
                     [],
@@ -576,6 +590,119 @@ fn invocation_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<InvocationRe
         context_snapshot: None,
         trace_events: Vec::new(),
     })
+}
+
+fn usage_recent_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<UsageRecentInvocation> {
+    let tool_calls_json: String = row.get(9)?;
+    Ok(UsageRecentInvocation {
+        id: row.get(0)?,
+        activity: row.get(1)?,
+        stage: row.get(2)?,
+        input_source: row.get(3)?,
+        lane: row.get(4)?,
+        model_display_name: row.get(5)?,
+        effort: row.get(6)?,
+        total_tokens: row.get::<_, i64>(7)? as u64,
+        duration_ms: row.get::<_, i64>(8)? as u64,
+        tool_calls: serde_json::from_str(&tool_calls_json).unwrap_or_default(),
+    })
+}
+
+fn migrate_invocation_activity_projection(connection: &mut Connection) -> Result<()> {
+    for (column, definition) in [
+        ("activity", "TEXT NOT NULL DEFAULT 'maintenance'"),
+        ("stage", "TEXT NOT NULL DEFAULT 'internal'"),
+        ("input_source", "TEXT"),
+    ] {
+        if !invocation_column_exists(connection, column)? {
+            connection
+                .execute_batch(&format!(
+                    "ALTER TABLE invocations ADD COLUMN {column} {definition}"
+                ))
+                .with_context(|| format!("add invocation {column} projection"))?;
+        }
+    }
+    connection
+        .execute_batch(
+            "
+            CREATE TABLE IF NOT EXISTS usage_metadata (
+                key TEXT PRIMARY KEY,
+                value TEXT NOT NULL
+            );
+            CREATE INDEX IF NOT EXISTS invocations_activity
+                ON invocations(activity, completed_at DESC);
+            ",
+        )
+        .context("initialize usage migration metadata")?;
+    let migrated = connection
+        .query_row(
+            "SELECT value FROM usage_metadata WHERE key = 'invocation_activity_taxonomy'",
+            [],
+            |row| row.get::<_, String>(0),
+        )
+        .optional()
+        .context("read invocation activity migration marker")?;
+    if migrated.as_deref() == Some("1") {
+        return Ok(());
+    }
+    let records = {
+        let mut statement = connection
+            .prepare("SELECT id, origin FROM invocations")
+            .context("prepare legacy invocation classification read")?;
+        statement
+            .query_map([], |row| {
+                Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+            })
+            .context("read legacy invocation classifications")?
+            .collect::<rusqlite::Result<Vec<_>>>()
+            .context("collect legacy invocation classifications")?
+    };
+    let transaction = connection
+        .transaction()
+        .context("start invocation activity migration")?;
+    for (id, origin) in records {
+        let classification = InvocationActivity::from_origin(&origin);
+        transaction
+            .execute(
+                "
+                UPDATE invocations
+                SET activity = ?2, stage = ?3, input_source = ?4
+                WHERE id = ?1
+                ",
+                params![
+                    id,
+                    classification.activity,
+                    classification.stage,
+                    classification.input_source
+                ],
+            )
+            .context("project legacy invocation activity")?;
+    }
+    transaction
+        .execute(
+            "
+            INSERT INTO usage_metadata (key, value)
+            VALUES ('invocation_activity_taxonomy', '1')
+            ON CONFLICT(key) DO UPDATE SET value = excluded.value
+            ",
+            [],
+        )
+        .context("mark invocation activity migration complete")?;
+    transaction
+        .commit()
+        .context("commit invocation activity migration")
+}
+
+fn invocation_column_exists(connection: &Connection, expected: &str) -> Result<bool> {
+    let mut statement = connection
+        .prepare("PRAGMA table_info(invocations)")
+        .context("inspect invocation schema")?;
+    let columns = statement
+        .query_map([], |row| row.get::<_, String>(1))
+        .context("read invocation schema")?
+        .collect::<rusqlite::Result<Vec<_>>>()
+        .context("collect invocation schema")?;
+    Ok(columns.iter().any(|column| column == expected))
 }
 
 #[cfg(test)]

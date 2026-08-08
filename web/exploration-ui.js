@@ -36,7 +36,7 @@ export function initExplorationUi(state, { announceManualCompletion } = {}) {
     try {
       const payload = await responseJson(
         await fetch("/api/exploration/recent", { cache: "no-store" }),
-        "读取最近探索失败",
+        "读取主动探索记录失败",
       );
       state.exploration = payload.exploration;
       lastLoadedRunAt = payload.exploration?.lastRunAt || null;
@@ -70,7 +70,7 @@ export function initExplorationUi(state, { announceManualCompletion } = {}) {
     ) {
       const empty = document.createElement("p");
       empty.className = "exploration-empty";
-      empty.textContent = "还没有完成过自主探索。";
+      empty.textContent = "还没有完成过主动探索。";
       history.append(empty);
       return;
     }
@@ -164,10 +164,10 @@ export function initExplorationUi(state, { announceManualCompletion } = {}) {
     const stateLabel = manualPending
       ? manualRunLabel(manualRun)
       : queued
-        ? "探索已加入队列"
+        ? "主动探索已加入队列"
         : triggering
           ? "正在检查探索条件"
-          : "立即进行一次探索";
+          : "立即围绕当前脉络探索";
     quickRun.disabled =
       !state.autonomyPermitted || triggering || queued || manualPending;
     quickRun.dataset.state = exploring
@@ -525,7 +525,7 @@ function currentStatus(exploration) {
     return manualRunLabel(exploration.manualRun);
   }
   if (exploration.phase === "exploring") {
-    return exploration.currentActivity?.label || "正在自主探索";
+    return exploration.currentActivity?.label || "正在主动探索";
   }
   if (exploration.phase === "error") {
     return "最近一次探索运行异常";
@@ -538,7 +538,7 @@ function currentStatus(exploration) {
     const trigger = triggerLabel(exploration.lastTrigger);
     return `上次完成于 ${new Date(exploration.lastRunAt).toLocaleString()}${trigger ? ` · ${trigger}` : ""}`;
   }
-  if (exploration.phase === "disabled") return "自主探索已关闭";
+  if (exploration.phase === "disabled") return "主动探索已关闭";
   if (exploration.phase === "needs_setup") return "等待完成初始化";
   return "等待首次探索";
 }
@@ -547,6 +547,7 @@ function skippedAttemptLabel(reason) {
   return (
     {
       no_input_channel: "没有可用的广域输入通道",
+      input_cooldown: "广域输入通道已启用，等待下次观察时间",
       channel_failed: "广域输入通道未能完成",
     }[reason] || "本轮未形成可查看的探索"
   );

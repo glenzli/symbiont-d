@@ -1,7 +1,10 @@
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 
-use crate::{sensing::SensingCandidate, usage::InvocationRecord};
+use crate::{
+    sensing::{SensingCandidate, SensingCandidateDraft, validate_candidate_drafts},
+    usage::InvocationRecord,
+};
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct ExplorationEvidence {
@@ -78,16 +81,21 @@ and their wording must remain attributable to those roles if it is broadcast.
 For every candidate, independently inspect its source support and choose exactly one disposition:
 
 - `discard`: duplicate, unsupported, unsafe, or strong noise;
-- `hold`: credible but not ready for the timeline;
-- `broadcast`: worth appearing now as the input role's self-contained message;
-- `investigate`: needs directed work by the continuous symbiont before any user-visible outcome.
+- `hold`: the source is credible but materially incomplete or ambiguous;
+- `broadcast`: a credible, fresh, self-contained input worth placing in the temporary input stream;
+- `investigate`: needs directed work because it may justify a separate symbiont-d discussion, note, or intervention.
 
-`broadcast` does not require a current-project connection. It may be important, surprising,
-interesting, or create a real question. Do not infer that the user is unaware of an event. Be
-conservative about interruption volume, but do not turn relevance into the only gate. Never rewrite
-`proposed_input`; if its factual framing needs substantive changes, choose `investigate` or reject
-it. The candidate pool is not memory and this review must not write PCP, Hunches, profile, or other
-state.
+`broadcast` is not an autonomous symbiont-d interruption: it is a temporary, attributed input-role
+message with a clear source and a reply affordance. Therefore, when a candidate is credible, fresh,
+self-contained, and genuinely interesting, prefer `broadcast` even without a current-project
+connection or an immediate decision. Do not infer that the user is unaware of an event. Reserve
+`hold` for real evidentiary ambiguity and `investigate` for candidates that warrant a separate
+assistant-led move; do not send ordinary broad inputs through that higher bar. An old release,
+publication, or incident is not fresh just because it was rediscovered: broadcast it only when the
+supplied evidence itself describes a newer concrete development or accumulated reaction; otherwise
+discard or investigate it. Never rewrite `proposed_input`; if its factual framing needs substantive
+changes, choose `investigate` or reject it. The candidate pool is not memory and this review must not
+write PCP, Hunches, profile, or other state.
 
 Call `symbiont.review_sensing_candidates` exactly once. After the tool call, return exactly
 `{silent_marker}`.
@@ -96,6 +104,24 @@ Call `symbiont.review_sensing_candidates` exactly once. After the tool call, ret
 {candidates}
 </ambient-candidates>"#
     ))
+}
+
+pub fn luna_sensing_prompt(focus: &str, sensing_context: &str, silent_marker: &str) -> String {
+    format!(
+        r#"Privately run one low-cost, input-only wide-observation pass for symbiont-d. No user message is waiting. You are Luna, an independent intake role rather than the conversational assistant. Search broadly within the supplied remit; a development may be worth noticing because evidence, adoption, reaction, or a concrete tension has accumulated, even when it is not new today.
+
+Do not write PCP memory, alter any symbiont state, infer user preferences, plan work, or draft a reply. You may use live web search for grounded evidence. If and only if you have one to three compact candidates with concrete sources, call `symbiont.submit_sensing_candidates` exactly once. The proposed_input must be a self-contained, natural two-to-four sentence observation in Luna's own voice; it remains private intake for a stronger review stage. It is valid to submit nothing.
+
+After the optional tool call, return exactly `{silent_marker}`.
+
+<luna-remit>
+{focus}
+</luna-remit>
+
+<sensing-context>
+{sensing_context}
+</sensing-context>"#
+    )
 }
 
 pub fn review_prompt(finding: &ExplorationScoutFinding, silent_marker: &str) -> Result<String> {
@@ -112,7 +138,7 @@ Then decide whether there is exactly one conversational move worth making now. C
 
 An intervention should continue the visible edge, reopen an older shared thread, or pivot through a real connection. A note or discussion may open a different direction. If the current edge is unrelated, acknowledge the turn plainly rather than pretending to reply to it. A discussion may say that the user has probably seen the event and then name what has become worth talking about; never claim discovery or user ignorance. Unanswered prior initiations suppress repetition of the same or closely adjacent thread; they are not negative feedback and do not automatically suppress a distinct credible note or discussion.
 
-If it merits one posture, call `symbiont.propose_proactive_message` exactly once with the final user-visible message, `kind`, and exact conversation Revisions that honestly anchor it. A `discussion` may use an empty Revision list when it stands on external evidence alone; `note` and `intervention` require real conversation anchors. Write the message yourself; do not preserve the scout's framing merely because it arrived first. Search results are raw material. Never send a roundup, report, task summary, exploration status, or abstract thesis. Do not say that you searched, explored, scanned, or found a signal. If a claimed connection remains forced, use `discussion` only when the external subject independently deserves conversation; otherwise remain silent.
+If it merits one posture, call `symbiont.propose_proactive_message` exactly once with the final user-visible message, `kind`, and exact conversation Revisions that honestly anchor it. A `discussion` may use an empty Revision list when it stands on external evidence alone; `note` and `intervention` require real conversation anchors. Write the message yourself; do not preserve the scout's framing merely because it arrived first. The message must be self-contained: before asking the user to think about it, name the concrete event or evidence, give its relevant time/source context, and state the actual tension. Never assume the user saw an input card or knows the headline. Search results are raw material. Never send a roundup, report, task summary, exploration status, or abstract thesis. Do not say that you searched, explored, scanned, or found a signal. If a claimed connection remains forced, use `discussion` only when the external subject independently deserves conversation; otherwise remain silent.
 
 After private work and any tool calls, return exactly `{silent_marker}`.
 
@@ -164,4 +190,29 @@ pub fn sensing_review_from_invocations(
         })
         .transpose()
         .map(Option::unwrap_or_default)
+}
+
+pub fn sensing_candidates_from_invocations(
+    invocations: &[InvocationRecord],
+) -> Result<Vec<SensingCandidateDraft>> {
+    let candidates: Vec<SensingCandidateDraft> = invocations
+        .iter()
+        .flat_map(|invocation| &invocation.trace_steps)
+        .rev()
+        .find(|step| {
+            step.succeeded
+                && step.namespace == "symbiont"
+                && step.tool == "submit_sensing_candidates"
+        })
+        .map(|step| {
+            step.arguments
+                .get("candidates")
+                .cloned()
+                .context("sensing completion omitted candidates")
+                .and_then(|value| serde_json::from_value(value).context("parse sensing candidates"))
+        })
+        .transpose()?
+        .unwrap_or_default();
+    validate_candidate_drafts(&candidates)?;
+    Ok(candidates)
 }

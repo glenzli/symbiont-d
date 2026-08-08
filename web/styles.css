@@ -368,9 +368,54 @@ html[data-native-shell="macos"] .topbar {
 }
 
 .conversation {
+  height: 100%;
   overflow-y: auto;
   padding: 20px 16px 28px;
   scroll-behavior: smooth;
+}
+
+.conversation-frame {
+  min-height: 0;
+  position: relative;
+}
+
+.scroll-to-latest {
+  width: 32px;
+  height: 32px;
+  padding: 0;
+  position: absolute;
+  z-index: 12;
+  right: 18px;
+  bottom: 16px;
+  display: grid;
+  place-items: center;
+  border: 1px solid var(--border-strong);
+  border-radius: 50%;
+  color: var(--button-text);
+  background: var(--button);
+  box-shadow: 0 3px 12px rgb(0 0 0 / 16%);
+  cursor: pointer;
+}
+
+.scroll-to-latest:hover {
+  background: color-mix(in srgb, var(--button) 88%, white);
+}
+
+.scroll-to-latest svg {
+  width: 16px;
+  height: 16px;
+}
+
+.scroll-to-latest[data-tooltip]::after {
+  right: 0;
+  bottom: calc(100% + 7px);
+  left: auto;
+  transform: translateY(3px);
+}
+
+.scroll-to-latest[data-tooltip]:hover::after,
+.scroll-to-latest[data-tooltip]:focus-visible::after {
+  transform: translateY(0);
 }
 
 .empty-state {
@@ -785,18 +830,36 @@ html[data-native-shell="macos"] .topbar {
   background: var(--user);
 }
 
-.message-reaction {
+.message.ephemeral-reaction-message {
   width: fit-content;
-  min-width: 24px;
-  margin: -6px 7px 0 auto;
-  padding: 2px 6px;
-  display: block;
-  border: 1px solid var(--border-strong);
+  min-width: 0;
+  max-width: none;
+  margin: -3px auto 13px 0;
+}
+
+.message.ephemeral-reaction-message .message-layout {
+  gap: 6px;
+}
+
+.message.ephemeral-reaction-message .message-avatar {
+  width: 24px;
+  height: 24px;
+}
+
+.message.ephemeral-reaction-message .message-meta {
+  margin-bottom: 2px;
+}
+
+.message.ephemeral-reaction-message .message-body {
+  min-height: 0;
+  padding: 4px 8px;
   border-radius: 999px;
-  background: var(--surface-raised);
-  font-size: 15px;
-  line-height: 1.2;
-  box-shadow: 0 1px 3px color-mix(in srgb, var(--text) 8%, transparent);
+  font-size: 16px;
+  line-height: 1.15;
+}
+
+.message.ephemeral-reaction-message .message-foot {
+  display: none !important;
 }
 
 .message-quote {
@@ -2248,6 +2311,10 @@ html[data-native-shell="macos"] .topbar {
   gap: 8px;
 }
 
+.field-wide {
+  grid-column: span 2;
+}
+
 .field textarea {
   min-width: 0;
   width: 100%;
@@ -2273,6 +2340,8 @@ html[data-native-shell="macos"] .topbar {
 
 @media (max-width: 720px) {
   .field-grid { grid-template-columns: 1fr; }
+
+  .field-wide { grid-column: auto; }
 }
 
 .compute-policy-list:empty::before {

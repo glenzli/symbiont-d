@@ -83,9 +83,18 @@ function renderRun(run, index) {
   const details = document.createElement("small");
   const id = document.createElement("code");
   model.textContent = `${index + 1}. ${run.displayName || run.model}`;
-  details.textContent = `${run.lane} · ${run.effort} · ${formatTokens(
-    run.totalTokens,
-  )} · ${formatDuration(run.durationMs)}`;
+  const source = { luna: "Luna", external: "外部通道" }[run.inputSource];
+  details.textContent = [
+    activityLabel(run.activity),
+    stageLabel(run.stage),
+    source,
+    run.lane,
+    run.effort,
+    formatTokens(run.totalTokens),
+    formatDuration(run.durationMs),
+  ]
+    .filter(Boolean)
+    .join(" · ");
   id.textContent = shortId(run.invocationId);
   identity.append(model, details);
   header.append(identity, id);
@@ -130,6 +139,32 @@ function renderRun(run, index) {
   }
   article.append(timeline);
   return article;
+}
+
+function activityLabel(activity) {
+  return {
+    conversation: "对话",
+    sensing: "感知",
+    exploration: "主动探索",
+    reflection: "对话整理",
+    maintenance: "后台维护",
+  }[activity] || "后台维护";
+}
+
+function stageLabel(stage) {
+  return {
+    reply: "回应",
+    continuation: "续话",
+    sense: "输入",
+    review: "复核",
+    scout: "深入探索",
+    organize: "整理",
+    context: "上下文",
+    pcp: "PCP",
+    reconciliation_preview: "预览整理",
+    reconciliation_apply: "应用整理",
+    internal: "内部运行",
+  }[stage] || stage;
 }
 
 function renderContext(context) {

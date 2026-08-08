@@ -13,7 +13,7 @@ export function initUsageUi(state) {
     try {
       const payload = await responseJson(await fetch("/api/stats"), "读取失败");
       state.usage = payload.headline;
-      quotaState.textContent = `${quotaText(payload.rateLimits)} · 今日自主 ${formatTokens(payload.headline.autonomousTokensToday)} · 后台理解 ${formatTokens(payload.headline.reflectionTokensToday || 0)}`;
+      quotaState.textContent = `${quotaText(payload.rateLimits)} · 今日后台消耗 ${formatTokens(payload.headline.autonomousTokensToday)} · 对话整理 ${formatTokens(payload.headline.reflectionTokensToday || 0)}`;
       render(payload.usage);
     } catch (error) {
       quotaState.textContent = "暂无法读取用量";
@@ -63,17 +63,36 @@ export function initUsageUi(state) {
     recentList.className = "recent-list";
     if (!usage.recent.length) recentList.textContent = "还没有调用记录";
     for (const invocation of usage.recent.slice(0, 12)) {
-      const origin = {
-        autonomous: "主动",
-        reflection: "后台理解",
-        maintenance: "记忆维护",
-        interactive: "对话",
+      const activity = {
+        conversation: "对话",
+        sensing: "感知",
+        exploration: "主动探索",
+        reflection: "对话整理",
+        maintenance: "后台维护",
+      }[invocation.activity] || "后台维护";
+      const stage = {
+        reply: "回应",
         continuation: "续话",
-      }[invocation.origin] || invocation.origin;
+        sense: "输入",
+        review: "复核",
+        scout: "深入探索",
+        organize: "整理",
+        context: "上下文",
+        pcp: "PCP",
+        reconciliation_preview: "预览整理",
+        reconciliation_apply: "应用整理",
+        internal: "内部运行",
+      }[invocation.stage] || invocation.stage;
+      const source = {
+        luna: "Luna",
+        external: "外部通道",
+      }[invocation.inputSource] || null;
       recentList.append(
         usageRow(
           `${invocation.modelDisplayName} · ${invocation.effort}`,
-          `${origin} · ${invocation.lane} · ${formatTokens(invocation.totalTokens)} · ${formatDuration(invocation.durationMs)}`,
+          [activity, stage, source, formatTokens(invocation.totalTokens), formatDuration(invocation.durationMs)]
+            .filter(Boolean)
+            .join(" · "),
           "recent-row",
           invocation.id,
         ),

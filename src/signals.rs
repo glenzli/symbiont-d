@@ -1,13 +1,14 @@
 use std::path::PathBuf;
 
 use anyhow::{Context, Result};
-use chrono::{DateTime, Duration, SecondsFormat, Utc};
+use chrono::{DateTime, Duration, NaiveDate, SecondsFormat, Utc};
 use serde::{Deserialize, Serialize};
 use tokio::{fs, sync::RwLock};
 
 use crate::sensing::{InputRoleSnapshot, SensingCandidate, SensingSource, SensingSourceClass};
 
 const RETENTION_DAYS: i64 = 30;
+const MAX_EVENT_AGE_DAYS: i64 = 45;
 const MAX_RETAINED_SIGNALS: usize = 100;
 
 /// A visible but non-durable input from an auxiliary model role.
@@ -18,6 +19,11 @@ const MAX_RETAINED_SIGNALS: usize = 100;
 pub struct SignalEvent {
     pub id: String,
     pub candidate_id: String,
+    /// A stable identity derived from the underlying event and sources. Candidate
+    /// IDs are regenerated for every sensing pass, so they cannot prevent an old
+    /// event from being reintroduced as a new input.
+    #[serde(default)]
+    pub fingerprint: String,
     pub actor: InputRoleSnapshot,
     pub content: String,
     pub title: String,
@@ -61,7 +67,7 @@ impl SignalStore {
                     .with_context(|| format!("read input signal stream {}", path.display()));
             }
         };
-        let changed = prune(&mut document, Utc::now());
+        let changed = normalize_and_prune(&mut document, Utc::now());
         let store = Self {
             path,
             document: RwLock::new(document),
@@ -76,21 +82,32 @@ impl SignalStore {
         &self,
         candidate: &SensingCandidate,
         review_reason: String,
-    ) -> Result<SignalEvent> {
+    ) -> Result<Option<SignalEvent>> {
         let now = Utc::now();
+        if event_is_too_old(candidate.event_at.as_deref(), now) {
+            tracing::info!(
+                title = %candidate.title,
+                event_at = ?candidate.event_at,
+                "skipping stale external input signal"
+            );
+            return Ok(None);
+        }
         let mut document = self.document.write().await;
         if let Some(existing) = document
             .signals
             .iter()
-            .find(|signal| signal.candidate_id == candidate.id)
+            .find(|signal| {
+                signal.candidate_id == candidate.id || signal.fingerprint == candidate.fingerprint
+            })
             .cloned()
         {
-            return Ok(existing);
+            return Ok(Some(existing));
         }
         let sequence = document.signals.len();
         let event = SignalEvent {
             id: format!("signal_{}_{}", now.timestamp_millis(), sequence),
             candidate_id: candidate.id.clone(),
+            fingerprint: candidate.fingerprint.clone(),
             actor: candidate.actor.clone(),
             content: candidate.proposed_input.clone(),
             title: candidate.title.clone(),
@@ -104,16 +121,16 @@ impl SignalStore {
             hidden: false,
         };
         document.signals.push(event.clone());
-        prune(&mut document, now);
+        normalize_and_prune(&mut document, now);
         drop(document);
         self.persist().await?;
-        Ok(event)
+        Ok(Some(event))
     }
 
     pub async fn visible(&self, limit: usize) -> Result<Vec<SignalEvent>> {
         let now = Utc::now();
         let mut document = self.document.write().await;
-        let changed = prune(&mut document, now);
+        let changed = normalize_and_prune(&mut document, now);
         let signals = document
             .signals
             .iter()
@@ -152,6 +169,10 @@ impl SignalStore {
                 if signal.promoted_revision_id.is_none() {
                     signal.promoted_revision_id = Some(revision_id);
                 }
+                // A signal is only a temporary input role card. Once the user
+                // chooses to discuss it, its immutable source page and the
+                // ensuing conversation carry the context instead.
+                signal.hidden = true;
                 signal.clone()
             });
         drop(document);
@@ -181,19 +202,56 @@ impl SignalStore {
     }
 }
 
-fn prune(document: &mut SignalDocument, now: DateTime<Utc>) -> bool {
+fn normalize_and_prune(document: &mut SignalDocument, now: DateTime<Utc>) -> bool {
+    let mut changed = false;
+    for signal in &mut document.signals {
+        if signal.fingerprint.trim().is_empty() {
+            signal.fingerprint = signal_fingerprint(&signal.title, &signal.sources);
+            changed = true;
+        }
+    }
     let before = document.signals.len();
     let oldest = now - Duration::days(RETENTION_DAYS);
     document.signals.retain(|signal| {
         DateTime::parse_from_rfc3339(&signal.observed_at)
             .map(|observed_at| observed_at.with_timezone(&Utc) >= oldest)
             .unwrap_or(false)
+            && !event_is_too_old(signal.event_at.as_deref(), now)
     });
     if document.signals.len() > MAX_RETAINED_SIGNALS {
         let drop_count = document.signals.len() - MAX_RETAINED_SIGNALS;
         document.signals.drain(0..drop_count);
     }
-    before != document.signals.len()
+    changed || before != document.signals.len()
+}
+
+fn event_is_too_old(event_at: Option<&str>, now: DateTime<Utc>) -> bool {
+    let Some(event_at) = event_at else {
+        return false;
+    };
+    let date = DateTime::parse_from_rfc3339(event_at)
+        .map(|value| value.date_naive())
+        .or_else(|_| NaiveDate::parse_from_str(event_at.trim(), "%Y-%m-%d"));
+    date.map(|date| date < (now - Duration::days(MAX_EVENT_AGE_DAYS)).date_naive())
+        .unwrap_or(false)
+}
+
+fn signal_fingerprint(title: &str, sources: &[SensingSource]) -> String {
+    let mut urls = sources
+        .iter()
+        .map(|source| normalize(&source.url))
+        .collect::<Vec<_>>();
+    urls.sort();
+    format!("{}|{}", normalize(title), urls.join("|"))
+}
+
+fn normalize(value: &str) -> String {
+    value
+        .trim()
+        .to_lowercase()
+        .chars()
+        .filter(|character| character.is_alphanumeric())
+        .collect()
 }
 
 fn timestamp(value: DateTime<Utc>) -> String {
@@ -210,6 +268,7 @@ mod tests {
     fn candidate(id: &str) -> SensingCandidate {
         SensingCandidate {
             id: id.to_owned(),
+            fingerprint: format!("fingerprint-{id}"),
             title: "A signal".to_owned(),
             summary: "A compact summary".to_owned(),
             proposed_input: "A model input.".to_owned(),
@@ -223,7 +282,6 @@ mod tests {
             actor: InputRoleSnapshot::ambient("test", "Test observer", "gpt-test", "test-provider"),
             observed_at: "2026-08-08T00:00:00.000Z".to_owned(),
             expires_at: "2026-08-09T00:00:00.000Z".to_owned(),
-            fingerprint: "signal".to_owned(),
         }
     }
 
@@ -239,10 +297,12 @@ mod tests {
         let first = store
             .publish(&candidate("sense_1"), "credible".to_owned())
             .await
+            .unwrap()
             .unwrap();
         let duplicate = store
             .publish(&candidate("sense_1"), "again".to_owned())
             .await
+            .unwrap()
             .unwrap();
 
         assert_eq!(first.id, duplicate.id);
@@ -262,6 +322,54 @@ mod tests {
         let store = SignalStore::open(path.clone()).await.unwrap();
 
         assert!(store.visible(10).await.unwrap().is_empty());
+        let _ = tokio::fs::remove_file(path).await;
+    }
+
+    #[tokio::test]
+    async fn stale_events_are_not_published_or_replayed() {
+        let nonce = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let path = std::env::temp_dir().join(format!("symbiont-signals-old-{nonce}.json"));
+        let store = SignalStore::open(path.clone()).await.unwrap();
+        let mut old = candidate("sense_old");
+        old.event_at = Some("2025-01-01".to_owned());
+
+        assert!(
+            store
+                .publish(&old, "credible".to_owned())
+                .await
+                .unwrap()
+                .is_none()
+        );
+        assert!(store.visible(10).await.unwrap().is_empty());
+        let _ = tokio::fs::remove_file(path).await;
+    }
+
+    #[tokio::test]
+    async fn stable_fingerprint_deduplicates_a_new_sensing_pass() {
+        let nonce = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let path = std::env::temp_dir().join(format!("symbiont-signals-fingerprint-{nonce}.json"));
+        let store = SignalStore::open(path.clone()).await.unwrap();
+        let first = store
+            .publish(&candidate("sense_first"), "credible".to_owned())
+            .await
+            .unwrap()
+            .unwrap();
+        let mut repeated = candidate("sense_second");
+        repeated.fingerprint = first.fingerprint.clone();
+        let again = store
+            .publish(&repeated, "credible again".to_owned())
+            .await
+            .unwrap()
+            .unwrap();
+
+        assert_eq!(first.id, again.id);
+        assert_eq!(store.visible(10).await.unwrap().len(), 1);
         let _ = tokio::fs::remove_file(path).await;
     }
 }

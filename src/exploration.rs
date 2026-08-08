@@ -23,18 +23,19 @@ use chrono::{DateTime, Days, Local, LocalResult, NaiveDateTime, NaiveTime, TimeZ
 use serde::Serialize;
 use tokio::{
     sync::{Mutex, RwLock, mpsc},
-    task::JoinHandle,
+    task::{JoinHandle, JoinSet},
     time::sleep,
 };
 
 use crate::{
-    ambient_api::AmbientScout,
+    ambient_api::{AmbientInput, AmbientScout},
     autonomy::{AutonomyConfig, AutonomyStore, QuietHours},
     codex::{CodexClient, RuntimeEvent, SensingReviewDisposition},
     compute::ComputeStore,
     continuity::{ContinuityHost, MessageLinks},
     conversation::ConversationCoordinator,
     curiosity::CuriosityStore,
+    luna_input::LunaInput,
     memory::{MemoryEntry, MemoryRole},
     outreach::all_budgets_exhausted,
     profile::{ProfileStore, SetupStatus},
@@ -142,7 +143,7 @@ impl ExplorationTrigger {
 
     fn preparation_label(&self) -> &'static str {
         match self {
-            Self::Manual { .. } => "准备自主探索",
+            Self::Manual { .. } => "准备主动探索",
             Self::DeferredFollowUp => "准备重新看看之前留下的话题",
             Self::Intent(_) => "准备跟进一个刚产生的探索问题",
         }
@@ -207,6 +208,7 @@ impl ExplorationHandle {
         reflection: Arc<ReflectionStore>,
         usage: Arc<UsageStore>,
         ambient_scout: Arc<AmbientScout>,
+        luna_input: Arc<LunaInput>,
         sensing: Arc<SensingStore>,
         signals: Arc<SignalStore>,
         conversation: ConversationCoordinator,
@@ -216,6 +218,11 @@ impl ExplorationHandle {
         mut intent_receiver: ExplorationIntentReceiver,
     ) -> Self {
         let projection = manual_runs.projection().await;
+        if ambient_scout.has_configured_input().await {
+            if let Err(error) = attempts.remove_reason("no_input_channel").await {
+                tracing::warn!(%error, "could not clear stale input-configuration skips");
+            }
+        }
         let last_skipped_attempt = attempts.latest().await;
         let state = Arc::new(RwLock::new(ExplorationSnapshot {
             manual_run: projection.latest,
@@ -264,6 +271,7 @@ impl ExplorationHandle {
             reflection,
             usage,
             ambient_scout,
+            luna_input,
             Arc::clone(&sensing),
             Arc::clone(&signals),
             conversation,
@@ -350,6 +358,19 @@ impl ExplorationHandle {
         self.attempts.recent(limit).await
     }
 
+    pub async fn clear_stale_input_configuration_skips(&self) -> Result<()> {
+        self.attempts.remove_reason("no_input_channel").await?;
+        let mut state = self.state.write().await;
+        if state
+            .last_skipped_attempt
+            .as_ref()
+            .is_some_and(|attempt| attempt.reason == "no_input_channel")
+        {
+            state.last_skipped_attempt = None;
+        }
+        Ok(())
+    }
+
     pub async fn supersede_intents(&self, ids: &[String], reason: &str) -> Result<()> {
         self.intents.supersede(ids, reason).await
     }
@@ -368,6 +389,7 @@ async fn run_scheduler(
     reflection: Arc<ReflectionStore>,
     usage: Arc<UsageStore>,
     ambient_scout: Arc<AmbientScout>,
+    luna_input: Arc<LunaInput>,
     sensing: Arc<SensingStore>,
     signals: Arc<SignalStore>,
     conversation: ConversationCoordinator,
@@ -470,6 +492,7 @@ async fn run_scheduler(
                     Arc::clone(&reflection),
                     Arc::clone(&usage),
                     Arc::clone(&ambient_scout),
+                    Arc::clone(&luna_input),
                     Arc::clone(&sensing),
                     Arc::clone(&signals),
                     conversation.clone(),
@@ -660,6 +683,7 @@ async fn run_once(
     reflection: Arc<ReflectionStore>,
     usage: Arc<UsageStore>,
     ambient_scout: Arc<AmbientScout>,
+    luna_input: Arc<LunaInput>,
     sensing: Arc<SensingStore>,
     signals: Arc<SignalStore>,
     conversation: ConversationCoordinator,
@@ -777,37 +801,101 @@ async fn run_once(
                 return Err(error);
             }
         };
-        let sensing_outcome = ambient_scout
-            .sense(
-                &ambient_sensing_context(&recent_messages, &intake_brief),
-                input_events.clone(),
-                runtime_tx.clone(),
-            )
+        let sensing_context = ambient_sensing_context(&recent_messages, &intake_brief);
+        let has_configured_input = ambient_scout.has_configured_input().await;
+        let selected_inputs = ambient_scout
+            .select_inputs(autonomy_config.max_input_parallelism as usize)
             .await;
-        let sensing_outcome = match sensing_outcome {
-            Ok(outcome) => outcome,
-            Err(error) => {
-                stop_activity_relay(runtime_tx, activity_task).await?;
-                return Err(error);
+        let mut luna_config = None;
+        let mut external_tasks = JoinSet::new();
+        for input in selected_inputs {
+            match input {
+                AmbientInput::Luna(config) => luna_config = Some(config),
+                AmbientInput::External { channel, provider } => {
+                    let scout = Arc::clone(&ambient_scout);
+                    let context = sensing_context.clone();
+                    let input_events = input_events.clone();
+                    let events = runtime_tx.clone();
+                    external_tasks.spawn(async move {
+                        scout
+                            .sense_selected(channel, provider, &context, input_events, events)
+                            .await
+                    });
+                }
             }
-        };
-        sensing_trace_id = sensing_outcome
-            .invocation
-            .as_ref()
-            .map(|invocation| invocation.id.clone());
-        if let Some(invocation) = sensing_outcome.invocation.as_ref()
-            && let Err(error) = usage.record_all(std::slice::from_ref(invocation)).await
-        {
+        }
+        let mut sensing_outcomes = Vec::new();
+        if let Some(luna_config) = luna_config {
+            let Ok(mut client) = codex.try_lock() else {
+                external_tasks.abort_all();
+                stop_activity_relay(runtime_tx, activity_task).await?;
+                settle_sensing_only(
+                    &state,
+                    &manual_runs,
+                    &attempts,
+                    trigger.as_ref(),
+                    ExplorationIntentStatus::Superseded,
+                    "superseded",
+                    sensing.count().await.unwrap_or_default(),
+                    Some("codex_busy"),
+                    false,
+                )
+                .await?;
+                return Ok(ExplorationRunCompletion::superseded("codex_busy"));
+            };
+            match luna_input
+                .sense_selected(
+                    luna_config,
+                    &mut client,
+                    &compute,
+                    &profile,
+                    &sensing_context,
+                    input_events.clone(),
+                    runtime_tx.clone(),
+                )
+                .await
+            {
+                Ok(outcome) => sensing_outcomes.push(outcome),
+                Err(error) => {
+                    external_tasks.abort_all();
+                    stop_activity_relay(runtime_tx, activity_task).await?;
+                    return Err(error);
+                }
+            }
+        }
+        while let Some(result) = external_tasks.join_next().await {
+            match result.context("join ambient input channel")? {
+                Ok(outcome) => sensing_outcomes.push(outcome),
+                Err(error) => {
+                    stop_activity_relay(runtime_tx, activity_task).await?;
+                    return Err(error);
+                }
+            }
+        }
+        let invocations = sensing_outcomes
+            .iter()
+            .filter_map(|outcome| outcome.invocation.as_ref())
+            .cloned()
+            .collect::<Vec<_>>();
+        sensing_trace_id = invocations.first().map(|invocation| invocation.id.clone());
+        if let Err(error) = usage.record_all(&invocations).await {
             stop_activity_relay(runtime_tx, activity_task).await?;
             return Err(error);
         }
-        if !sensing_outcome.interrupted {
-            let update = match sensing_outcome.actor {
-                Some(actor) => sensing
-                    .replace(sensing_outcome.candidates, actor)
-                    .await
-                    .map(|_| ()),
-                None => sensing.clear().await,
+        let interrupted = sensing_outcomes.iter().any(|outcome| outcome.interrupted);
+        let channel_failed = invocations.is_empty()
+            && sensing_outcomes
+                .iter()
+                .any(|outcome| outcome.channel_failure.is_some());
+        if !interrupted {
+            let batches: Vec<_> = sensing_outcomes
+                .into_iter()
+                .filter_map(|outcome| outcome.actor.map(|actor| (outcome.candidates, actor)))
+                .collect();
+            let update = if batches.is_empty() {
+                sensing.clear().await.map(|_| 0)
+            } else {
+                sensing.replace_many(batches).await
             };
             if let Err(error) = update {
                 stop_activity_relay(runtime_tx, activity_task).await?;
@@ -821,7 +909,7 @@ async fn run_once(
                 return Err(error);
             }
         };
-        if sensing_outcome.interrupted {
+        if interrupted {
             stop_activity_relay(runtime_tx, activity_task).await?;
             settle_sensing_only(
                 &state,
@@ -846,14 +934,18 @@ async fn run_once(
         };
         if reviewed_candidates.is_empty() {
             stop_activity_relay(runtime_tx, activity_task).await?;
-            let outcome = if sensing_outcome.channel_failure.is_some() {
+            let outcome = if channel_failed {
                 "channel_failed"
             } else if sensing_trace_id.is_none() {
-                "no_input_channel"
+                if has_configured_input {
+                    "input_cooldown"
+                } else {
+                    "no_input_channel"
+                }
             } else {
                 "no_candidates"
             };
-            let was_recorded = sensing_trace_id.is_some();
+            let was_recorded = !invocations.is_empty();
             settle_sensing_only(
                 &state,
                 &manual_runs,
@@ -942,8 +1034,9 @@ async fn run_once(
             };
             match decision.disposition {
                 SensingReviewDisposition::Broadcast => {
-                    signals.publish(candidate, decision.reason).await?;
-                    broadcast_count += 1;
+                    if signals.publish(candidate, decision.reason).await?.is_some() {
+                        broadcast_count += 1;
+                    }
                 }
                 SensingReviewDisposition::Investigate => {
                     investigate_ids.insert(decision.candidate_id);

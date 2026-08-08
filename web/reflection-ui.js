@@ -100,7 +100,7 @@ export function initReflectionUi(state) {
     try {
       const snapshot = await responseJson(
         await fetch("/api/reflection"),
-        "无法读取后台理解",
+        "无法读取对话整理",
       );
       state.reflection = snapshot;
       renderConfig();

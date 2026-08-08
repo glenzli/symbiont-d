@@ -87,7 +87,7 @@ export function initCuriosityUi() {
       appendDefinition(metadata, "最近修订", formatDate(hunch.updatedAt));
       appendDefinition(
         metadata,
-        "最近探索",
+        "最近主动探索",
         hunch.lastExploredAt ? formatDate(hunch.lastExploredAt) : "尚未",
       );
       appendDefinition(

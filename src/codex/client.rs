@@ -21,7 +21,8 @@ use tracing::{debug, warn};
 use super::{
     approvals::{approval_response, automatic_server_request_response, permission_request},
     autonomous::{
-        finding_from_invocations, review_prompt, scout_prompt, sensing_review_from_invocations,
+        finding_from_invocations, luna_sensing_prompt, review_prompt, scout_prompt,
+        sensing_candidates_from_invocations, sensing_review_from_invocations,
         sensing_review_prompt,
     },
     interaction_output::{
@@ -31,8 +32,9 @@ use super::{
     prompts::{
         additional_context_value, ambient_review_developer_instructions, context_fragments,
         context_maintenance_prompt, developer_instructions, interaction_reflection_prompt,
-        memory_reconciliation_prompt, pcp_maintenance_developer_instructions,
-        pcp_maintenance_worker_prompt, profile_review_prompt, summary_maintenance_prompt,
+        luna_sensing_developer_instructions, memory_reconciliation_prompt,
+        pcp_maintenance_developer_instructions, pcp_maintenance_worker_prompt,
+        profile_review_prompt, summary_maintenance_prompt,
     },
     tool_dedup::{ToolCallPlan, TurnToolDeduplicator},
     tools::{EscalationRequest, SymbiontTools, tool_result},
@@ -59,6 +61,7 @@ use crate::{
     },
     reflection::ReflectionStore,
     rollover::{self, NativeThreadCursor, RolloverDecision, ThreadContextPressure},
+    sensing::SensingCandidateDraft,
     symbiont_context::SymbiontContextStore,
     usage::{InvocationRecord, ToolTraceStep},
     web_fetch::WebFetcher,
@@ -163,6 +166,12 @@ pub struct SensingReviewOutcome {
     pub interrupted: bool,
 }
 
+pub struct LunaSensingOutcome {
+    pub candidates: Vec<SensingCandidateDraft>,
+    pub invocations: Vec<InvocationRecord>,
+    pub interrupted: bool,
+}
+
 #[derive(Clone, Debug)]
 pub struct HunchRevisionRef {
     pub page_id: String,
@@ -261,6 +270,7 @@ struct TurnOverrides {
 
 #[derive(Clone, Copy)]
 enum BackgroundThread {
+    LunaSensing,
     AmbientReview,
     AutonomousScout,
     AutonomousReview,
@@ -271,6 +281,7 @@ enum BackgroundThread {
 #[derive(Clone, Copy)]
 enum ToolSurface {
     Full,
+    LunaSensing,
     AmbientReview,
     AutonomousScout,
     PcpMaintenance,
@@ -285,6 +296,7 @@ pub struct CodexClient {
     next_id: u64,
     interactive_thread_id: String,
     ambient_review_thread_id: String,
+    luna_sensing_thread_id: String,
     autonomous_scout_thread_id: String,
     autonomous_review_thread_id: String,
     maintenance_thread_id: String,
@@ -413,6 +425,7 @@ impl CodexClient {
             stdout: BufReader::new(stdout).lines(),
             next_id: 1,
             interactive_thread_id: String::new(),
+            luna_sensing_thread_id: String::new(),
             ambient_review_thread_id: String::new(),
             autonomous_scout_thread_id: String::new(),
             autonomous_review_thread_id: String::new(),
@@ -449,6 +462,9 @@ impl CodexClient {
             .await?;
         client.ambient_review_thread_id = client
             .start_thread(&config.workspace, ToolSurface::AmbientReview)
+            .await?;
+        client.luna_sensing_thread_id = client
+            .start_thread(&config.workspace, ToolSurface::LunaSensing)
             .await?;
         client.autonomous_scout_thread_id = client
             .start_thread(&config.workspace, ToolSurface::AutonomousScout)
@@ -797,6 +813,56 @@ impl CodexClient {
         }
         Ok(SensingReviewOutcome {
             decisions,
+            invocations,
+            interrupted: outcome.interrupted,
+        })
+    }
+
+    pub async fn sense_luna(
+        &mut self,
+        focus: &str,
+        sensing_context: &str,
+        compute: &ComputeConfig,
+        profile: &ProfileSnapshot,
+        input_events: watch::Receiver<u64>,
+        events: mpsc::Sender<RuntimeEvent>,
+    ) -> Result<LunaSensingOutcome> {
+        let thread_id = self.luna_sensing_thread_id.clone();
+        let outcome = self
+            .run_request(
+                thread_id.clone(),
+                text_input_items(&luna_sensing_prompt(
+                    focus,
+                    sensing_context,
+                    AUTONOMOUS_SILENT_MARKER,
+                )),
+                ComputeLane::Sense,
+                "luna_sense",
+                compute,
+                profile,
+                "",
+                None,
+                None,
+                false,
+                Some(input_events),
+                &events,
+            )
+            .await?;
+        if !outcome.interrupted {
+            self.renew_background_thread(&thread_id, BackgroundThread::LunaSensing)
+                .await;
+        }
+        let candidates = if outcome.interrupted {
+            Vec::new()
+        } else {
+            sensing_candidates_from_invocations(&outcome.invocations)?
+        };
+        let mut invocations = outcome.invocations;
+        for invocation in &mut invocations {
+            invocation.produced_message = false;
+        }
+        Ok(LunaSensingOutcome {
+            candidates,
             invocations,
             interrupted: outcome.interrupted,
         })
@@ -1205,6 +1271,7 @@ impl CodexClient {
     async fn renew_background_thread(&mut self, previous: &str, slot: BackgroundThread) {
         let workspace = self.workspace.clone();
         let tool_surface = match slot {
+            BackgroundThread::LunaSensing => ToolSurface::LunaSensing,
             BackgroundThread::AmbientReview => ToolSurface::AmbientReview,
             BackgroundThread::AutonomousScout => ToolSurface::AutonomousScout,
             BackgroundThread::AutonomousReview | BackgroundThread::Maintenance => ToolSurface::Full,
@@ -1213,6 +1280,7 @@ impl CodexClient {
         match self.start_thread(&workspace, tool_surface).await {
             Ok(next) => {
                 match slot {
+                    BackgroundThread::LunaSensing => self.luna_sensing_thread_id = next,
                     BackgroundThread::AmbientReview => self.ambient_review_thread_id = next,
                     BackgroundThread::AutonomousScout => self.autonomous_scout_thread_id = next,
                     BackgroundThread::AutonomousReview => self.autonomous_review_thread_id = next,
@@ -1477,7 +1545,8 @@ impl CodexClient {
             // message can interrupt their work immediately.
             (Vec::new(), false)
         };
-        let mut fragments = if matches!(origin, "pcp_maintenance" | "ambient_review") {
+        let mut fragments = if matches!(origin, "pcp_maintenance" | "ambient_review" | "luna_sense")
+        {
             Vec::new()
         } else {
             context_fragments(
@@ -1503,6 +1572,7 @@ impl CodexClient {
             developer_instructions: match origin {
                 "pcp_maintenance" => pcp_maintenance_developer_instructions().to_owned(),
                 "ambient_review" => ambient_review_developer_instructions().to_owned(),
+                "luna_sense" => luna_sensing_developer_instructions().to_owned(),
                 _ => developer_instructions(),
             },
             native_thread: NativeThreadSnapshot {
@@ -1921,12 +1991,14 @@ impl CodexClient {
         tool_surface: ToolSurface,
     ) -> Result<String> {
         let instructions = match tool_surface {
+            ToolSurface::LunaSensing => luna_sensing_developer_instructions().to_owned(),
             ToolSurface::AmbientReview => ambient_review_developer_instructions().to_owned(),
             ToolSurface::PcpMaintenance => pcp_maintenance_developer_instructions().to_owned(),
             ToolSurface::Full | ToolSurface::AutonomousScout => developer_instructions(),
         };
         let dynamic_tools = match tool_surface {
             ToolSurface::Full => SymbiontTools::specifications(),
+            ToolSurface::LunaSensing => SymbiontTools::sensing_specifications(),
             ToolSurface::AmbientReview => SymbiontTools::sensing_review_specifications(),
             ToolSurface::AutonomousScout => SymbiontTools::scout_specifications(),
             ToolSurface::PcpMaintenance => SymbiontTools::pcp_maintenance_specifications(),

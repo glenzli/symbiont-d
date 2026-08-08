@@ -1,5 +1,6 @@
 use std::{
     collections::{BTreeMap, BTreeSet},
+    hash::{Hash, Hasher},
     io::ErrorKind,
     path::PathBuf,
     sync::Arc,
@@ -52,23 +53,62 @@ pub struct AmbientChannelConfig {
     pub name: String,
     pub model: String,
     pub focus: String,
-    pub interval_minutes: u32,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct AmbientConfig {
+    #[serde(default)]
+    pub luna: LunaInputConfig,
+    #[serde(default)]
     pub providers: Vec<AmbientProviderConfig>,
+    #[serde(default)]
     pub channels: Vec<AmbientChannelConfig>,
 }
 
 impl Default for AmbientConfig {
     fn default() -> Self {
         Self {
+            luna: LunaInputConfig::default(),
             providers: Vec::new(),
             channels: Vec::new(),
         }
     }
+}
+
+/// The built-in, Codex-backed intake role. Its model follows the configured
+/// sense lane, so it never needs a separate endpoint or credential.
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LunaInputConfig {
+    #[serde(default)]
+    pub enabled: bool,
+    #[serde(default = "default_luna_focus")]
+    pub focus: String,
+}
+
+/// A selected broad-input role for one exploration cycle. Selection is shared
+/// across built-in and external roles so neither class can starve the other.
+#[derive(Clone, Debug)]
+pub(crate) enum AmbientInput {
+    Luna(LunaInputConfig),
+    External {
+        channel: AmbientChannelConfig,
+        provider: AmbientProviderConfig,
+    },
+}
+
+impl Default for LunaInputConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            focus: default_luna_focus(),
+        }
+    }
+}
+
+fn default_luna_focus() -> String {
+    "Look broadly for credible recent or still-developing external signals across research, tools, real-world use, evaluation, institutions, markets, culture, and open discovery. Prefer a concrete tension, evidence update, or accumulated reaction over routine announcements.".to_owned()
 }
 
 #[derive(Clone, Debug, Default, Deserialize, Serialize)]
@@ -116,8 +156,21 @@ pub struct AmbientChannelSnapshot {
 #[derive(Clone, Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct AmbientSnapshot {
+    pub luna: LunaInputSnapshot,
     pub providers: Vec<AmbientProviderSnapshot>,
     pub channels: Vec<AmbientChannelSnapshot>,
+}
+
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LunaInputSnapshot {
+    #[serde(flatten)]
+    pub config: LunaInputConfig,
+    pub availability: String,
+    pub last_started_at: Option<String>,
+    pub last_succeeded_at: Option<String>,
+    pub last_failed_at: Option<String>,
+    pub last_error: Option<String>,
 }
 
 pub struct AmbientTopologyStore {
@@ -168,6 +221,7 @@ impl AmbientTopologyStore {
     pub async fn snapshot(&self) -> AmbientSnapshot {
         let config = self.config.read().await.clone();
         let runtime = self.runtime.read().await.clone();
+        let luna_runtime = runtime.channels.get("luna").cloned().unwrap_or_default();
         let mut provider_availabilities = BTreeMap::new();
         let mut providers = Vec::with_capacity(config.providers.len());
         for provider in &config.providers {
@@ -211,6 +265,14 @@ impl AmbientTopologyStore {
             })
             .collect();
         AmbientSnapshot {
+            luna: LunaInputSnapshot {
+                availability: luna_availability(&config.luna, &luna_runtime),
+                config: config.luna,
+                last_started_at: luna_runtime.last_started_at,
+                last_succeeded_at: luna_runtime.last_succeeded_at,
+                last_failed_at: luna_runtime.last_failed_at,
+                last_error: luna_runtime.last_error,
+            },
             providers,
             channels,
         }
@@ -246,10 +308,20 @@ impl AmbientTopologyStore {
         Ok(self.snapshot().await)
     }
 
-    async fn select_due_channel(&self) -> Option<(AmbientChannelConfig, AmbientProviderConfig)> {
+    pub(crate) async fn select_inputs(&self, maximum: usize) -> Vec<AmbientInput> {
         let config = self.config.read().await.clone();
         let runtime = self.runtime.read().await.clone();
-        let mut due_channels = Vec::new();
+        let mut inputs = Vec::new();
+        if config.luna.enabled {
+            inputs.push((
+                runtime
+                    .channels
+                    .get("luna")
+                    .and_then(|state| state.last_started_at.clone()),
+                "luna".to_owned(),
+                AmbientInput::Luna(config.luna.clone()),
+            ));
+        }
         for channel in &config.channels {
             let Some(provider) = config
                 .providers
@@ -265,21 +337,60 @@ impl AmbientTopologyStore {
                     .status(&provider.id, provider.credential_store)
                     .await
                     != CredentialStatus::Configured
-                || !due(channel, runtime.channels.get(&channel.id))
             {
                 continue;
             }
-            due_channels.push((channel, provider));
-        }
-        due_channels
-            .into_iter()
-            .min_by_key(|(channel, _)| {
+            inputs.push((
                 runtime
                     .channels
                     .get(&channel.id)
-                    .and_then(|state| state.last_started_at.clone())
-            })
-            .map(|(channel, provider)| (channel.clone(), provider.clone()))
+                    .and_then(|state| state.last_started_at.clone()),
+                channel.id.clone(),
+                AmbientInput::External {
+                    channel: channel.clone(),
+                    provider: provider.clone(),
+                },
+            ));
+        }
+        let salt = Utc::now().timestamp_nanos_opt().unwrap_or_default();
+        inputs.sort_by_key(|(last_started_at, id, _)| {
+            (last_started_at.clone(), tie_breaker(id, salt))
+        });
+        inputs
+            .into_iter()
+            .take(maximum.max(1))
+            .map(|(_, _, input)| input)
+            .collect()
+    }
+
+    /// Reports whether there is at least one configured input path, independent
+    /// of its scheduling interval. This lets the scheduler distinguish a
+    /// deliberate cooldown from a missing input configuration.
+    pub(crate) async fn has_configured_input(&self) -> bool {
+        let config = self.config.read().await.clone();
+        if config.luna.enabled {
+            return true;
+        }
+        for channel in &config.channels {
+            let Some(provider) = config
+                .providers
+                .iter()
+                .find(|provider| provider.id == channel.provider_id)
+            else {
+                continue;
+            };
+            if channel.enabled
+                && provider.enabled
+                && self
+                    .credentials
+                    .status(&provider.id, provider.credential_store)
+                    .await
+                    == CredentialStatus::Configured
+            {
+                return true;
+            }
+        }
+        false
     }
 
     async fn credential_for(&self, provider: &AmbientProviderConfig) -> Result<Option<String>> {
@@ -310,6 +421,18 @@ impl AmbientTopologyStore {
             state.last_error = Some(error);
         })
         .await
+    }
+
+    pub(crate) async fn mark_luna_started(&self) -> Result<()> {
+        self.mark_started("luna").await
+    }
+
+    pub(crate) async fn mark_luna_succeeded(&self) -> Result<()> {
+        self.mark_succeeded("luna").await
+    }
+
+    pub(crate) async fn mark_luna_failed(&self, error: &str) -> Result<()> {
+        self.mark_failed("luna", error).await
     }
 
     async fn update_runtime(
@@ -349,15 +472,14 @@ impl AmbientScout {
         })
     }
 
-    pub async fn sense(
+    pub async fn sense_selected(
         &self,
+        channel: AmbientChannelConfig,
+        provider: AmbientProviderConfig,
         sensing_context: &str,
         mut input_events: watch::Receiver<u64>,
         events: mpsc::Sender<RuntimeEvent>,
     ) -> Result<AmbientSenseOutcome> {
-        let Some((channel, provider)) = self.topology.select_due_channel().await else {
-            return Ok(empty_outcome());
-        };
         self.topology.mark_started(&channel.id).await?;
         let result = self
             .call(
@@ -384,6 +506,14 @@ impl AmbientScout {
                 })
             }
         }
+    }
+
+    pub async fn has_configured_input(&self) -> bool {
+        self.topology.has_configured_input().await
+    }
+
+    pub async fn select_inputs(&self, maximum: usize) -> Vec<AmbientInput> {
+        self.topology.select_inputs(maximum).await
     }
 
     async fn call(
@@ -550,6 +680,9 @@ fn response_candidates(response: &Value) -> Result<Vec<SensingCandidateDraft>> {
 }
 
 fn validate_config(config: &AmbientConfig) -> Result<()> {
+    if config.luna.focus.trim().is_empty() || config.luna.focus.chars().count() > 1_600 {
+        anyhow::bail!("Luna input focus must contain at most 1600 characters");
+    }
     if config.providers.len() > 12 || config.channels.len() > 24 {
         anyhow::bail!("ambient configuration allows at most 12 providers and 24 channels");
     }
@@ -594,9 +727,6 @@ fn validate_config(config: &AmbientConfig) -> Result<()> {
                 anyhow::bail!("ambient channel {field} must contain at most {limit} characters");
             }
         }
-        if !(5..=10_080).contains(&channel.interval_minutes) {
-            anyhow::bail!("ambient channel interval must be between 5 minutes and 7 days");
-        }
     }
     Ok(())
 }
@@ -615,7 +745,6 @@ fn is_legacy_openai_seed(config: &AmbientConfig) -> bool {
                 && channel.name == "OpenAI · 广域观察"
                 && channel.model == "gpt-5-mini"
                 && channel.focus == "Look for recent AI releases, developer tools, independent evaluation, ecosystem shifts, and useful applications. Prefer a concrete tension over routine announcements."
-                && channel.interval_minutes == 180
     )
 }
 
@@ -653,18 +782,21 @@ fn channel_availability(
         .cloned()
         .unwrap_or_else(|| "unknown_provider".to_owned())
 }
-fn due(channel: &AmbientChannelConfig, runtime: Option<&AmbientChannelRuntime>) -> bool {
-    runtime
-        .and_then(|state| state.last_started_at.as_deref())
-        .and_then(parse_time)
-        .is_none_or(|last| {
-            Utc::now() - last >= chrono::Duration::minutes(channel.interval_minutes as i64)
-        })
+fn tie_breaker(id: &str, salt: i64) -> u64 {
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    salt.hash(&mut hasher);
+    id.hash(&mut hasher);
+    hasher.finish()
 }
-fn parse_time(value: &str) -> Option<DateTime<Utc>> {
-    DateTime::parse_from_rfc3339(value)
-        .ok()
-        .map(|time| time.with_timezone(&Utc))
+
+fn luna_availability(config: &LunaInputConfig, runtime: &AmbientChannelRuntime) -> String {
+    if !config.enabled {
+        "disabled".to_owned()
+    } else if runtime.last_error.is_some() {
+        "unavailable".to_owned()
+    } else {
+        "ready".to_owned()
+    }
 }
 fn responses_url(base_url: &str) -> Result<Url> {
     Url::parse(&format!("{}/responses", base_url.trim_end_matches('/')))
@@ -742,6 +874,7 @@ mod tests {
 
     fn test_config() -> AmbientConfig {
         AmbientConfig {
+            luna: LunaInputConfig::default(),
             providers: vec![AmbientProviderConfig {
                 id: "test-provider".to_owned(),
                 enabled: true,
@@ -757,7 +890,6 @@ mod tests {
                 name: "Test observer".to_owned(),
                 model: "test-model".to_owned(),
                 focus: "Observe independent information.".to_owned(),
-                interval_minutes: 180,
             }],
         }
     }
@@ -790,13 +922,15 @@ mod tests {
     }
 
     #[test]
-    fn channel_due_uses_its_own_schedule() {
-        let channel = test_config().channels.remove(0);
-        assert!(due(&channel, None));
-        let state = AmbientChannelRuntime {
-            last_started_at: Some(timestamp(Utc::now())),
-            ..Default::default()
-        };
-        assert!(!due(&channel, Some(&state)));
+    fn input_tie_breaker_is_stable_for_one_selection_pass() {
+        assert_eq!(tie_breaker("luna", 42), tie_breaker("luna", 42));
+        assert_ne!(tie_breaker("luna", 42), tie_breaker("other", 42));
+    }
+
+    #[test]
+    fn enabled_luna_is_a_valid_unified_input_channel() {
+        let mut config = AmbientConfig::default();
+        config.luna.enabled = true;
+        assert!(validate_config(&config).is_ok());
     }
 }

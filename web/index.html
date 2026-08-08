@@ -57,9 +57,9 @@
             class="top-icon-button"
             id="run-exploration-quick"
             type="button"
-            title="立即进行一次探索"
-            aria-label="立即进行一次探索"
-            data-tooltip="立即进行一次探索"
+            title="立即围绕当前脉络探索"
+            aria-label="立即围绕当前脉络探索"
+            data-tooltip="立即围绕当前脉络探索"
             disabled
           ><i data-lucide="compass" aria-hidden="true"></i></button>
           <details id="top-overflow" class="top-overflow">
@@ -74,7 +74,7 @@
                 id="open-explorations"
                 type="button"
                 data-top-menu-action
-              ><i data-lucide="history" aria-hidden="true"></i><span>探索记录</span></button>
+              ><i data-lucide="history" aria-hidden="true"></i><span>主动探索记录</span></button>
               <button
                 id="open-reconciliation"
                 type="button"
@@ -91,11 +91,6 @@
                 type="button"
                 data-top-menu-action
               ><i data-lucide="settings" aria-hidden="true"></i><span>设置</span></button>
-              <button
-                id="copy-codex-context"
-                type="button"
-                data-top-menu-action
-              ><i data-lucide="copy" aria-hidden="true"></i><span>复制上下文给 Codex</span></button>
               <div class="top-menu-memory-state" title="当前本地记忆长度">
                 <span>context</span>
                 <strong id="memory-size">0</strong>
@@ -105,51 +100,62 @@
         </div>
       </header>
 
-      <section
-        id="conversation"
-        class="conversation"
-        aria-live="polite"
-        aria-label="Conversation"
-      >
-        <section id="onboarding" class="onboarding" hidden>
-          <header>
-            <p class="section-label">INITIAL ORIENTATION</p>
-            <h2>先从你正在关心的事情开始</h2>
-            <p>不需要选择标签。给它一段已有描述，或者直接聊几轮。</p>
-          </header>
+      <div class="conversation-frame">
+        <section
+          id="conversation"
+          class="conversation"
+          aria-live="polite"
+          aria-label="Conversation"
+        >
+          <section id="onboarding" class="onboarding" hidden>
+            <header>
+              <p class="section-label">INITIAL ORIENTATION</p>
+              <h2>先从你正在关心的事情开始</h2>
+              <p>不需要选择标签。给它一段已有描述，或者直接聊几轮。</p>
+            </header>
 
-          <div id="onboarding-choices" class="onboarding-choices">
-            <button id="choose-description" class="choice-button" type="button">
-              <strong>我有一段描述</strong>
-              <span>粘贴已有的自我介绍或 AI 导出</span>
-            </button>
-            <button id="start-guided" class="choice-button" type="button">
-              <strong>边聊边认识</strong>
-              <span>从一个问题开始，后面跟着回答走</span>
-            </button>
-          </div>
-
-          <form id="description-form" class="description-form" hidden>
-            <label for="initial-description">初始描述</label>
-            <textarea
-              id="initial-description"
-              rows="8"
-              maxlength="12000"
-              placeholder="写你当前在做什么、持续关心什么、希望外部世界带来什么信号，也可以直接粘贴已有内容。"
-              required
-            ></textarea>
-            <div class="inline-actions">
-              <button id="cancel-description" class="secondary-button" type="button">返回</button>
-              <button class="primary-button" type="submit">开始对话</button>
+            <div id="onboarding-choices" class="onboarding-choices">
+              <button id="choose-description" class="choice-button" type="button">
+                <strong>我有一段描述</strong>
+                <span>粘贴已有的自我介绍或 AI 导出</span>
+              </button>
+              <button id="start-guided" class="choice-button" type="button">
+                <strong>边聊边认识</strong>
+                <span>从一个问题开始，后面跟着回答走</span>
+              </button>
             </div>
-          </form>
-          <p id="onboarding-state" class="form-state" role="status"></p>
-        </section>
 
-        <div id="empty-state" class="empty-state">
-          <p>它在这里。</p>
-        </div>
-      </section>
+            <form id="description-form" class="description-form" hidden>
+              <label for="initial-description">初始描述</label>
+              <textarea
+                id="initial-description"
+                rows="8"
+                maxlength="12000"
+                placeholder="写你当前在做什么、持续关心什么、希望外部世界带来什么信号，也可以直接粘贴已有内容。"
+                required
+              ></textarea>
+              <div class="inline-actions">
+                <button id="cancel-description" class="secondary-button" type="button">返回</button>
+                <button class="primary-button" type="submit">开始对话</button>
+              </div>
+            </form>
+            <p id="onboarding-state" class="form-state" role="status"></p>
+          </section>
+
+          <div id="empty-state" class="empty-state">
+            <p>它在这里。</p>
+          </div>
+        </section>
+        <button
+          id="scroll-to-latest"
+          class="scroll-to-latest"
+          type="button"
+          title="回到最新消息"
+          aria-label="回到最新消息"
+          data-tooltip="回到最新消息"
+          hidden
+        ><i data-lucide="chevron-down" aria-hidden="true"></i></button>
+      </div>
 
       <section
         id="permission-center"
@@ -303,9 +309,9 @@
       </header>
       <nav class="dialog-tabs" role="tablist" aria-label="设置分类">
         <button type="button" role="tab" data-settings-tab="general" aria-selected="false">常规</button>
-        <button type="button" role="tab" data-settings-tab="exploration" aria-selected="true">探索</button>
-        <button type="button" role="tab" data-settings-tab="sources" aria-selected="false">信息入口</button>
-        <button type="button" role="tab" data-settings-tab="reflection" aria-selected="false">后台理解</button>
+        <button type="button" role="tab" data-settings-tab="exploration" aria-selected="true">主动探索</button>
+        <button type="button" role="tab" data-settings-tab="sources" aria-selected="false">探索通道</button>
+        <button type="button" role="tab" data-settings-tab="reflection" aria-selected="false">对话整理</button>
         <button type="button" role="tab" data-settings-tab="models" aria-selected="false">模型与路由</button>
         <button type="button" role="tab" data-settings-tab="system" aria-selected="false">连接</button>
       </nav>
@@ -313,7 +319,7 @@
       <section class="tab-panel" data-settings-panel="general" hidden>
         <header class="settings-panel-intro">
           <h3>外观与身份</h3>
-          <p>调整聊天中使用的头像。其他运行策略在探索、认知与系统中配置。</p>
+          <p>调整聊天中使用的头像。其他运行策略在主动探索、对话整理与系统中配置。</p>
         </header>
         <div class="avatar-settings">
           <img
@@ -352,13 +358,13 @@
       <section class="tab-panel" data-settings-panel="exploration">
         <form id="autonomy-form">
           <header class="settings-panel-intro">
-            <h3>探索策略</h3>
-            <p>决定何时主动感知外部世界，以及什么值得带回对话。</p>
+            <h3>主动探索</h3>
+            <p>统一调度广域输入、候选筛选、复核与深入判断；只有值得打扰的结果才会进入对话。</p>
           </header>
           <div class="setting-section">
             <label class="toggle-row">
               <span>
-                <strong>允许自主探索</strong>
+                <strong>允许主动探索</strong>
                 <small id="autonomy-availability">初始化完成后生效</small>
               </span>
               <input id="autonomy-enabled" type="checkbox">
@@ -366,7 +372,7 @@
           </div>
           <div class="setting-grid autonomy-setting-grid">
             <label class="field">
-              <span>感知间隔</span>
+              <span>探索间隔</span>
               <select id="autonomy-interval">
                 <option value="30">30 分钟</option>
                 <option value="60">1 小时</option>
@@ -379,6 +385,11 @@
               </select>
             </label>
             <label class="field">
+              <span>每轮广域输入上限</span>
+              <input id="max-input-parallelism" type="number" min="1" max="4" step="1">
+              <small>按最久未使用优先；同一优先层会随机打散。</small>
+            </label>
+            <label class="field">
               <span>每日介入上限</span>
               <input id="daily-interrupt-limit" type="number" min="0" max="20" step="1">
             </label>
@@ -387,7 +398,7 @@
               <input id="daily-note-limit" type="number" min="0" max="20" step="1">
             </label>
             <label class="field">
-              <span>每日自主消耗上限</span>
+              <span>每日后台消耗上限</span>
               <span class="number-unit">
                 <input
                   id="daily-token-limit"
@@ -399,14 +410,14 @@
                 >
                 <span>M tokens</span>
               </span>
-              <small>0 表示不限制</small>
+              <small>统筹主动探索与后台维护；0 表示不限制</small>
             </label>
           </div>
           <div class="setting-section">
             <label class="field attention-posture-field">
-              <span>主动关注</span>
+              <span>探索关注方向</span>
               <textarea id="attention-posture" rows="4" maxlength="2000"></textarea>
-              <small>告诉 symbiont 哪些外部变化即使暂时无需行动，也值得留给你。</small>
+              <small>告诉 symbiont 哪些外部变化即使暂时无需行动，也值得进入候选与复核。</small>
             </label>
           </div>
           <div class="setting-section">
@@ -434,17 +445,29 @@
       <section class="tab-panel" data-settings-panel="sources" hidden>
         <form id="ambient-form">
           <header class="settings-panel-intro">
-            <h3>信息入口</h3>
-            <p>配置广域输入的来源。它们只负责提供候选信息；聊天、复核与深入调查仍由 Codex 完成。</p>
+            <h3>探索通道</h3>
+            <p>这是主动探索的第一步：每轮从已启用通道中选择输入，形成临时候选，再交给统一复核与深入判断。</p>
           </header>
           <section class="compute-policy-section ambient-provider-section">
-            <p id="ambient-empty-state" class="ambient-empty-state" hidden>还没有信息入口。先添加一个 Provider，再为它创建一个观察通道。</p>
+            <div class="ambient-config-group luna-input-group">
+              <div class="ambient-config-heading"><strong>内置输入</strong></div>
+              <div class="ambient-config-row">
+                <div class="ambient-config-row-head"><strong>Luna · 广域输入</strong><span id="luna-availability" class="ambient-row-status">正在读取</span></div>
+                <p class="ambient-credential-note">通过已连接的 Codex 进行低成本广域感知；不需要 API Key。它与外部 Provider 一样，由统一探索调度轮换选用。</p>
+                <label class="toggle-row compact-toggle">
+                  <span>启用 Luna</span>
+                  <input id="luna-enabled" type="checkbox">
+                </label>
+                <label class="field"><span>观察范围</span><textarea id="luna-focus" rows="3" maxlength="1600"></textarea></label>
+              </div>
+            </div>
+            <p id="ambient-empty-state" class="ambient-empty-state" hidden>还没有外部探索通道。你可以启用 Luna，或添加一个 Provider 和输入通道。</p>
             <div class="ambient-config-group">
-              <div class="ambient-config-heading"><strong>Providers</strong><button id="add-ambient-provider" class="icon-button" type="button" title="添加 Provider">＋</button></div>
+              <div class="ambient-config-heading"><strong>外部 Provider</strong><button id="add-ambient-provider" class="icon-button" type="button" title="添加 Provider">＋</button></div>
               <div id="ambient-provider-list" class="ambient-config-list"></div>
             </div>
             <div class="ambient-config-group">
-              <div class="ambient-config-heading"><strong>观察通道</strong><button id="add-ambient-channel" class="icon-button" type="button" title="添加观察通道">＋</button></div>
+              <div class="ambient-config-heading"><strong>外部输入通道</strong><button id="add-ambient-channel" class="icon-button" type="button" title="添加输入通道">＋</button></div>
               <div id="ambient-channel-list" class="ambient-config-list"></div>
             </div>
           </section>
@@ -458,13 +481,13 @@
       <section class="tab-panel" data-settings-panel="reflection" hidden>
         <form id="reflection-form">
           <header class="settings-panel-intro">
-            <h3>后台理解</h3>
-            <p>设置对话如何沉降、延续和形成长期可用的理解。</p>
+            <h3>对话整理</h3>
+            <p>在对话落定后整理脉络、假设与后续关注；它不采集外部信息。到期的跟进会交回主动探索。</p>
           </header>
           <div class="setting-section">
             <label class="toggle-row">
               <span>
-                <strong>后台理解</strong>
+                <strong>启用对话整理</strong>
                 <small id="reflection-availability">正在读取</small>
               </span>
               <input id="reflection-enabled" type="checkbox">
@@ -526,8 +549,8 @@
             </label>
             <label class="toggle-row">
               <span>
-                <strong>允许整理发起对话</strong>
-                <small>仍遵守自主探索的时段与每日打扰上限</small>
+                <strong>允许整理直接留话</strong>
+                <small>这是本地对话驱动的留话路径，仍遵守主动探索的时段与每日打扰上限</small>
               </span>
               <input id="reflection-proactive-messages" type="checkbox">
             </label>
@@ -544,7 +567,7 @@
         <form id="compute-form">
           <header class="settings-panel-intro">
             <h3>模型与路由</h3>
-            <p>为对话、后台理解与探索配置计算层级和话题规则。</p>
+            <p>为对话、对话整理与主动探索配置计算层级和话题规则。</p>
           </header>
           <label class="field routing-field">
             <span>路由方式</span>
@@ -744,7 +767,7 @@
     <dialog id="exploration-dialog" class="panel-dialog exploration-dialog">
       <header class="dialog-header">
         <div>
-          <h2>最近探索</h2>
+          <h2>最近主动探索</h2>
           <p id="exploration-dialog-status">正在读取</p>
         </div>
         <button class="icon-button" data-close="exploration-dialog" type="button" aria-label="关闭">×</button>
@@ -815,7 +838,7 @@
       <header class="dialog-header">
         <div>
           <h2>继续探索？</h2>
-          <p>今天的自主探索已达到设定上限</p>
+          <p>今天的主动探索已达到设定上限</p>
         </div>
       </header>
       <div class="exploration-budget-copy">
@@ -934,7 +957,6 @@
           <label class="field"><span>Provider</span><select data-channel-field="providerId"></select></label>
           <label class="field"><span>显示名称</span><input data-channel-field="name" type="text" /></label>
           <label class="field"><span>模型</span><input data-channel-field="model" type="text" /></label>
-          <label class="field"><span>间隔（分钟）</span><input data-channel-field="intervalMinutes" type="number" min="5" max="10080" /></label>
           <label class="toggle-row compact-toggle"><span>启用</span><input data-channel-field="enabled" type="checkbox" /></label>
         </div>
         <label class="field"><span>观察范围</span><textarea data-channel-field="focus" rows="2"></textarea></label>

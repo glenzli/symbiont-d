@@ -78,7 +78,6 @@ const IDENTITY_UI_JS: &str = include_str!("../web/identity-ui.js");
 const SETTINGS_JS: &str = include_str!("../web/settings.js");
 const USAGE_UI_JS: &str = include_str!("../web/usage-ui.js");
 const COMPOSER_CONTEXT_UI_JS: &str = include_str!("../web/composer-context-ui.js");
-const CODEX_CONTEXT_UI_JS: &str = include_str!("../web/codex-context-ui.js");
 const EXPLORATION_UI_JS: &str = include_str!("../web/exploration-ui.js");
 const EXPLORATION_RECEIPT_JS: &str = include_str!("../web/exploration-receipt.js");
 const REFLECTION_UI_JS: &str = include_str!("../web/reflection-ui.js");
@@ -496,7 +495,6 @@ pub fn router(state: AppState) -> Router {
         .route("/settings.js", get(settings_js))
         .route("/usage-ui.js", get(usage_ui_js))
         .route("/composer-context-ui.js", get(composer_context_ui_js))
-        .route("/codex-context-ui.js", get(codex_context_ui_js))
         .route("/exploration-ui.js", get(exploration_ui_js))
         .route("/exploration-receipt.js", get(exploration_receipt_js))
         .route("/reflection-ui.js", get(reflection_ui_js))
@@ -668,13 +666,6 @@ async fn composer_context_ui_js() -> impl IntoResponse {
     (
         [(header::CONTENT_TYPE, "text/javascript; charset=utf-8")],
         COMPOSER_CONTEXT_UI_JS,
-    )
-}
-
-async fn codex_context_ui_js() -> impl IntoResponse {
-    (
-        [(header::CONTENT_TYPE, "text/javascript; charset=utf-8")],
-        CODEX_CONTEXT_UI_JS,
     )
 }
 
@@ -1025,12 +1016,19 @@ async fn update_ambient(
     State(state): State<AppState>,
     Json(config): Json<AmbientConfig>,
 ) -> Result<Json<AmbientSnapshot>, ApiError> {
-    state
+    let snapshot = state
         .ambient
         .update(config)
         .await
-        .map(Json)
-        .map_err(ApiError::bad_request)
+        .map_err(ApiError::bad_request)?;
+    if state.ambient.has_configured_input().await {
+        state
+            .exploration
+            .clear_stale_input_configuration_skips()
+            .await
+            .map_err(ApiError::internal)?;
+    }
+    Ok(Json(snapshot))
 }
 
 async fn update_compute_policies(
@@ -1529,10 +1527,8 @@ struct ExplorationRedelivery {
 }
 
 fn exploration_redelivery(trace: &TraceBundle) -> Option<ExplorationRedelivery> {
-    if !matches!(
-        trace.runs.first()?.origin.as_str(),
-        "autonomous_scout" | "autonomous"
-    ) || trace.runs.last()?.status != "completed"
+    if trace.runs.first()?.activity != "exploration"
+        || trace.runs.last()?.status != "completed"
         || !trace.runs.iter().any(|run| run.produced_message)
     {
         return None;
@@ -2601,11 +2597,15 @@ fn signal_context(signal: &SignalEvent) -> ExternalContext {
         source: "symbiont_input_signal".to_owned(),
         title: format!("{} · {}", signal.actor.name, signal.title),
         content: format!(
-            "Input-only model role: {} ({}, {}). This is an external signal the user chose to reply to; respond as symbiont-d, do not impersonate the input role.\n\n{}\n\nSources:\n{}",
+            "Input-only model role: {} ({}, {}). This is an external signal the user chose to reply to; respond as symbiont-d, do not impersonate the input role. Treat the following as a self-contained source packet: restate the relevant factual context before interpreting it, and never assume the user saw an earlier card.\n\nTitle: {}\nUnderlying event date: {}\nObserved by Symbiont: {}\n\nInput:\n{}\n\nSummary:\n{}\n\nSources:\n{}",
             signal.actor.name,
             signal.actor.model,
             signal.actor.effort,
+            signal.title,
+            signal.event_at.as_deref().unwrap_or("not supplied"),
+            signal.observed_at,
             signal.content,
+            signal.summary,
             signal
                 .sources
                 .iter()

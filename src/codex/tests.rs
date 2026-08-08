@@ -211,8 +211,9 @@ fn ambient_review_is_bounded_to_candidate_dispositions() {
     let prompt = sensing_review_prompt(&[], "<silent/>").unwrap();
     assert!(prompt.contains("discard"));
     assert!(prompt.contains("broadcast"));
+    assert!(prompt.contains("prefer `broadcast`"));
     assert!(prompt.contains("Never rewrite"));
-    assert!(prompt.contains("must not write PCP"));
+    assert!(prompt.contains("write PCP, Hunches, profile"));
 }
 
 #[test]

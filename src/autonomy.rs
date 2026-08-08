@@ -10,6 +10,8 @@ use tokio::{
 const DEFAULT_DAILY_TOKEN_LIMIT: u64 = 100_000;
 const MAX_DAILY_TOKEN_LIMIT: u64 = 100_000_000;
 const DEFAULT_DAILY_NOTE_LIMIT: u8 = 4;
+const DEFAULT_MAX_INPUT_PARALLELISM: u8 = 1;
+const MAX_INPUT_PARALLELISM: u8 = 4;
 const MAX_DAILY_OUTREACH_LIMIT: u8 = 20;
 const DEFAULT_ATTENTION_POSTURE: &str = "我不想每天自己刷新闻。除了会改变当前决策的信号，也请留意可信、仍在有效讨论周期，并且值得共同形成判断的外部变化。用户可能已经知道，事情也不必发生在当天；它可以和长期问题、项目或思考方式有关，也可以只是有真实讨论价值。若要切换方向，请明确说出来，不要假装在接续上一段对话。";
 
@@ -18,6 +20,8 @@ const DEFAULT_ATTENTION_POSTURE: &str = "我不想每天自己刷新闻。除了
 pub struct AutonomyConfig {
     pub enabled: bool,
     pub interval_minutes: u32,
+    #[serde(default = "default_max_input_parallelism")]
+    pub max_input_parallelism: u8,
     pub daily_interrupt_limit: u8,
     #[serde(default = "default_daily_note_limit")]
     pub daily_note_limit: u8,
@@ -107,6 +111,7 @@ impl Default for AutonomyConfig {
         Self {
             enabled: false,
             interval_minutes: 360,
+            max_input_parallelism: DEFAULT_MAX_INPUT_PARALLELISM,
             daily_interrupt_limit: 2,
             daily_note_limit: DEFAULT_DAILY_NOTE_LIMIT,
             daily_token_limit: DEFAULT_DAILY_TOKEN_LIMIT,
@@ -123,6 +128,11 @@ impl Default for AutonomyConfig {
 fn validate(config: &AutonomyConfig) -> Result<()> {
     if !(30..=10_080).contains(&config.interval_minutes) {
         anyhow::bail!("exploration interval must be between 30 minutes and 7 days");
+    }
+    if !(1..=MAX_INPUT_PARALLELISM).contains(&config.max_input_parallelism) {
+        anyhow::bail!(
+            "maximum parallel input channels must be between 1 and {MAX_INPUT_PARALLELISM}"
+        );
     }
     if config.daily_interrupt_limit > MAX_DAILY_OUTREACH_LIMIT {
         anyhow::bail!("daily interruption limit cannot exceed 20");
@@ -150,6 +160,10 @@ const fn default_daily_token_limit() -> u64 {
 
 const fn default_daily_note_limit() -> u8 {
     DEFAULT_DAILY_NOTE_LIMIT
+}
+
+const fn default_max_input_parallelism() -> u8 {
+    DEFAULT_MAX_INPUT_PARALLELISM
 }
 
 fn default_attention_posture() -> String {

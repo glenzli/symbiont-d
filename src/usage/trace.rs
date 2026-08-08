@@ -8,7 +8,7 @@ use crate::diagnostics::{
     ContextSnapshot, ExecutionTraceEvent, TRACE_RETENTION_DAYS, TRACE_RETENTION_INVOCATIONS,
 };
 
-use super::{InvocationRecord, ToolTraceStep, invocation_from_row};
+use super::{InvocationActivity, InvocationRecord, ToolTraceStep, invocation_from_row};
 
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -29,7 +29,9 @@ pub struct TraceBundle {
 pub struct TraceRun {
     pub invocation_id: String,
     pub parent_id: Option<String>,
-    pub origin: String,
+    pub activity: String,
+    pub stage: String,
+    pub input_source: Option<String>,
     pub lane: String,
     pub model: String,
     pub display_name: String,
@@ -96,6 +98,7 @@ pub(super) fn read(connection: &Connection, trace_id: &str) -> Result<Option<Tra
     let mut event_count = 0_u64;
     let mut details_retained = false;
     for invocation in invocations {
+        let classification = InvocationActivity::from_origin(&invocation.origin);
         let steps = read_steps(connection, &invocation)?;
         let context = connection
             .query_row(
@@ -119,7 +122,9 @@ pub(super) fn read(connection: &Connection, trace_id: &str) -> Result<Option<Tra
         runs.push(TraceRun {
             invocation_id: invocation.id,
             parent_id: invocation.parent_id,
-            origin: invocation.origin,
+            activity: classification.activity.to_owned(),
+            stage: classification.stage.to_owned(),
+            input_source: classification.input_source.map(str::to_owned),
             lane: invocation.lane,
             model: invocation.effective_model,
             display_name: invocation.model_display_name,

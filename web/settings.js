@@ -12,6 +12,9 @@ export function initSettings(state) {
   const ambientForm = document.querySelector("#ambient-form");
   const ambientSaveState = document.querySelector("#ambient-save-state");
   const ambientEmptyState = document.querySelector("#ambient-empty-state");
+  const lunaEnabled = document.querySelector("#luna-enabled");
+  const lunaFocus = document.querySelector("#luna-focus");
+  const lunaAvailability = document.querySelector("#luna-availability");
   const ambientProviderList = document.querySelector("#ambient-provider-list");
   const ambientProviderTemplate = document.querySelector("#ambient-provider-template");
   const addAmbientProvider = document.querySelector("#add-ambient-provider");
@@ -26,6 +29,7 @@ export function initSettings(state) {
   const autonomyForm = document.querySelector("#autonomy-form");
   const autonomyEnabled = document.querySelector("#autonomy-enabled");
   const autonomyInterval = document.querySelector("#autonomy-interval");
+  const maxInputParallelism = document.querySelector("#max-input-parallelism");
   const dailyInterruptLimit = document.querySelector("#daily-interrupt-limit");
   const dailyNoteLimit = document.querySelector("#daily-note-limit");
   const dailyTokenLimit = document.querySelector("#daily-token-limit");
@@ -94,12 +98,18 @@ export function initSettings(state) {
 
   function renderAmbient() {
     if (!state.ambient) return;
+    const luna = state.ambient.luna || {};
+    lunaEnabled.checked = luna.enabled === true;
+    lunaFocus.value = luna.focus || "";
+    lunaAvailability.textContent = availabilityText(luna.availability, luna);
     ambientProviderList.replaceChildren();
     ambientChannelList.replaceChildren();
     for (const provider of state.ambient.providers || []) appendAmbientProvider(provider);
     for (const channel of state.ambient.channels || []) appendAmbientChannel(channel);
     ambientEmptyState.hidden = Boolean(
-      state.ambient.providers?.length || state.ambient.channels?.length,
+      luna.enabled ||
+        state.ambient.providers?.length ||
+        state.ambient.channels?.length,
     );
   }
 
@@ -109,6 +119,7 @@ export function initSettings(state) {
     if (availability === "disabled") return "已关闭";
     if (availability === "missing_credential") return "未配置密钥";
     if (availability === "credential_unavailable") return "密钥暂不可读取";
+    if (availability === "unavailable") return "Codex 暂不可用";
     return availability || "尚不可用";
   }
 
@@ -167,7 +178,6 @@ export function initSettings(state) {
     row.querySelector('[data-channel-field="name"]').value = channel.name || "";
     row.querySelector('[data-channel-field="model"]').value = channel.model || "";
     row.querySelector('[data-channel-field="focus"]').value = channel.focus || "";
-    row.querySelector('[data-channel-field="intervalMinutes"]').value = String(channel.intervalMinutes || 180);
     row.querySelector('[data-channel-field="enabled"]').checked = channel.enabled !== false;
     row.querySelector(".ambient-row-title").textContent = channel.name || channel.id || "新输入通道";
     row.querySelector(".ambient-row-status").textContent = availabilityText(channel.availability, channel);
@@ -195,6 +205,7 @@ export function initSettings(state) {
     if (!state.autonomy) return;
     autonomyEnabled.checked = state.autonomy.enabled;
     autonomyInterval.value = String(state.autonomy.intervalMinutes);
+    maxInputParallelism.value = String(state.autonomy.maxInputParallelism || 1);
     dailyInterruptLimit.value = String(state.autonomy.dailyInterruptLimit);
     dailyNoteLimit.value = String(state.autonomy.dailyNoteLimit ?? 4);
     dailyTokenLimit.value = tokensToMillions(
@@ -254,6 +265,10 @@ export function initSettings(state) {
 
   function ambientFormValue() {
     return {
+      luna: {
+        enabled: lunaEnabled.checked,
+        focus: lunaFocus.value.trim(),
+      },
       providers: [...ambientProviderList.querySelectorAll("[data-ambient-provider]")].map((row) => ({
         id: row.querySelector('[data-provider-field="id"]').value.trim(),
         enabled: row.querySelector('[data-provider-field="enabled"]').checked,
@@ -270,7 +285,6 @@ export function initSettings(state) {
         name: row.querySelector('[data-channel-field="name"]').value.trim(),
         model: row.querySelector('[data-channel-field="model"]').value.trim(),
         focus: row.querySelector('[data-channel-field="focus"]').value.trim(),
-        intervalMinutes: Number(row.querySelector('[data-channel-field="intervalMinutes"]').value),
       })),
     };
   }
@@ -303,7 +317,7 @@ export function initSettings(state) {
   }
 
   async function saveAmbient(event) {
-    event.preventDefault();
+    event?.preventDefault();
     ambientSaveState.textContent = "保存中";
     try {
       state.ambient = await responseJson(
@@ -312,7 +326,7 @@ export function initSettings(state) {
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify(ambientFormValue()),
         }),
-        "信息入口保存失败",
+        "探索通道保存失败",
       );
       renderAmbient();
       ambientSaveState.textContent = "已保存";
@@ -327,6 +341,7 @@ export function initSettings(state) {
     const config = {
       enabled: autonomyEnabled.checked,
       intervalMinutes: Number(autonomyInterval.value),
+      maxInputParallelism: Number(maxInputParallelism.value),
       dailyInterruptLimit: Number(dailyInterruptLimit.value),
       dailyNoteLimit: Number(dailyNoteLimit.value),
       dailyTokenLimit: millionsToTokens(dailyTokenLimit.value),
@@ -408,6 +423,7 @@ export function initSettings(state) {
   });
   computeForm.addEventListener("submit", saveCompute);
   ambientForm.addEventListener("submit", saveAmbient);
+  lunaEnabled.addEventListener("change", saveAmbient);
   addComputePolicy.addEventListener("click", () => appendComputePolicy({}, true));
   computePolicyList.addEventListener("click", (event) => {
     const button = event.target.closest(".remove-compute-policy");
@@ -439,10 +455,9 @@ export function initSettings(state) {
         id: "new-channel",
         enabled: true,
         providerId,
-        name: "新的广域观察",
+        name: "新的广域输入",
         model: "gpt-5-mini",
         focus: "Describe the independent external domain this role should observe.",
-        intervalMinutes: 180,
       },
       true,
     );
