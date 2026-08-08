@@ -3055,6 +3055,55 @@ html[data-native-shell="macos"] .topbar {
   border-bottom: 1px solid var(--border);
 }
 
+.exploration-attempt-log {
+  padding: 12px 0;
+  border-bottom: 1px solid var(--border);
+}
+
+.exploration-attempt-log > strong {
+  display: block;
+  font-size: 11px;
+}
+
+.exploration-attempt-log > p {
+  margin: 4px 0 0;
+  color: var(--text-faint);
+  font-size: 9px;
+  line-height: 1.45;
+}
+
+.exploration-attempt-log ol {
+  margin: 8px 0 0;
+  padding: 0;
+  list-style: none;
+}
+
+.exploration-attempt-log li {
+  padding: 8px 0;
+  border-top: 1px solid var(--border);
+}
+
+.exploration-attempt-log li > header {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.exploration-attempt-log li > header strong {
+  font-size: 10px;
+}
+
+.exploration-attempt-log li > header time,
+.exploration-attempt-log li > p {
+  color: var(--text-faint);
+  font-size: 9px;
+}
+
+.exploration-attempt-log li > p {
+  margin: 4px 0 0;
+}
+
 .exploration-intent-log > summary {
   color: var(--text-soft);
   cursor: pointer;

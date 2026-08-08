@@ -287,6 +287,7 @@ struct BridgeContextQuery {
 struct ExplorationHistoryResponse {
     exploration: ExplorationSnapshot,
     runs: Vec<ExplorationRunSummary>,
+    skipped_attempts: Vec<crate::exploration::ExplorationSkippedAttempt>,
     intents: Vec<crate::exploration::ExplorationIntent>,
     candidates: Vec<SensingCandidateResponse>,
 }
@@ -1458,6 +1459,7 @@ async fn recent_explorations(
     Ok(Json(ExplorationHistoryResponse {
         exploration: state.exploration.snapshot().await,
         runs,
+        skipped_attempts: state.exploration.recent_skipped_attempts(12).await,
         intents: state.exploration.recent_intents(20).await,
         candidates,
     }))

@@ -60,7 +60,14 @@ export function initExplorationUi(state, { announceManualCompletion } = {}) {
       history.append(renderCandidatePool(payload.candidates));
     }
     if (payload.intents?.length) history.append(renderIntentLog(payload.intents));
-    if (!payload.runs.length && !payload.candidates?.length) {
+    if (payload.skippedAttempts?.length) {
+      history.append(renderSkippedAttempts(payload.skippedAttempts));
+    }
+    if (
+      !payload.runs.length &&
+      !payload.candidates?.length &&
+      !payload.skippedAttempts?.length
+    ) {
       const empty = document.createElement("p");
       empty.className = "exploration-empty";
       empty.textContent = "还没有完成过自主探索。";
@@ -222,6 +229,37 @@ export function initExplorationUi(state, { announceManualCompletion } = {}) {
       if (runAt && runAt !== lastLoadedRunAt) load();
     },
   };
+}
+
+function renderSkippedAttempts(attempts) {
+  const section = document.createElement("section");
+  section.className = "exploration-attempt-log";
+  const title = document.createElement("strong");
+  title.textContent = "最近未实际执行的探索";
+  const note = document.createElement("p");
+  note.textContent = "这些条目没有产生模型调用或探索轨迹，不会被当作完成的探索。";
+  const list = document.createElement("ol");
+  for (const attempt of attempts) {
+    const item = document.createElement("li");
+    const header = document.createElement("header");
+    const reason = document.createElement("strong");
+    const time = document.createElement("time");
+    reason.textContent = skippedAttemptLabel(attempt.reason);
+    time.dateTime = attempt.at;
+    time.textContent = new Date(attempt.at).toLocaleString([], {
+      month: "numeric",
+      day: "numeric",
+      hour: "2-digit",
+      minute: "2-digit",
+    });
+    header.append(reason, time);
+    const detail = document.createElement("p");
+    detail.textContent = `${triggerLabel(attempt.trigger) || "定时"}触发；没有形成可查看的探索内容。`;
+    item.append(header, detail);
+    list.append(item);
+  }
+  section.append(title, note, list);
+  return section;
 }
 
 function renderCandidatePool(candidates) {
@@ -492,6 +530,10 @@ function currentStatus(exploration) {
   if (exploration.phase === "error") {
     return "最近一次探索运行异常";
   }
+  if (exploration.lastSkippedAttempt) {
+    const attempt = exploration.lastSkippedAttempt;
+    return `上次未实际执行于 ${new Date(attempt.at).toLocaleString()} · ${skippedAttemptLabel(attempt.reason)}`;
+  }
   if (exploration.lastRunAt) {
     const trigger = triggerLabel(exploration.lastTrigger);
     return `上次完成于 ${new Date(exploration.lastRunAt).toLocaleString()}${trigger ? ` · ${trigger}` : ""}`;
@@ -499,6 +541,15 @@ function currentStatus(exploration) {
   if (exploration.phase === "disabled") return "自主探索已关闭";
   if (exploration.phase === "needs_setup") return "等待完成初始化";
   return "等待首次探索";
+}
+
+function skippedAttemptLabel(reason) {
+  return (
+    {
+      no_input_channel: "没有可用的广域输入通道",
+      channel_failed: "广域输入通道未能完成",
+    }[reason] || "本轮未形成可查看的探索"
+  );
 }
 
 function readPendingManualRequest() {

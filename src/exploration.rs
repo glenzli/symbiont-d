@@ -1,6 +1,8 @@
+mod attempt_log;
 mod intent;
 mod manual_run;
 
+pub use attempt_log::{ExplorationAttemptStore, ExplorationSkippedAttempt};
 pub use intent::{
     ExplorationIntent, ExplorationIntentOrigin, ExplorationIntentQueue, ExplorationIntentReceiver,
     ExplorationIntentStatus, NewExplorationIntent,
@@ -92,6 +94,7 @@ pub struct ExplorationSnapshot {
     pub latest_message: Option<MemoryEntry>,
     pub current_trigger: Option<String>,
     pub last_trigger: Option<String>,
+    pub last_skipped_attempt: Option<ExplorationSkippedAttempt>,
     pub pending_candidate_count: usize,
     pub manual_run: Option<ManualExplorationRun>,
     pub manual_receipts: Vec<ManualExplorationRun>,
@@ -109,6 +112,7 @@ impl Default for ExplorationSnapshot {
             latest_message: None,
             current_trigger: None,
             last_trigger: None,
+            last_skipped_attempt: None,
             pending_candidate_count: 0,
             manual_run: None,
             manual_receipts: Vec::new(),
@@ -188,6 +192,7 @@ pub struct ExplorationHandle {
     intents: Arc<ExplorationIntentQueue>,
     sensing: Arc<SensingStore>,
     manual_runs: Arc<ManualExplorationStore>,
+    attempts: Arc<ExplorationAttemptStore>,
 }
 
 impl ExplorationHandle {
@@ -207,12 +212,15 @@ impl ExplorationHandle {
         conversation: ConversationCoordinator,
         intents: Arc<ExplorationIntentQueue>,
         manual_runs: Arc<ManualExplorationStore>,
+        attempts: Arc<ExplorationAttemptStore>,
         mut intent_receiver: ExplorationIntentReceiver,
     ) -> Self {
         let projection = manual_runs.projection().await;
+        let last_skipped_attempt = attempts.latest().await;
         let state = Arc::new(RwLock::new(ExplorationSnapshot {
             manual_run: projection.latest,
             manual_receipts: projection.unpresented,
+            last_skipped_attempt,
             ..ExplorationSnapshot::default()
         }));
         let (trigger, trigger_rx) = mpsc::channel(32);
@@ -261,6 +269,7 @@ impl ExplorationHandle {
             conversation,
             Arc::clone(&intents),
             Arc::clone(&manual_runs),
+            Arc::clone(&attempts),
             trigger_rx,
         ));
         Self {
@@ -269,6 +278,7 @@ impl ExplorationHandle {
             intents,
             sensing,
             manual_runs,
+            attempts,
         }
     }
 
@@ -336,6 +346,10 @@ impl ExplorationHandle {
         self.intents.recent(limit).await
     }
 
+    pub async fn recent_skipped_attempts(&self, limit: usize) -> Vec<ExplorationSkippedAttempt> {
+        self.attempts.recent(limit).await
+    }
+
     pub async fn supersede_intents(&self, ids: &[String], reason: &str) -> Result<()> {
         self.intents.supersede(ids, reason).await
     }
@@ -359,17 +373,29 @@ async fn run_scheduler(
     conversation: ConversationCoordinator,
     intents: Arc<ExplorationIntentQueue>,
     manual_runs: Arc<ManualExplorationStore>,
+    attempts: Arc<ExplorationAttemptStore>,
     mut trigger_rx: mpsc::Receiver<ExplorationTrigger>,
 ) {
     let mut config_updates = autonomy.subscribe();
     let started_at = Utc::now();
-    let mut last_run_at = usage
+    let mut last_completed_at = usage
         .latest_exploration_completed_at()
         .await
         .ok()
         .flatten()
         .and_then(|value| DateTime::parse_from_rfc3339(&value).ok())
         .map(|value| value.with_timezone(&Utc));
+    let last_skipped_at = attempts
+        .latest()
+        .await
+        .and_then(|attempt| DateTime::parse_from_rfc3339(&attempt.at).ok())
+        .map(|value| value.with_timezone(&Utc));
+    let mut last_attempt_at = match (last_completed_at, last_skipped_at) {
+        (Some(completed), Some(skipped)) => Some(completed.max(skipped)),
+        (Some(completed), None) => Some(completed),
+        (None, Some(skipped)) => Some(skipped),
+        (None, None) => None,
+    };
     let mut pending_triggers = VecDeque::new();
 
     loop {
@@ -384,7 +410,7 @@ async fn run_scheduler(
                 continue;
             }
         };
-        let scheduled_at = last_run_at
+        let scheduled_at = last_attempt_at
             .map(|last| last + chrono::Duration::minutes(config.interval_minutes as i64))
             .unwrap_or_else(|| {
                 started_at + chrono::Duration::minutes(config.interval_minutes as i64)
@@ -448,6 +474,7 @@ async fn run_scheduler(
                     Arc::clone(&signals),
                     conversation.clone(),
                     trigger.clone(),
+                    Arc::clone(&attempts),
                 )
                 .await;
                 match result {
@@ -476,7 +503,10 @@ async fn run_scheduler(
                             continue;
                         }
                         if completion.status != ExplorationIntentStatus::Superseded {
-                            last_run_at = Some(Utc::now());
+                            last_attempt_at = Some(completion.attempted_at);
+                            if completion.completed {
+                                last_completed_at = Some(completion.attempted_at);
+                            }
                         }
                         if let Some(id) = intent_id {
                             let _ = intents
@@ -508,7 +538,7 @@ async fn run_scheduler(
                 continue;
             }
             Gate::Wait { phase, until } => {
-                update_waiting_state(&state, phase, until, last_run_at).await;
+                update_waiting_state(&state, phase, until, last_completed_at).await;
                 let sleep_for = until
                     .map(|until| {
                         (until - now)
@@ -634,6 +664,7 @@ async fn run_once(
     signals: Arc<SignalStore>,
     conversation: ConversationCoordinator,
     trigger: Option<ExplorationTrigger>,
+    attempts: Arc<ExplorationAttemptStore>,
 ) -> Result<ExplorationRunCompletion> {
     let completes_deferred_follow_up =
         matches!(&trigger, Some(ExplorationTrigger::DeferredFollowUp));
@@ -724,11 +755,13 @@ async fn run_once(
         settle_sensing_only(
             &state,
             &manual_runs,
+            &attempts,
             trigger.as_ref(),
             ExplorationIntentStatus::Superseded,
             "superseded",
             pending_candidate_count,
             Some("conversation_active"),
+            false,
         )
         .await?;
         return Ok(ExplorationRunCompletion::superseded("conversation_active"));
@@ -793,11 +826,13 @@ async fn run_once(
             settle_sensing_only(
                 &state,
                 &manual_runs,
+                &attempts,
                 trigger.as_ref(),
                 ExplorationIntentStatus::Superseded,
                 "superseded",
                 pending_candidate_count,
                 Some("newer_user_input"),
+                false,
             )
             .await?;
             return Ok(ExplorationRunCompletion::superseded("newer_user_input"));
@@ -813,17 +848,22 @@ async fn run_once(
             stop_activity_relay(runtime_tx, activity_task).await?;
             let outcome = if sensing_outcome.channel_failure.is_some() {
                 "channel_failed"
+            } else if sensing_trace_id.is_none() {
+                "no_input_channel"
             } else {
                 "no_candidates"
             };
+            let was_recorded = sensing_trace_id.is_some();
             settle_sensing_only(
                 &state,
                 &manual_runs,
+                &attempts,
                 trigger.as_ref(),
                 ExplorationIntentStatus::Silent,
                 outcome,
                 pending_candidate_count,
                 None,
+                was_recorded,
             )
             .await?;
             return Ok(ExplorationRunCompletion {
@@ -831,6 +871,8 @@ async fn run_once(
                 trace_id: sensing_trace_id,
                 result_revision_id: None,
                 retry_reason: None,
+                attempted_at: Utc::now(),
+                completed: was_recorded,
             });
         }
 
@@ -839,11 +881,13 @@ async fn run_once(
             settle_sensing_only(
                 &state,
                 &manual_runs,
+                &attempts,
                 trigger.as_ref(),
                 ExplorationIntentStatus::Superseded,
                 "superseded",
                 pending_candidate_count,
                 Some("codex_busy"),
+                false,
             )
             .await?;
             return Ok(ExplorationRunCompletion::superseded("codex_busy"));
@@ -874,11 +918,13 @@ async fn run_once(
             settle_sensing_only(
                 &state,
                 &manual_runs,
+                &attempts,
                 trigger.as_ref(),
                 ExplorationIntentStatus::Superseded,
                 "superseded",
                 pending_candidate_count,
                 Some("newer_user_input"),
+                false,
             )
             .await?;
             return Ok(ExplorationRunCompletion::superseded("newer_user_input"));
@@ -910,6 +956,7 @@ async fn run_once(
             settle_sensing_only(
                 &state,
                 &manual_runs,
+                &attempts,
                 trigger.as_ref(),
                 ExplorationIntentStatus::Silent,
                 if broadcast_count > 0 {
@@ -919,6 +966,7 @@ async fn run_once(
                 },
                 pending_candidate_count,
                 None,
+                true,
             )
             .await?;
             return Ok(ExplorationRunCompletion {
@@ -926,6 +974,8 @@ async fn run_once(
                 trace_id: sensing_trace_id,
                 result_revision_id: None,
                 retry_reason: None,
+                attempted_at: Utc::now(),
+                completed: true,
             });
         }
         reviewed_candidates.retain(|candidate| investigate_ids.contains(&candidate.id));
@@ -967,11 +1017,13 @@ async fn run_once(
         settle_sensing_only(
             &state,
             &manual_runs,
+            &attempts,
             trigger.as_ref(),
             ExplorationIntentStatus::Superseded,
             "superseded",
             pending_candidate_count,
             Some("newer_user_input"),
+            false,
         )
         .await?;
         return Ok(ExplorationRunCompletion::superseded("newer_user_input"));
@@ -983,11 +1035,13 @@ async fn run_once(
         settle_sensing_only(
             &state,
             &manual_runs,
+            &attempts,
             trigger.as_ref(),
             ExplorationIntentStatus::Superseded,
             "superseded",
             pending_candidate_count,
             Some("codex_busy"),
+            false,
         )
         .await?;
         return Ok(ExplorationRunCompletion::superseded("codex_busy"));
@@ -1163,6 +1217,7 @@ async fn run_once(
                 .unwrap_or("scheduled")
                 .to_owned(),
         );
+        snapshot.last_skipped_attempt = None;
     }
     snapshot.last_error = None;
     snapshot.current_activity = None;
@@ -1190,6 +1245,8 @@ async fn run_once(
         trace_id,
         result_revision_id,
         retry_reason,
+        attempted_at: Utc::now(),
+        completed: true,
     })
 }
 
@@ -1198,6 +1255,8 @@ struct ExplorationRunCompletion {
     trace_id: Option<String>,
     result_revision_id: Option<String>,
     retry_reason: Option<String>,
+    attempted_at: DateTime<Utc>,
+    completed: bool,
 }
 
 impl ExplorationRunCompletion {
@@ -1207,6 +1266,8 @@ impl ExplorationRunCompletion {
             trace_id: None,
             result_revision_id: None,
             retry_reason: Some(reason.to_owned()),
+            attempted_at: Utc::now(),
+            completed: false,
         }
     }
 }
@@ -1345,13 +1406,29 @@ async fn stop_activity_relay(
 async fn settle_sensing_only(
     state: &RwLock<ExplorationSnapshot>,
     manual_runs: &ManualExplorationStore,
+    attempts: &ExplorationAttemptStore,
     trigger: Option<&ExplorationTrigger>,
     status: ExplorationIntentStatus,
     outcome: &str,
     pending_candidate_count: usize,
     reason: Option<&str>,
+    was_recorded: bool,
 ) -> Result<()> {
     let completed_at = timestamp(Utc::now());
+    let skipped_attempt = if status != ExplorationIntentStatus::Superseded && !was_recorded {
+        Some(
+            attempts
+                .record(
+                    trigger
+                        .map(ExplorationTrigger::as_str)
+                        .unwrap_or("scheduled"),
+                    outcome,
+                )
+                .await?,
+        )
+    } else {
+        None
+    };
     if let Some((request_id, _)) = trigger.and_then(ExplorationTrigger::manual_request) {
         if status == ExplorationIntentStatus::Superseded {
             manual_runs.requeue(request_id, reason).await?;
@@ -1376,7 +1453,7 @@ async fn settle_sensing_only(
         refresh_manual_projection(state, manual_runs).await;
     }
     let mut snapshot = state.write().await;
-    if status != ExplorationIntentStatus::Superseded {
+    if status != ExplorationIntentStatus::Superseded && was_recorded {
         snapshot.last_run_at = Some(completed_at);
         snapshot.last_outcome = Some(outcome.to_owned());
         snapshot.last_trigger = Some(
@@ -1385,6 +1462,10 @@ async fn settle_sensing_only(
                 .unwrap_or("scheduled")
                 .to_owned(),
         );
+        snapshot.last_skipped_attempt = None;
+    }
+    if let Some(skipped_attempt) = skipped_attempt {
+        snapshot.last_skipped_attempt = Some(skipped_attempt);
     }
     snapshot.last_error = None;
     snapshot.current_activity = None;
@@ -1598,11 +1679,11 @@ mod tests {
     use chrono::{DateTime, TimeZone, Utc};
 
     use super::{
-        ExplorationIntent, ExplorationIntentOrigin, ExplorationIntentStatus, ExplorationPhase,
-        ExplorationSnapshot, ExplorationTrigger, Gate, ManualExplorationStatus,
-        ManualExplorationStore, ambient_sensing_context, bounded_message_excerpt,
-        conversation_edge, evaluate_gate, exploration_working_context, quiet_end,
-        refresh_manual_projection, set_error, settle_sensing_only, today_started_at,
+        ExplorationAttemptStore, ExplorationIntent, ExplorationIntentOrigin,
+        ExplorationIntentStatus, ExplorationPhase, ExplorationSnapshot, ExplorationTrigger, Gate,
+        ManualExplorationStatus, ManualExplorationStore, ambient_sensing_context,
+        bounded_message_excerpt, conversation_edge, evaluate_gate, exploration_working_context,
+        quiet_end, refresh_manual_projection, set_error, settle_sensing_only, today_started_at,
     };
     use crate::{
         autonomy::{AutonomyConfig, QuietHours},
@@ -1696,6 +1777,17 @@ mod tests {
         let manual_runs = ManualExplorationStore::open(path.clone())
             .await
             .expect("open manual exploration store");
+        let attempt_path = path.with_file_name(format!(
+            "symbiont-exploration-attempt-test-{}-{}.json",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .expect("clock")
+                .as_nanos()
+        ));
+        let attempts = ExplorationAttemptStore::open(attempt_path.clone())
+            .await
+            .expect("open attempt log");
         manual_runs
             .accept("explore_test".to_owned(), "2026-08-05T15:00:00Z".to_owned())
             .await
@@ -1716,11 +1808,13 @@ mod tests {
         settle_sensing_only(
             &state,
             &manual_runs,
+            &attempts,
             Some(&trigger),
             ExplorationIntentStatus::Superseded,
             "superseded",
             0,
             Some("codex_busy"),
+            false,
         )
         .await
         .expect("defer manual exploration");
@@ -1758,6 +1852,63 @@ mod tests {
         assert_eq!(manual.outcome.as_deref(), Some("failed"));
         assert!(manual.completed_at.is_some());
         let _ = std::fs::remove_file(path);
+        let _ = std::fs::remove_file(attempt_path);
+    }
+
+    #[tokio::test]
+    async fn an_unconfigured_input_pass_never_replaces_the_last_completed_exploration() {
+        let nonce = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("clock")
+            .as_nanos();
+        let receipt_path =
+            std::env::temp_dir().join(format!("symbiont-unconfigured-input-receipt-{nonce}.json"));
+        let attempt_path =
+            std::env::temp_dir().join(format!("symbiont-unconfigured-input-attempt-{nonce}.json"));
+        let manual_runs = ManualExplorationStore::open(receipt_path.clone())
+            .await
+            .expect("open receipt store");
+        let attempts = ExplorationAttemptStore::open(attempt_path.clone())
+            .await
+            .expect("open attempt log");
+        let state = tokio::sync::RwLock::new(ExplorationSnapshot {
+            last_run_at: Some("2026-08-05T14:00:00Z".to_owned()),
+            last_outcome: Some("silent".to_owned()),
+            last_trigger: Some("scheduled".to_owned()),
+            ..ExplorationSnapshot::default()
+        });
+
+        settle_sensing_only(
+            &state,
+            &manual_runs,
+            &attempts,
+            None,
+            ExplorationIntentStatus::Silent,
+            "no_input_channel",
+            0,
+            None,
+            false,
+        )
+        .await
+        .expect("settle skipped pass");
+
+        let snapshot = state.read().await;
+        assert_eq!(
+            snapshot.last_run_at.as_deref(),
+            Some("2026-08-05T14:00:00Z")
+        );
+        assert_eq!(snapshot.last_outcome.as_deref(), Some("silent"));
+        assert_eq!(
+            snapshot
+                .last_skipped_attempt
+                .as_ref()
+                .map(|attempt| attempt.reason.as_str()),
+            Some("no_input_channel")
+        );
+        drop(snapshot);
+        assert_eq!(attempts.recent(4).await.len(), 1);
+        let _ = std::fs::remove_file(receipt_path);
+        let _ = std::fs::remove_file(attempt_path);
     }
 
     #[test]

@@ -302,10 +302,18 @@ function appendManualExplorationReceipt(receipt) {
   notice.setAttribute("role", "status");
 
   const label = document.createElement("strong");
-  label.textContent = receipt.outcome === "failed" ? "探索未完成" : "探索完成";
+  label.textContent =
+    receipt.outcome === "failed" ||
+    ["no_input_channel", "channel_failed"].includes(receipt.outcome)
+      ? "探索未实际执行"
+      : "探索完成";
   const message = document.createElement("span");
   message.textContent =
-    receipt.outcome === "failed"
+    receipt.outcome === "no_input_channel"
+      ? "没有已配置的广域输入通道，因此没有开始实际探索。"
+      : receipt.outcome === "channel_failed"
+        ? "广域输入通道未能完成，本次没有产生可查看的探索内容。"
+      : receipt.outcome === "failed"
       ? "运行中出现异常，可以稍后重新探索。"
       : receipt.outcome.startsWith("messaged")
         ? "已带回一条值得讨论的情报。"
