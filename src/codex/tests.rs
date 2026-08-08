@@ -6,7 +6,7 @@ use std::{
 
 use super::{
     autonomous::{
-        ExplorationEvidence, ExplorationScoutFinding, review_prompt, scout_prompt, sensing_prompt,
+        ExplorationEvidence, ExplorationScoutFinding, review_prompt, scout_prompt,
         sensing_review_prompt,
     },
     client::{
@@ -188,42 +188,6 @@ fn autonomous_scout_sees_only_its_read_only_tool_surface() {
             "read_pages"
         ]
     );
-}
-
-#[test]
-fn ambient_sensing_sees_only_a_temporary_candidate_surface() {
-    let specs = SymbiontTools::sensing_specifications();
-    assert_eq!(specs.as_array().unwrap().len(), 1);
-    assert_eq!(specs[0]["name"], "symbiont");
-    let symbiont = specs[0]["tools"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .filter_map(|tool| tool["name"].as_str())
-        .collect::<Vec<_>>();
-    assert_eq!(symbiont, vec!["submit_sensing_candidates"]);
-
-    let prompt = sensing_prompt("<silent/>");
-    assert!(prompt.contains("not memory"));
-    assert!(prompt.contains("submit_sensing_candidates"));
-    assert!(prompt.contains("user may already know"));
-    assert!(prompt.contains("community experience"));
-    let candidate_schema =
-        &specs[0]["tools"][0]["inputSchema"]["properties"]["candidates"]["items"];
-    assert_eq!(
-        candidate_schema["required"],
-        json!([
-            "title",
-            "summary",
-            "proposed_input",
-            "source_class",
-            "sources"
-        ])
-    );
-    assert!(candidate_schema["properties"]["event_at"].is_object());
-    assert!(candidate_schema["properties"]["possible_connection"].is_object());
-    assert!(candidate_schema["properties"]["proposed_input"].is_object());
-    assert!(candidate_schema["properties"].get("relevance").is_none());
 }
 
 #[test]

@@ -25,17 +25,23 @@ pub struct InputRoleSnapshot {
     pub model: String,
     pub effort: String,
     pub avatar_seed: String,
+    #[serde(default)]
+    pub provider_id: Option<String>,
+    #[serde(default)]
+    pub channel_id: Option<String>,
 }
 
 impl InputRoleSnapshot {
-    pub fn ambient(model: &str, effort: &str) -> Self {
-        let normalized = normalize(model);
+    pub fn ambient(channel_id: &str, name: &str, model: &str, provider_id: &str) -> Self {
+        let normalized = normalize(channel_id);
         Self {
-            id: format!("ambient_{normalized}"),
-            name: format!("{model} · 广域观察"),
+            id: format!("ambient_{channel_id}"),
+            name: name.to_owned(),
             model: model.to_owned(),
-            effort: effort.to_owned(),
+            effort: "input-only".to_owned(),
             avatar_seed: normalized,
+            provider_id: Some(provider_id.to_owned()),
+            channel_id: Some(channel_id.to_owned()),
         }
     }
 }
@@ -79,6 +85,55 @@ pub struct SensingCandidateDraft {
     #[serde(default, alias = "relevance")]
     pub possible_connection: Option<String>,
     pub sources: Vec<SensingSource>,
+}
+
+/// Validate the bounded, transient handoff contract shared by every ambient
+/// input provider.  A candidate is intentionally not trusted evidence, but it
+/// must be compact and attributable before the stronger Codex review sees it.
+pub fn validate_candidate_drafts(drafts: &[SensingCandidateDraft]) -> Result<()> {
+    if drafts.len() > REVIEW_BATCH_SIZE {
+        anyhow::bail!("ambient sensing accepts at most {REVIEW_BATCH_SIZE} candidates");
+    }
+    for candidate in drafts {
+        for (label, value, limit) in [
+            ("title", candidate.title.as_str(), 240),
+            ("summary", candidate.summary.as_str(), 1_000),
+            ("proposed_input", candidate.proposed_input.as_str(), 1_800),
+        ] {
+            if value.trim().is_empty() || value.chars().count() > limit {
+                anyhow::bail!(
+                    "ambient sensing candidate {label} must contain at most {limit} characters"
+                );
+            }
+        }
+        if candidate
+            .event_at
+            .as_deref()
+            .is_some_and(|value| value.chars().count() > 64)
+        {
+            anyhow::bail!("ambient sensing candidate event_at exceeds 64 characters");
+        }
+        if candidate
+            .possible_connection
+            .as_deref()
+            .is_some_and(|value| value.chars().count() > 800)
+        {
+            anyhow::bail!("ambient sensing candidate possible_connection exceeds 800 characters");
+        }
+        if candidate.sources.is_empty() || candidate.sources.len() > 3 {
+            anyhow::bail!("ambient sensing candidate requires one to three sources");
+        }
+        for source in &candidate.sources {
+            if source.url.trim().is_empty()
+                || source.detail.trim().is_empty()
+                || source.url.chars().count() > 900
+                || source.detail.chars().count() > 800
+            {
+                anyhow::bail!("ambient sensing source exceeds its compact contract");
+            }
+        }
+    }
+    Ok(())
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -227,6 +282,13 @@ impl SensingStore {
         drop(pool);
         self.persist().await?;
         Ok(appended)
+    }
+
+    /// An unavailable intake provider must not leave yesterday's unreviewed
+    /// candidates looking like a fresh signal on the next scheduled cycle.
+    pub async fn clear(&self) -> Result<()> {
+        self.pool.write().await.candidates.clear();
+        self.persist().await
     }
 
     pub async fn next_intake_brief(&self) -> Result<SensingIntakeBrief> {
@@ -406,7 +468,7 @@ mod tests {
             .as_nanos();
         let path = std::env::temp_dir().join(format!("symbiont-sensing-{nonce}.json"));
         let store = SensingStore::open(path.clone()).await.unwrap();
-        let actor = InputRoleSnapshot::ambient("test", "low");
+        let actor = InputRoleSnapshot::ambient("test", "Test observer", "test", "test-provider");
         assert_eq!(
             store
                 .replace(
@@ -465,7 +527,7 @@ mod tests {
             .as_nanos();
         let path = std::env::temp_dir().join(format!("symbiont-sensing-open-{nonce}.json"));
         let store = SensingStore::open(path.clone()).await.unwrap();
-        let actor = InputRoleSnapshot::ambient("test", "low");
+        let actor = InputRoleSnapshot::ambient("test", "Test observer", "test", "test-provider");
         store
             .replace(
                 vec![candidate(
@@ -490,7 +552,7 @@ mod tests {
             .as_nanos();
         let path = std::env::temp_dir().join(format!("symbiont-sensing-event-{nonce}.json"));
         let store = SensingStore::open(path.clone()).await.unwrap();
-        let actor = InputRoleSnapshot::ambient("test", "low");
+        let actor = InputRoleSnapshot::ambient("test", "Test observer", "test", "test-provider");
         let mut draft = candidate("Still-active recent event", "https://example.test/event");
         draft.event_at = Some("2026-07-24".to_owned());
         store.replace(vec![draft], actor).await.unwrap();

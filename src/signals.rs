@@ -220,7 +220,7 @@ mod tests {
                 url: "https://example.test/signal".to_owned(),
                 detail: "Source support".to_owned(),
             }],
-            actor: InputRoleSnapshot::ambient("gpt-test", "low"),
+            actor: InputRoleSnapshot::ambient("test", "Test observer", "gpt-test", "test-provider"),
             observed_at: "2026-08-08T00:00:00.000Z".to_owned(),
             expires_at: "2026-08-09T00:00:00.000Z".to_owned(),
             fingerprint: "signal".to_owned(),

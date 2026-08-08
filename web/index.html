@@ -516,6 +516,22 @@
 
       <section class="tab-panel" data-settings-panel="models" hidden>
         <form id="compute-form">
+          <section class="compute-policy-section ambient-provider-section">
+            <header>
+              <div>
+                <strong>广域探路通道</strong>
+                <small>每个通道独立观察、独立失效；Codex 仍负责聊天、复核和深入调查</small>
+              </div>
+            </header>
+            <div class="ambient-config-group">
+              <div class="ambient-config-heading"><strong>Providers</strong><button id="add-ambient-provider" class="icon-button" type="button" title="添加 Provider">＋</button></div>
+              <div id="ambient-provider-list" class="ambient-config-list"></div>
+            </div>
+            <div class="ambient-config-group">
+              <div class="ambient-config-heading"><strong>输入通道</strong><button id="add-ambient-channel" class="icon-button" type="button" title="添加输入通道">＋</button></div>
+              <div id="ambient-channel-list" class="ambient-config-list"></div>
+            </div>
+          </section>
           <label class="field routing-field">
             <span>路由方式</span>
             <select id="routing" name="routing">
@@ -525,11 +541,6 @@
           </label>
 
           <div class="lane-list">
-            <div class="lane-row" data-lane="sense">
-              <div class="lane-name"><strong>感知</strong><span>低成本采样，不写入记忆</span></div>
-              <label class="field"><span>模型</span><select data-field="model"></select></label>
-              <label class="field"><span>思考</span><select data-field="effort"></select></label>
-            </div>
             <div class="lane-row" data-lane="observe">
               <div class="lane-name"><strong>观察</strong><span>后台轻量任务</span></div>
               <label class="field"><span>模型</span><select data-field="model"></select></label>
@@ -866,6 +877,32 @@
           aria-label="删除话题计算规则"
           title="删除话题计算规则"
         >×</button>
+      </div>
+    </template>
+    <template id="ambient-provider-template">
+      <div class="ambient-config-row" data-ambient-provider>
+        <div class="ambient-config-row-head"><strong class="ambient-row-title">Provider</strong><span class="ambient-row-status"></span><button class="icon-button remove-ambient-provider" type="button" title="移除 Provider">×</button></div>
+        <div class="field-grid">
+          <label class="field"><span>ID</span><input data-provider-field="id" type="text" /></label>
+          <label class="field"><span>Responses 地址</span><input data-provider-field="baseUrl" type="url" /></label>
+          <label class="field"><span>密钥环境变量</span><input data-provider-field="apiKeyEnv" type="text" /></label>
+          <label class="field"><span>网页搜索工具类型</span><input data-provider-field="webSearchTool" type="text" /></label>
+          <label class="toggle-row compact-toggle"><span>启用</span><input data-provider-field="enabled" type="checkbox" /></label>
+        </div>
+      </div>
+    </template>
+    <template id="ambient-channel-template">
+      <div class="ambient-config-row" data-ambient-channel>
+        <div class="ambient-config-row-head"><strong class="ambient-row-title">输入通道</strong><span class="ambient-row-status"></span><button class="icon-button remove-ambient-channel" type="button" title="移除输入通道">×</button></div>
+        <div class="field-grid">
+          <label class="field"><span>ID</span><input data-channel-field="id" type="text" /></label>
+          <label class="field"><span>Provider</span><select data-channel-field="providerId"></select></label>
+          <label class="field"><span>显示名称</span><input data-channel-field="name" type="text" /></label>
+          <label class="field"><span>模型</span><input data-channel-field="model" type="text" /></label>
+          <label class="field"><span>间隔（分钟）</span><input data-channel-field="intervalMinutes" type="number" min="5" max="10080" /></label>
+          <label class="toggle-row compact-toggle"><span>启用</span><input data-channel-field="enabled" type="checkbox" /></label>
+        </div>
+        <label class="field"><span>观察范围</span><textarea data-channel-field="focus" rows="2"></textarea></label>
       </div>
     </template>
 

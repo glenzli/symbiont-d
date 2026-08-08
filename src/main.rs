@@ -1,5 +1,6 @@
 #![recursion_limit = "256"]
 
+mod ambient_api;
 mod asset;
 mod autonomy;
 mod bridge;
@@ -42,6 +43,7 @@ use std::{
     sync::Arc,
 };
 
+use ambient_api::{AmbientScout, AmbientTopologyStore};
 use anyhow::{Context, Result};
 use asset::AssetStore;
 use autonomy::AutonomyStore;
@@ -233,6 +235,15 @@ async fn main() -> Result<()> {
         ))
         .await?,
     );
+    let ambient_provider = Arc::new(
+        AmbientTopologyStore::open(resolve_data_path(
+            &workspace,
+            "SYMBIONT_AMBIENT_PROVIDER_PATH",
+            "ambient-provider.toml",
+        ))
+        .await?,
+    );
+    let ambient_scout = Arc::new(AmbientScout::new(Arc::clone(&ambient_provider))?);
     let signals = Arc::new(
         SignalStore::open(resolve_data_path(
             &workspace,
@@ -280,6 +291,7 @@ async fn main() -> Result<()> {
         Arc::clone(&curiosity),
         Arc::clone(&reflection_store),
         Arc::clone(&usage),
+        Arc::clone(&ambient_scout),
         Arc::clone(&sensing),
         Arc::clone(&signals),
         conversation.clone(),
@@ -361,6 +373,7 @@ async fn main() -> Result<()> {
         autonomy,
         codex,
         compute,
+        ambient_provider,
         compute_policies,
         usage,
         rate_limits,

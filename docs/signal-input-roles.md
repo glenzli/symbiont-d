@@ -9,6 +9,22 @@ not receive ordinary conversation feedback, continue a thread, or answer the use
 This gives broad information acquisition a visible, attributable form without turning the chat into
 a group conversation or treating every discovered item as memory.
 
+## Runtime boundary
+
+The continuous symbiont-d path remains deeply bound to Codex app-server: ordinary chat, PCP work,
+strong review, and directed investigation all use that session and its tools.  Only the low-cost,
+scheduled ambient sensing pass uses a separate Responses-compatible API adapter.  This deliberately
+keeps broad external acquisition pluggable without weakening the capabilities or provenance of the
+main counterpart.
+
+Providers own a local endpoint, web-search tool type, and the *name* of an environment variable
+containing an API key. Channels choose a provider plus their own role name, model, focus, and
+cadence. This is deliberately not a fallback chain: a failed channel remains visibly failed with
+its last error and last successful run, while other channels continue their separate remits. A
+provider outage therefore never masquerades as another model's perspective. Secrets are never
+written to disk or exposed to the browser. New user input cancels the in-flight adapter result
+before it can enter review.
+
 ## Lifecycle
 
 ```text

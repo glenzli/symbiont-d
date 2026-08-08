@@ -26,9 +26,10 @@ use tokio::{
 };
 
 use crate::{
+    ambient_api::AmbientScout,
     autonomy::{AutonomyConfig, AutonomyStore, QuietHours},
     codex::{CodexClient, RuntimeEvent, SensingReviewDisposition},
-    compute::{ComputeLane, ComputeStore},
+    compute::ComputeStore,
     continuity::{ContinuityHost, MessageLinks},
     conversation::ConversationCoordinator,
     curiosity::CuriosityStore,
@@ -37,7 +38,7 @@ use crate::{
     profile::{ProfileStore, SetupStatus},
     reflection::ReflectionStore,
     sensing::{
-        InputRoleSnapshot, REVIEW_BATCH_SIZE, SensingCandidate, SensingIntakeBrief, SensingStore,
+        REVIEW_BATCH_SIZE, SensingCandidate, SensingIntakeBrief, SensingStore,
         format_candidate_pool,
     },
     signals::SignalStore,
@@ -200,6 +201,7 @@ impl ExplorationHandle {
         curiosity: Arc<CuriosityStore>,
         reflection: Arc<ReflectionStore>,
         usage: Arc<UsageStore>,
+        ambient_scout: Arc<AmbientScout>,
         sensing: Arc<SensingStore>,
         signals: Arc<SignalStore>,
         conversation: ConversationCoordinator,
@@ -253,6 +255,7 @@ impl ExplorationHandle {
             curiosity,
             reflection,
             usage,
+            ambient_scout,
             Arc::clone(&sensing),
             Arc::clone(&signals),
             conversation,
@@ -350,6 +353,7 @@ async fn run_scheduler(
     curiosity: Arc<CuriosityStore>,
     reflection: Arc<ReflectionStore>,
     usage: Arc<UsageStore>,
+    ambient_scout: Arc<AmbientScout>,
     sensing: Arc<SensingStore>,
     signals: Arc<SignalStore>,
     conversation: ConversationCoordinator,
@@ -439,6 +443,7 @@ async fn run_scheduler(
                     Arc::clone(&curiosity),
                     Arc::clone(&reflection),
                     Arc::clone(&usage),
+                    Arc::clone(&ambient_scout),
                     Arc::clone(&sensing),
                     Arc::clone(&signals),
                     conversation.clone(),
@@ -624,6 +629,7 @@ async fn run_once(
     curiosity: Arc<CuriosityStore>,
     reflection: Arc<ReflectionStore>,
     usage: Arc<UsageStore>,
+    ambient_scout: Arc<AmbientScout>,
     sensing: Arc<SensingStore>,
     signals: Arc<SignalStore>,
     conversation: ConversationCoordinator,
@@ -738,32 +744,13 @@ async fn run_once(
                 return Err(error);
             }
         };
-        let Ok(mut client) = codex.try_lock() else {
-            let pending_candidate_count = sensing.count().await.unwrap_or_default();
-            sleep(Duration::from_secs(2)).await;
-            stop_activity_relay(runtime_tx, activity_task).await?;
-            settle_sensing_only(
-                &state,
-                &manual_runs,
-                trigger.as_ref(),
-                ExplorationIntentStatus::Superseded,
-                "superseded",
-                pending_candidate_count,
-                Some("codex_busy"),
-            )
-            .await?;
-            return Ok(ExplorationRunCompletion::superseded("codex_busy"));
-        };
-        let sensing_outcome = client
+        let sensing_outcome = ambient_scout
             .sense(
-                &compute,
-                &profile,
                 &ambient_sensing_context(&recent_messages, &intake_brief),
                 input_events.clone(),
                 runtime_tx.clone(),
             )
             .await;
-        drop(client);
         let sensing_outcome = match sensing_outcome {
             Ok(outcome) => outcome,
             Err(error) => {
@@ -772,17 +759,24 @@ async fn run_once(
             }
         };
         sensing_trace_id = sensing_outcome
-            .invocations
-            .first()
+            .invocation
+            .as_ref()
             .map(|invocation| invocation.id.clone());
-        if let Err(error) = usage.record_all(&sensing_outcome.invocations).await {
+        if let Some(invocation) = sensing_outcome.invocation.as_ref()
+            && let Err(error) = usage.record_all(std::slice::from_ref(invocation)).await
+        {
             stop_activity_relay(runtime_tx, activity_task).await?;
             return Err(error);
         }
         if !sensing_outcome.interrupted {
-            let sense_lane = compute.lane(ComputeLane::Sense);
-            let actor = InputRoleSnapshot::ambient(&sense_lane.model, &sense_lane.effort);
-            if let Err(error) = sensing.replace(sensing_outcome.candidates, actor).await {
+            let update = match sensing_outcome.actor {
+                Some(actor) => sensing
+                    .replace(sensing_outcome.candidates, actor)
+                    .await
+                    .map(|_| ()),
+                None => sensing.clear().await,
+            };
+            if let Err(error) = update {
                 stop_activity_relay(runtime_tx, activity_task).await?;
                 return Err(error);
             }
@@ -817,12 +811,17 @@ async fn run_once(
         };
         if reviewed_candidates.is_empty() {
             stop_activity_relay(runtime_tx, activity_task).await?;
+            let outcome = if sensing_outcome.channel_failure.is_some() {
+                "channel_failed"
+            } else {
+                "no_candidates"
+            };
             settle_sensing_only(
                 &state,
                 &manual_runs,
                 trigger.as_ref(),
                 ExplorationIntentStatus::Silent,
-                "no_candidates",
+                outcome,
                 pending_candidate_count,
                 None,
             )

@@ -16,7 +16,7 @@ pcp-rpc = { path = "../paged-context-protocol/crates/pcp-rpc" }
 pcp-runtime = { path = "../paged-context-protocol/crates/pcp-runtime" }
 pcp-sqlite = { path = "../paged-context-protocol/crates/pcp-sqlite" }
 pcp-store = { path = "../paged-context-protocol/crates/pcp-store" }
-reqwest = { version = "0.13", default-features = false, features = ["rustls"] }
+reqwest = { version = "0.13", default-features = false, features = ["json", "rustls"] }
 rusqlite = { version = "0.40", features = ["bundled"] }
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"

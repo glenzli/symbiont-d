@@ -2182,6 +2182,84 @@ html[data-native-shell="macos"] .topbar {
   font-size: 9px;
 }
 
+.ambient-config-group {
+  border-top: 1px solid var(--border);
+}
+
+.ambient-config-heading {
+  min-height: 34px;
+  padding: 6px 14px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  color: var(--text-soft);
+  font-size: 10px;
+}
+
+.ambient-config-row {
+  padding: 9px 14px 11px;
+  display: grid;
+  gap: 8px;
+  border-top: 1px solid var(--border);
+}
+
+.ambient-config-row-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.ambient-row-title {
+  color: var(--text);
+  font-size: 11px;
+}
+
+.ambient-row-status {
+  min-width: 0;
+  overflow: hidden;
+  color: var(--text-soft);
+  font-size: 9px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.ambient-config-row-head .icon-button {
+  margin-left: auto;
+}
+
+.field-grid {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 8px;
+}
+
+.field textarea {
+  min-width: 0;
+  width: 100%;
+  resize: vertical;
+  padding: 7px 8px;
+  border: 1px solid var(--border);
+  border-radius: 5px;
+  color: var(--text);
+  background: var(--surface-raised);
+  font: inherit;
+  font-size: 11px;
+}
+
+.compact-toggle {
+  height: 32px;
+  align-self: end;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  color: var(--text-soft);
+  font-size: 10px;
+}
+
+@media (max-width: 720px) {
+  .field-grid { grid-template-columns: 1fr; }
+}
+
 .compute-policy-list:empty::before {
   padding: 0 14px 12px;
   display: block;

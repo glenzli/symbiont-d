@@ -22,6 +22,7 @@ import { renderIcons } from "/icons.js";
 const appState = {
   models: [],
   compute: null,
+  ambient: null,
   computePolicies: [],
   identity: { avatar: null },
   profile: { status: "unconfigured", mode: null, orientation: "" },
@@ -527,6 +528,7 @@ function renderRuntimeStatus() {
 function applyRuntime(payload) {
   appState.identity = payload.identity || appState.identity;
   appState.usage = payload.usage || appState.usage;
+  appState.ambient = payload.ambient || appState.ambient;
   appState.exploration = payload.exploration || appState.exploration;
   if (payload.reflection) {
     appState.reflection = appState.reflection?.config

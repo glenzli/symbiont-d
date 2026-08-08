@@ -21,19 +21,18 @@ use tracing::{debug, warn};
 use super::{
     approvals::{approval_response, automatic_server_request_response, permission_request},
     autonomous::{
-        finding_from_invocations, review_prompt, scout_prompt, sensing_candidates_from_invocations,
-        sensing_prompt, sensing_review_from_invocations, sensing_review_prompt,
+        finding_from_invocations, review_prompt, scout_prompt, sensing_review_from_invocations,
+        sensing_review_prompt,
     },
     interaction_output::{
         ChatDisposition, InteractiveDeltaGate, interaction_disposition_prompt,
         interpret_interactive_output,
     },
     prompts::{
-        additional_context_value, ambient_review_developer_instructions,
-        ambient_sense_developer_instructions, context_fragments, context_maintenance_prompt,
-        developer_instructions, interaction_reflection_prompt, memory_reconciliation_prompt,
-        pcp_maintenance_developer_instructions, pcp_maintenance_worker_prompt,
-        profile_review_prompt, summary_maintenance_prompt,
+        additional_context_value, ambient_review_developer_instructions, context_fragments,
+        context_maintenance_prompt, developer_instructions, interaction_reflection_prompt,
+        memory_reconciliation_prompt, pcp_maintenance_developer_instructions,
+        pcp_maintenance_worker_prompt, profile_review_prompt, summary_maintenance_prompt,
     },
     tool_dedup::{ToolCallPlan, TurnToolDeduplicator},
     tools::{EscalationRequest, SymbiontTools, tool_result},
@@ -158,12 +157,6 @@ pub struct ExplorationOutcome {
     pub interrupted: bool,
 }
 
-pub struct SensingOutcome {
-    pub candidates: Vec<crate::sensing::SensingCandidateDraft>,
-    pub invocations: Vec<InvocationRecord>,
-    pub interrupted: bool,
-}
-
 pub struct SensingReviewOutcome {
     pub decisions: Vec<super::autonomous::SensingReviewDecision>,
     pub invocations: Vec<InvocationRecord>,
@@ -268,7 +261,6 @@ struct TurnOverrides {
 
 #[derive(Clone, Copy)]
 enum BackgroundThread {
-    AmbientSense,
     AmbientReview,
     AutonomousScout,
     AutonomousReview,
@@ -279,7 +271,6 @@ enum BackgroundThread {
 #[derive(Clone, Copy)]
 enum ToolSurface {
     Full,
-    AmbientSense,
     AmbientReview,
     AutonomousScout,
     PcpMaintenance,
@@ -293,7 +284,6 @@ pub struct CodexClient {
     stdout: Lines<BufReader<ChildStdout>>,
     next_id: u64,
     interactive_thread_id: String,
-    ambient_sense_thread_id: String,
     ambient_review_thread_id: String,
     autonomous_scout_thread_id: String,
     autonomous_review_thread_id: String,
@@ -423,7 +413,6 @@ impl CodexClient {
             stdout: BufReader::new(stdout).lines(),
             next_id: 1,
             interactive_thread_id: String::new(),
-            ambient_sense_thread_id: String::new(),
             ambient_review_thread_id: String::new(),
             autonomous_scout_thread_id: String::new(),
             autonomous_review_thread_id: String::new(),
@@ -457,9 +446,6 @@ impl CodexClient {
         client.refresh_rate_limits().await;
         client.interactive_thread_id = client
             .start_thread(&config.workspace, ToolSurface::Full)
-            .await?;
-        client.ambient_sense_thread_id = client
-            .start_thread(&config.workspace, ToolSurface::AmbientSense)
             .await?;
         client.ambient_review_thread_id = client
             .start_thread(&config.workspace, ToolSurface::AmbientReview)
@@ -765,51 +751,6 @@ impl CodexClient {
             hunch_revisions,
             superseded,
             interrupted,
-        })
-    }
-
-    pub async fn sense(
-        &mut self,
-        compute: &ComputeConfig,
-        profile: &ProfileSnapshot,
-        sensing_context: &str,
-        input_events: watch::Receiver<u64>,
-        events: mpsc::Sender<RuntimeEvent>,
-    ) -> Result<SensingOutcome> {
-        let thread_id = self.ambient_sense_thread_id.clone();
-        let outcome = self
-            .run_request(
-                thread_id.clone(),
-                text_input_items(&sensing_prompt(AUTONOMOUS_SILENT_MARKER)),
-                ComputeLane::Sense,
-                "ambient_sense",
-                compute,
-                profile,
-                sensing_context,
-                None,
-                None,
-                false,
-                Some(input_events),
-                &events,
-            )
-            .await?;
-        if !outcome.interrupted {
-            self.renew_background_thread(&thread_id, BackgroundThread::AmbientSense)
-                .await;
-        }
-        let candidates = if outcome.interrupted {
-            Vec::new()
-        } else {
-            sensing_candidates_from_invocations(&outcome.invocations)?
-        };
-        let mut invocations = outcome.invocations;
-        for invocation in &mut invocations {
-            invocation.produced_message = false;
-        }
-        Ok(SensingOutcome {
-            candidates,
-            invocations,
-            interrupted: outcome.interrupted,
         })
     }
 
@@ -1264,7 +1205,6 @@ impl CodexClient {
     async fn renew_background_thread(&mut self, previous: &str, slot: BackgroundThread) {
         let workspace = self.workspace.clone();
         let tool_surface = match slot {
-            BackgroundThread::AmbientSense => ToolSurface::AmbientSense,
             BackgroundThread::AmbientReview => ToolSurface::AmbientReview,
             BackgroundThread::AutonomousScout => ToolSurface::AutonomousScout,
             BackgroundThread::AutonomousReview | BackgroundThread::Maintenance => ToolSurface::Full,
@@ -1273,7 +1213,6 @@ impl CodexClient {
         match self.start_thread(&workspace, tool_surface).await {
             Ok(next) => {
                 match slot {
-                    BackgroundThread::AmbientSense => self.ambient_sense_thread_id = next,
                     BackgroundThread::AmbientReview => self.ambient_review_thread_id = next,
                     BackgroundThread::AutonomousScout => self.autonomous_scout_thread_id = next,
                     BackgroundThread::AutonomousReview => self.autonomous_review_thread_id = next,
@@ -1982,14 +1921,12 @@ impl CodexClient {
         tool_surface: ToolSurface,
     ) -> Result<String> {
         let instructions = match tool_surface {
-            ToolSurface::AmbientSense => ambient_sense_developer_instructions().to_owned(),
             ToolSurface::AmbientReview => ambient_review_developer_instructions().to_owned(),
             ToolSurface::PcpMaintenance => pcp_maintenance_developer_instructions().to_owned(),
             ToolSurface::Full | ToolSurface::AutonomousScout => developer_instructions(),
         };
         let dynamic_tools = match tool_surface {
             ToolSurface::Full => SymbiontTools::specifications(),
-            ToolSurface::AmbientSense => SymbiontTools::sensing_specifications(),
             ToolSurface::AmbientReview => SymbiontTools::sensing_review_specifications(),
             ToolSurface::AutonomousScout => SymbiontTools::scout_specifications(),
             ToolSurface::PcpMaintenance => SymbiontTools::pcp_maintenance_specifications(),

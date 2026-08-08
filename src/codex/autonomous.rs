@@ -1,10 +1,7 @@
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 
-use crate::{
-    sensing::{SensingCandidate, SensingCandidateDraft},
-    usage::InvocationRecord,
-};
+use crate::{sensing::SensingCandidate, usage::InvocationRecord};
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct ExplorationEvidence {
@@ -64,18 +61,6 @@ If the working context contains an explicit exploration intent, first re-evaluat
 Submit at most one `symbiont.submit_exploration_finding` when evidence may materially change a shared question, justify later Hunch maintenance, support a genuinely new conversational move, reveal a credible external development that may expand the user's long-term map, or make a recent event worth revisiting even if the user may already know the headline. The finding is an untrusted handoff to a stronger reviewer, not a recommendation to interrupt. Keep it compact. Include exact recent conversation Revisions when they make a real connection timely; use an empty list when the value is independent and conversational rather than pretending there is an anchor. Include any exact Hunch Revisions it bears on and the strongest reason the proposed connection, interpretation, or timing may be wrong. Do not force external evidence into the user's frameworks. If nothing deserves stronger review, call no completion tool.
 
 After the optional finding tool call, return exactly `{silent_marker}`. Never put user-visible prose in the final response."#
-    )
-}
-
-pub fn sensing_prompt(silent_marker: &str) -> String {
-    format!(
-        r#"Run one low-cost ambient sensing pass. No user message is waiting. Begin from the supplied rotating intake channel, not from the user's projects, profile, or recent topics. Use live web search to look for credible fresh or recently active external developments with information or discussion value in their own right. A development does not need to have happened today, and the user may already know its headline; later community experience, independent evaluation, adoption, failure, or a clearer interpretive tension can make it timely again. The optional recent user edge may help rank two otherwise comparable signals, but it must not define what can enter the inbox. Prefer primary or authoritative sources for factual claims and credible independent or community sources for reception and reproducibility. Keep the selected candidates source- and subject-diverse; do not submit several versions of one story.
-
-This stage is host-enforced intake only. It has no PCP access and must not alter Hunches, profile, Current Map, Open Loops, Pages, Relations, or validity. Never draft, propose, or send a user-visible message. Do not report that scanning occurred.
-
-Call `symbiont.submit_sensing_candidates` at most once, with one to three compact candidates, only when each has a concrete source and is credible enough for stronger review through factual novelty, changed interpretation, or current discussion value. Do not infer that the user is unaware. A known connection to the user is not required: omit `possible_connection` when none is apparent instead of inventing one. Include `event_at` when the underlying release, publication, or event date is known so later stages can distinguish age from timeliness. Classify the broad source domain without over-interpreting it. For each candidate, write `proposed_input`: a self-contained, natural two-to-four sentence input that could appear under your own input-only model role. State the object, the essential evidence or uncertainty, and the actual tension worth noticing. This is not a published message and may still be rejected; never claim that it has been sent. The candidate pool is a temporary external inbox; it is not memory, a finding, or a recommendation. Include source URLs and the factual detail each source supports. It is entirely valid to submit nothing.
-
-After optional tool use, return exactly `{silent_marker}`. Never put user-visible prose in the final response."#
     )
 }
 
@@ -154,31 +139,6 @@ pub fn finding_from_invocations(
                 .context("parse autonomous reconnaissance finding")
         })
         .transpose()
-}
-
-pub fn sensing_candidates_from_invocations(
-    invocations: &[InvocationRecord],
-) -> Result<Vec<SensingCandidateDraft>> {
-    invocations
-        .iter()
-        .flat_map(|invocation| &invocation.trace_steps)
-        .rev()
-        .find(|step| {
-            step.succeeded
-                && step.namespace == "symbiont"
-                && step.tool == "submit_sensing_candidates"
-        })
-        .map(|step| {
-            step.arguments
-                .get("candidates")
-                .cloned()
-                .context("ambient sensing completion omitted candidates")
-                .and_then(|value| {
-                    serde_json::from_value(value).context("parse ambient sensing candidates")
-                })
-        })
-        .transpose()
-        .map(Option::unwrap_or_default)
 }
 
 pub fn sensing_review_from_invocations(

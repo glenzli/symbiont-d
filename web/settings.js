@@ -12,6 +12,12 @@ export function initSettings(state, triggerExploration) {
   const computeForm = document.querySelector("#compute-form");
   const routingSelect = document.querySelector("#routing");
   const computeSaveState = document.querySelector("#compute-save-state");
+  const ambientProviderList = document.querySelector("#ambient-provider-list");
+  const ambientProviderTemplate = document.querySelector("#ambient-provider-template");
+  const addAmbientProvider = document.querySelector("#add-ambient-provider");
+  const ambientChannelList = document.querySelector("#ambient-channel-list");
+  const ambientChannelTemplate = document.querySelector("#ambient-channel-template");
+  const addAmbientChannel = document.querySelector("#add-ambient-channel");
   const computePolicyList = document.querySelector("#compute-policy-list");
   const computePolicyTemplate = document.querySelector(
     "#compute-policy-template",
@@ -88,6 +94,69 @@ export function initSettings(state, triggerExploration) {
     for (const policy of state.computePolicies || []) {
       appendComputePolicy(policy);
     }
+    renderAmbient();
+  }
+
+  function renderAmbient() {
+    if (!state.ambient) return;
+    ambientProviderList.replaceChildren();
+    ambientChannelList.replaceChildren();
+    for (const provider of state.ambient.providers || []) appendAmbientProvider(provider);
+    for (const channel of state.ambient.channels || []) appendAmbientChannel(channel);
+  }
+
+  function availabilityText(availability, runtime = {}) {
+    if (runtime.lastError) return `上次失败：${runtime.lastError}`;
+    if (availability === "ready") return "就绪";
+    if (availability === "disabled") return "已关闭";
+    if (availability?.startsWith("missing_key_env:")) {
+      return `缺少 ${availability.slice("missing_key_env:".length)}`;
+    }
+    return availability || "尚不可用";
+  }
+
+  function appendAmbientProvider(provider = {}, focus = false) {
+    const fragment = ambientProviderTemplate.content.cloneNode(true);
+    const row = fragment.querySelector("[data-ambient-provider]");
+    row.querySelector('[data-provider-field="id"]').value = provider.id || "";
+    row.querySelector('[data-provider-field="baseUrl"]').value = provider.baseUrl || "";
+    row.querySelector('[data-provider-field="apiKeyEnv"]').value = provider.apiKeyEnv || "";
+    row.querySelector('[data-provider-field="webSearchTool"]').value = provider.webSearchTool || "web_search";
+    row.querySelector('[data-provider-field="enabled"]').checked = provider.enabled === true;
+    row.querySelector(".ambient-row-title").textContent = provider.id || "新 Provider";
+    row.querySelector(".ambient-row-status").textContent = availabilityText(provider.availability);
+    ambientProviderList.append(fragment);
+    if (focus) row.querySelector('[data-provider-field="id"]').focus();
+  }
+
+  function appendAmbientChannel(channel = {}, focus = false) {
+    const fragment = ambientChannelTemplate.content.cloneNode(true);
+    const row = fragment.querySelector("[data-ambient-channel]");
+    const provider = row.querySelector('[data-channel-field="providerId"]');
+    const providers = [
+      ...ambientProviderList.querySelectorAll("[data-ambient-provider]"),
+    ].map((row) => ({
+      id: row.querySelector('[data-provider-field="id"]').value.trim(),
+    })).filter((entry) => entry.id);
+    provider.replaceChildren(
+      ...providers.map((entry) => {
+        const option = document.createElement("option");
+        option.value = entry.id;
+        option.textContent = entry.id;
+        return option;
+      }),
+    );
+    row.querySelector('[data-channel-field="id"]').value = channel.id || "";
+    provider.value = channel.providerId || provider.value;
+    row.querySelector('[data-channel-field="name"]').value = channel.name || "";
+    row.querySelector('[data-channel-field="model"]').value = channel.model || "";
+    row.querySelector('[data-channel-field="focus"]').value = channel.focus || "";
+    row.querySelector('[data-channel-field="intervalMinutes"]').value = String(channel.intervalMinutes || 180);
+    row.querySelector('[data-channel-field="enabled"]').checked = channel.enabled !== false;
+    row.querySelector(".ambient-row-title").textContent = channel.name || channel.id || "新输入通道";
+    row.querySelector(".ambient-row-status").textContent = availabilityText(channel.availability, channel);
+    ambientChannelList.append(fragment);
+    if (focus) row.querySelector('[data-channel-field="id"]').focus();
   }
 
   function appendComputePolicy(policy = {}, focus = false) {
@@ -186,6 +255,27 @@ export function initSettings(state, triggerExploration) {
       .filter((policy) => policy.topic);
   }
 
+  function ambientFormValue() {
+    return {
+      providers: [...ambientProviderList.querySelectorAll("[data-ambient-provider]")].map((row) => ({
+        id: row.querySelector('[data-provider-field="id"]').value.trim(),
+        enabled: row.querySelector('[data-provider-field="enabled"]').checked,
+        baseUrl: row.querySelector('[data-provider-field="baseUrl"]').value.trim(),
+        apiKeyEnv: row.querySelector('[data-provider-field="apiKeyEnv"]').value.trim(),
+        webSearchTool: row.querySelector('[data-provider-field="webSearchTool"]').value.trim(),
+      })),
+      channels: [...ambientChannelList.querySelectorAll("[data-ambient-channel]")].map((row) => ({
+        id: row.querySelector('[data-channel-field="id"]').value.trim(),
+        enabled: row.querySelector('[data-channel-field="enabled"]').checked,
+        providerId: row.querySelector('[data-channel-field="providerId"]').value,
+        name: row.querySelector('[data-channel-field="name"]').value.trim(),
+        model: row.querySelector('[data-channel-field="model"]').value.trim(),
+        focus: row.querySelector('[data-channel-field="focus"]').value.trim(),
+        intervalMinutes: Number(row.querySelector('[data-channel-field="intervalMinutes"]').value),
+      })),
+    };
+  }
+
   async function saveCompute(event) {
     event.preventDefault();
     computeSaveState.textContent = "保存中";
@@ -205,6 +295,14 @@ export function initSettings(state, triggerExploration) {
           body: JSON.stringify(computePolicyFormValue()),
         }),
         "话题规则保存失败",
+      );
+      state.ambient = await responseJson(
+        await fetch("/api/ambient", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(ambientFormValue()),
+        }),
+        "广域探路通道保存失败",
       );
       renderCompute();
       computeSaveState.textContent = "已保存";
@@ -407,6 +505,40 @@ export function initSettings(state, triggerExploration) {
     const button = event.target.closest(".remove-compute-policy");
     if (button) button.closest(".compute-policy-row").remove();
   });
+  addAmbientProvider.addEventListener("click", () =>
+    appendAmbientProvider(
+      {
+        id: "new-provider",
+        enabled: false,
+        baseUrl: "https://api.openai.com/v1",
+        apiKeyEnv: "SYMBIONT_AMBIENT_API_KEY",
+        webSearchTool: "web_search",
+      },
+      true,
+    ),
+  );
+  addAmbientChannel.addEventListener("click", () =>
+    appendAmbientChannel(
+      {
+        id: "new-channel",
+        enabled: true,
+        providerId: state.ambient?.providers?.[0]?.id || "",
+        name: "新的广域观察",
+        model: "gpt-5-mini",
+        focus: "Describe the independent external domain this role should observe.",
+        intervalMinutes: 180,
+      },
+      true,
+    ),
+  );
+  ambientProviderList.addEventListener("click", (event) => {
+    const button = event.target.closest(".remove-ambient-provider");
+    if (button) button.closest("[data-ambient-provider]").remove();
+  });
+  ambientChannelList.addEventListener("click", (event) => {
+    const button = event.target.closest(".remove-ambient-channel");
+    if (button) button.closest("[data-ambient-channel]").remove();
+  });
   autonomyForm.addEventListener("submit", saveAutonomy);
   bridgeForm.addEventListener("submit", saveBridge);
   codexTaskAccess.addEventListener("change", () => {
@@ -430,6 +562,7 @@ export function initSettings(state, triggerExploration) {
     },
     renderAutonomy,
     renderAutonomyRuntime,
+    renderAmbient,
     open: openSettings,
   };
 }
@@ -455,6 +588,9 @@ function explorationStatusText(exploration, usage, autonomy) {
     return `今日主动消息额度已用尽 · 介入 ${usage?.autonomousInterventionsToday || 0}/${autonomy?.dailyInterruptLimit || 0} · 留话 ${usage?.autonomousNotesToday || 0}/${autonomy?.dailyNoteLimit ?? 4}`;
   }
   if (phase === "error") return exploration.lastError || "探索运行出错";
+  if (exploration.lastOutcome === "channel_failed") {
+    return "某个广域通道本轮失效；可在模型设置中查看";
+  }
   const candidates = exploration.pendingCandidateCount
     ? `最近候选 ${exploration.pendingCandidateCount} 条 · `
     : "";

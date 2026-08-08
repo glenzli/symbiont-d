@@ -1096,35 +1096,6 @@ impl SymbiontTools {
         specifications
     }
 
-    pub(super) fn sensing_specifications() -> Value {
-        let mut specifications = Self::specifications();
-        let Some(namespaces) = specifications.as_array_mut() else {
-            return specifications;
-        };
-        for namespace in namespaces {
-            let allowed = match namespace.get("name").and_then(Value::as_str) {
-                Some("symbiont") => &["submit_sensing_candidates"][..],
-                _ => &[][..],
-            };
-            if let Some(tools) = namespace.get_mut("tools").and_then(Value::as_array_mut) {
-                tools.retain(|tool| {
-                    tool.get("name")
-                        .and_then(Value::as_str)
-                        .is_some_and(|name| allowed.contains(&name))
-                });
-            }
-        }
-        if let Some(namespaces) = specifications.as_array_mut() {
-            namespaces.retain(|namespace| {
-                namespace
-                    .get("tools")
-                    .and_then(Value::as_array)
-                    .is_some_and(|tools| !tools.is_empty())
-            });
-        }
-        specifications
-    }
-
     pub(super) fn sensing_review_specifications() -> Value {
         let mut specifications = Self::specifications();
         let Some(namespaces) = specifications.as_array_mut() else {

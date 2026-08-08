@@ -20,6 +20,7 @@ use tokio::{
 use tokio_stream::{StreamExt, wrappers::ReceiverStream};
 
 use crate::{
+    ambient_api::{AmbientConfig, AmbientSnapshot, AmbientTopologyStore},
     asset::{AssetStore, MAX_IMAGE_BYTES, MAX_IMAGES_PER_MESSAGE, SavedImage},
     autonomy::{AutonomyConfig, AutonomyStore},
     bridge::{
@@ -108,6 +109,7 @@ pub struct AppState {
     autonomy: Arc<AutonomyStore>,
     codex: Arc<Mutex<CodexClient>>,
     compute: Arc<ComputeStore>,
+    ambient: Arc<AmbientTopologyStore>,
     compute_policies: Arc<ComputePolicyStore>,
     usage: Arc<UsageStore>,
     rate_limits: Arc<RwLock<Option<RateLimitInfo>>>,
@@ -134,6 +136,7 @@ impl AppState {
         autonomy: Arc<AutonomyStore>,
         codex: Arc<Mutex<CodexClient>>,
         compute: Arc<ComputeStore>,
+        ambient: Arc<AmbientTopologyStore>,
         compute_policies: Arc<ComputePolicyStore>,
         usage: Arc<UsageStore>,
         rate_limits: Arc<RwLock<Option<RateLimitInfo>>>,
@@ -161,6 +164,7 @@ impl AppState {
             autonomy,
             codex,
             compute,
+            ambient,
             compute_policies,
             usage,
             rate_limits,
@@ -219,6 +223,7 @@ struct BootstrapResponse {
     autonomy_permitted: bool,
     models: Vec<ModelInfo>,
     compute: ComputeConfig,
+    ambient: AmbientSnapshot,
     compute_policies: Vec<ComputeTopicPolicy>,
     rate_limits: Option<RateLimitInfo>,
     usage: UsageHeadline,
@@ -244,6 +249,7 @@ struct StatsResponse {
 struct RuntimeResponse {
     identity: IdentitySnapshot,
     usage: UsageHeadline,
+    ambient: AmbientSnapshot,
     exploration: ExplorationSnapshot,
     reflection: ReflectionRuntime,
     reconciliation: ReconciliationRuntime,
@@ -536,6 +542,7 @@ pub fn router(state: AppState) -> Router {
             post(redeliver_exploration),
         )
         .route("/api/compute", post(update_compute))
+        .route("/api/ambient", post(update_ambient))
         .route("/api/compute/policies", post(update_compute_policies))
         .route("/api/stats", get(stats))
         .route("/api/runtime", get(runtime))
@@ -811,6 +818,7 @@ async fn bootstrap(State(state): State<AppState>) -> Result<Json<BootstrapRespon
         autonomy_permitted,
         models: state.compute.catalog().to_vec(),
         compute: state.compute.snapshot().await,
+        ambient: state.ambient.snapshot().await,
         compute_policies: state.compute_policies.snapshot().await,
         rate_limits: state.rate_limits.read().await.clone(),
         usage,
@@ -1003,6 +1011,18 @@ async fn update_compute(
         .map_err(ApiError::bad_request)
 }
 
+async fn update_ambient(
+    State(state): State<AppState>,
+    Json(config): Json<AmbientConfig>,
+) -> Result<Json<AmbientSnapshot>, ApiError> {
+    state
+        .ambient
+        .update(config)
+        .await
+        .map(Json)
+        .map_err(ApiError::bad_request)
+}
+
 async fn update_compute_policies(
     State(state): State<AppState>,
     Json(policies): Json<Vec<ComputeTopicPolicyDraft>>,
@@ -1141,6 +1161,7 @@ async fn runtime(
     Ok(Json(RuntimeResponse {
         identity: state.identity.snapshot().await,
         usage,
+        ambient: state.ambient.snapshot().await,
         exploration: state.exploration.snapshot().await,
         reflection: state.reflection.runtime().await,
         reconciliation: state.reconciliation.runtime().await,
