@@ -160,6 +160,7 @@ function metadataText(metadata) {
 
 function renderMessageFoot(message, metadata) {
   const foot = message.querySelector(".message-foot");
+  if (!foot) return;
   const runtime = foot.querySelector(".message-runtime");
   const traceButton = foot.querySelector(".trace-button");
   runtime.textContent = metadataText(metadata);
@@ -426,6 +427,7 @@ function setActivity(message, event) {
   clearResponseWaitIndicators();
   const body = message.querySelector(".message-body");
   const foot = message.querySelector(".message-foot");
+  if (!body || !foot) return;
   const runtime = foot.querySelector(".message-runtime");
   message.classList.remove("response-placeholder");
   message.classList.add("pending");

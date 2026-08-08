@@ -17,11 +17,6 @@ use crate::{
     usage::InvocationRecord,
 };
 
-const DEFAULT_BASE_URL: &str = "https://api.openai.com/v1";
-const DEFAULT_MODEL: &str = "gpt-5-mini";
-const DEFAULT_KEY_ENV: &str = "SYMBIONT_AMBIENT_API_KEY";
-const DEFAULT_WEB_SEARCH_TOOL: &str = "web_search";
-
 /// A connection and secret reference. Providers never decide what gets
 /// explored; channels do. This prevents a failed provider from being silently
 /// substituted by another model with a different perspective.
@@ -60,22 +55,8 @@ pub struct AmbientConfig {
 impl Default for AmbientConfig {
     fn default() -> Self {
         Self {
-            providers: vec![AmbientProviderConfig {
-                id: "openai".to_owned(),
-                enabled: false,
-                base_url: DEFAULT_BASE_URL.to_owned(),
-                api_key_env: DEFAULT_KEY_ENV.to_owned(),
-                web_search_tool: DEFAULT_WEB_SEARCH_TOOL.to_owned(),
-            }],
-            channels: vec![AmbientChannelConfig {
-                id: "openai-general".to_owned(),
-                enabled: true,
-                provider_id: "openai".to_owned(),
-                name: "OpenAI · 广域观察".to_owned(),
-                model: DEFAULT_MODEL.to_owned(),
-                focus: "Look for recent AI releases, developer tools, independent evaluation, ecosystem shifts, and useful applications. Prefer a concrete tension over routine announcements.".to_owned(),
-                interval_minutes: 180,
-            }],
+            providers: Vec::new(),
+            channels: Vec::new(),
         }
     }
 }
@@ -137,7 +118,14 @@ impl AmbientTopologyStore {
     pub async fn open(config_path: PathBuf) -> Result<Self> {
         let config = match fs::read_to_string(&config_path).await {
             Ok(value) => match toml::from_str::<AmbientConfig>(&value) {
-                Ok(config) if validate_config(&config).is_ok() => config,
+                Ok(config) if validate_config(&config).is_ok() => {
+                    if is_legacy_openai_seed(&config) {
+                        warn!(path = %config_path.display(), "removing the unconfigured legacy ambient OpenAI seed");
+                        AmbientConfig::default()
+                    } else {
+                        config
+                    }
+                }
                 Ok(_) | Err(_) => {
                     warn!(path = %config_path.display(), "ambient channel configuration is invalid; using defaults");
                     AmbientConfig::default()
@@ -491,12 +479,8 @@ fn response_candidates(response: &Value) -> Result<Vec<SensingCandidateDraft>> {
 }
 
 fn validate_config(config: &AmbientConfig) -> Result<()> {
-    if config.providers.is_empty()
-        || config.providers.len() > 12
-        || config.channels.is_empty()
-        || config.channels.len() > 24
-    {
-        anyhow::bail!("ambient configuration requires 1–12 providers and 1–24 channels");
+    if config.providers.len() > 12 || config.channels.len() > 24 {
+        anyhow::bail!("ambient configuration allows at most 12 providers and 24 channels");
     }
     let mut provider_ids = BTreeMap::new();
     for provider in &config.providers {
@@ -545,6 +529,25 @@ fn validate_config(config: &AmbientConfig) -> Result<()> {
         }
     }
     Ok(())
+}
+
+fn is_legacy_openai_seed(config: &AmbientConfig) -> bool {
+    matches!(
+        (config.providers.as_slice(), config.channels.as_slice()),
+        ([provider], [channel])
+            if provider.id == "openai"
+                && !provider.enabled
+                && provider.base_url == "https://api.openai.com/v1"
+                && provider.api_key_env == "SYMBIONT_AMBIENT_API_KEY"
+                && provider.web_search_tool == "web_search"
+                && channel.id == "openai-general"
+                && channel.enabled
+                && channel.provider_id == "openai"
+                && channel.name == "OpenAI · 广域观察"
+                && channel.model == "gpt-5-mini"
+                && channel.focus == "Look for recent AI releases, developer tools, independent evaluation, ecosystem shifts, and useful applications. Prefer a concrete tension over routine announcements."
+                && channel.interval_minutes == 180
+    )
 }
 
 fn validate_id(value: &str, kind: &str) -> Result<()> {
@@ -682,6 +685,28 @@ async fn persist(path: &PathBuf, content: String) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn test_config() -> AmbientConfig {
+        AmbientConfig {
+            providers: vec![AmbientProviderConfig {
+                id: "test-provider".to_owned(),
+                enabled: true,
+                base_url: "https://example.test/v1".to_owned(),
+                api_key_env: "TEST_AMBIENT_API_KEY".to_owned(),
+                web_search_tool: "web_search".to_owned(),
+            }],
+            channels: vec![AmbientChannelConfig {
+                id: "test-channel".to_owned(),
+                enabled: true,
+                provider_id: "test-provider".to_owned(),
+                name: "Test observer".to_owned(),
+                model: "test-model".to_owned(),
+                focus: "Observe independent information.".to_owned(),
+                interval_minutes: 180,
+            }],
+        }
+    }
+
     #[test]
     fn parses_the_responses_function_handoff() {
         let arguments = json!({"candidates":[{"title":"A signal","summary":"A fact","proposed_input":"An input","source_class":"research","sources":[{"url":"https://example.test","detail":"Primary"}]}]}).to_string();
@@ -690,13 +715,19 @@ mod tests {
     }
     #[test]
     fn rejects_channels_with_unknown_providers() {
-        let mut config = AmbientConfig::default();
+        let mut config = test_config();
         config.channels[0].provider_id = "missing".to_owned();
         assert!(validate_config(&config).is_err());
     }
+
+    #[test]
+    fn accepts_an_unconfigured_information_entry_topology() {
+        assert!(validate_config(&AmbientConfig::default()).is_ok());
+    }
+
     #[test]
     fn channel_due_uses_its_own_schedule() {
-        let channel = AmbientConfig::default().channels.remove(0);
+        let channel = test_config().channels.remove(0);
         assert!(due(&channel, None));
         let state = AmbientChannelRuntime {
             last_started_at: Some(timestamp(Utc::now())),

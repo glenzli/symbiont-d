@@ -12,6 +12,9 @@ export function initSettings(state, triggerExploration) {
   const computeForm = document.querySelector("#compute-form");
   const routingSelect = document.querySelector("#routing");
   const computeSaveState = document.querySelector("#compute-save-state");
+  const ambientForm = document.querySelector("#ambient-form");
+  const ambientSaveState = document.querySelector("#ambient-save-state");
+  const ambientEmptyState = document.querySelector("#ambient-empty-state");
   const ambientProviderList = document.querySelector("#ambient-provider-list");
   const ambientProviderTemplate = document.querySelector("#ambient-provider-template");
   const addAmbientProvider = document.querySelector("#add-ambient-provider");
@@ -94,7 +97,6 @@ export function initSettings(state, triggerExploration) {
     for (const policy of state.computePolicies || []) {
       appendComputePolicy(policy);
     }
-    renderAmbient();
   }
 
   function renderAmbient() {
@@ -103,6 +105,9 @@ export function initSettings(state, triggerExploration) {
     ambientChannelList.replaceChildren();
     for (const provider of state.ambient.providers || []) appendAmbientProvider(provider);
     for (const channel of state.ambient.channels || []) appendAmbientChannel(channel);
+    ambientEmptyState.hidden = Boolean(
+      state.ambient.providers?.length || state.ambient.channels?.length,
+    );
   }
 
   function availabilityText(availability, runtime = {}) {
@@ -296,18 +301,29 @@ export function initSettings(state, triggerExploration) {
         }),
         "话题规则保存失败",
       );
+      renderCompute();
+      computeSaveState.textContent = "已保存";
+    } catch (error) {
+      computeSaveState.textContent = error.message;
+    }
+  }
+
+  async function saveAmbient(event) {
+    event.preventDefault();
+    ambientSaveState.textContent = "保存中";
+    try {
       state.ambient = await responseJson(
         await fetch("/api/ambient", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify(ambientFormValue()),
         }),
-        "广域探路通道保存失败",
+        "信息入口保存失败",
       );
-      renderCompute();
-      computeSaveState.textContent = "已保存";
+      renderAmbient();
+      ambientSaveState.textContent = "已保存";
     } catch (error) {
-      computeSaveState.textContent = error.message;
+      ambientSaveState.textContent = error.message;
     }
   }
 
@@ -485,9 +501,11 @@ export function initSettings(state, triggerExploration) {
 
   function openSettings(tab = "autonomy") {
     renderCompute();
+    renderAmbient();
     renderAutonomy();
     renderBridge();
     computeSaveState.textContent = "";
+    ambientSaveState.textContent = "";
     autonomySaveState.textContent = "";
     activateTab(tab);
     dialog.showModal();
@@ -500,6 +518,7 @@ export function initSettings(state, triggerExploration) {
     }
   });
   computeForm.addEventListener("submit", saveCompute);
+  ambientForm.addEventListener("submit", saveAmbient);
   addComputePolicy.addEventListener("click", () => appendComputePolicy({}, true));
   computePolicyList.addEventListener("click", (event) => {
     const button = event.target.closest(".remove-compute-policy");
@@ -517,20 +536,28 @@ export function initSettings(state, triggerExploration) {
       true,
     ),
   );
-  addAmbientChannel.addEventListener("click", () =>
+  addAmbientChannel.addEventListener("click", () => {
+    const providerId = ambientProviderList.querySelector(
+      '[data-provider-field="id"]',
+    )?.value.trim();
+    if (!providerId) {
+      ambientSaveState.textContent = "请先添加一个 Provider";
+      addAmbientProvider.focus();
+      return;
+    }
     appendAmbientChannel(
       {
         id: "new-channel",
         enabled: true,
-        providerId: state.ambient?.providers?.[0]?.id || "",
+        providerId,
         name: "新的广域观察",
         model: "gpt-5-mini",
         focus: "Describe the independent external domain this role should observe.",
         intervalMinutes: 180,
       },
       true,
-    ),
-  );
+    );
+  });
   ambientProviderList.addEventListener("click", (event) => {
     const button = event.target.closest(".remove-ambient-provider");
     if (button) button.closest("[data-ambient-provider]").remove();
@@ -557,6 +584,7 @@ export function initSettings(state, triggerExploration) {
   return {
     render() {
       renderCompute();
+      renderAmbient();
       renderAutonomy();
       renderBridge();
     },
@@ -589,7 +617,7 @@ function explorationStatusText(exploration, usage, autonomy) {
   }
   if (phase === "error") return exploration.lastError || "探索运行出错";
   if (exploration.lastOutcome === "channel_failed") {
-    return "某个广域通道本轮失效；可在模型设置中查看";
+    return "某个信息入口本轮失效；可在信息入口设置中查看";
   }
   const candidates = exploration.pendingCandidateCount
     ? `最近候选 ${exploration.pendingCandidateCount} 条 · `

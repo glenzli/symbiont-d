@@ -303,6 +303,7 @@
         <button type="button" role="tab" data-settings-tab="appearance" aria-selected="false">外观</button>
         <button type="button" role="tab" data-settings-tab="reflection" aria-selected="false">思考</button>
         <button type="button" role="tab" data-settings-tab="models" aria-selected="false">模型</button>
+        <button type="button" role="tab" data-settings-tab="sources" aria-selected="false">信息入口</button>
         <button type="button" role="tab" data-settings-tab="bridge" aria-selected="false">连接</button>
         <button type="button" role="tab" data-settings-tab="stats" aria-selected="false">统计</button>
       </nav>
@@ -516,22 +517,6 @@
 
       <section class="tab-panel" data-settings-panel="models" hidden>
         <form id="compute-form">
-          <section class="compute-policy-section ambient-provider-section">
-            <header>
-              <div>
-                <strong>广域探路通道</strong>
-                <small>每个通道独立观察、独立失效；Codex 仍负责聊天、复核和深入调查</small>
-              </div>
-            </header>
-            <div class="ambient-config-group">
-              <div class="ambient-config-heading"><strong>Providers</strong><button id="add-ambient-provider" class="icon-button" type="button" title="添加 Provider">＋</button></div>
-              <div id="ambient-provider-list" class="ambient-config-list"></div>
-            </div>
-            <div class="ambient-config-group">
-              <div class="ambient-config-heading"><strong>输入通道</strong><button id="add-ambient-channel" class="icon-button" type="button" title="添加输入通道">＋</button></div>
-              <div id="ambient-channel-list" class="ambient-config-list"></div>
-            </div>
-          </section>
           <label class="field routing-field">
             <span>路由方式</span>
             <select id="routing" name="routing">
@@ -582,6 +567,32 @@
 
           <footer class="dialog-actions">
             <span id="compute-save-state" role="status"></span>
+            <button class="primary-button" type="submit">保存</button>
+          </footer>
+        </form>
+      </section>
+
+      <section class="tab-panel" data-settings-panel="sources" hidden>
+        <form id="ambient-form">
+          <section class="compute-policy-section ambient-provider-section">
+            <header>
+              <div>
+                <strong>外部信息入口</strong>
+                <small>外部 API 只负责广域输入；Codex 仍负责聊天、复核和深入调查。未配置时不会进行外部调用。</small>
+              </div>
+            </header>
+            <p id="ambient-empty-state" class="ambient-empty-state" hidden>还没有信息入口。先添加一个 Provider，再为它创建一个观察通道。</p>
+            <div class="ambient-config-group">
+              <div class="ambient-config-heading"><strong>Providers</strong><button id="add-ambient-provider" class="icon-button" type="button" title="添加 Provider">＋</button></div>
+              <div id="ambient-provider-list" class="ambient-config-list"></div>
+            </div>
+            <div class="ambient-config-group">
+              <div class="ambient-config-heading"><strong>观察通道</strong><button id="add-ambient-channel" class="icon-button" type="button" title="添加观察通道">＋</button></div>
+              <div id="ambient-channel-list" class="ambient-config-list"></div>
+            </div>
+          </section>
+          <footer class="dialog-actions">
+            <span id="ambient-save-state" role="status"></span>
             <button class="primary-button" type="submit">保存</button>
           </footer>
         </form>

@@ -98,6 +98,9 @@ export function initMessageActions({ conversation, isBusy, perform }) {
 
   function render(message) {
     const foot = message.querySelector(".message-foot");
+    // Input signals borrow the message layout but deliberately do not expose
+    // message actions or delivery state.
+    if (!foot) return;
     const stateLabel = foot.querySelector(".message-state");
     const actions = foot.querySelector(".message-actions");
     const state = states.get(message) || "delivered";
