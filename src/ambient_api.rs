@@ -1,4 +1,10 @@
-use std::{collections::BTreeMap, env, io::ErrorKind, path::PathBuf, sync::Arc, time::Instant};
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    io::ErrorKind,
+    path::PathBuf,
+    sync::Arc,
+    time::Instant,
+};
 
 use anyhow::{Context, Result};
 use chrono::{DateTime, SecondsFormat, Utc};
@@ -13,6 +19,7 @@ use tracing::warn;
 
 use crate::{
     codex::RuntimeEvent,
+    secrets::{CredentialStatus, CredentialStore, SecretStore},
     sensing::{InputRoleSnapshot, SensingCandidateDraft, validate_candidate_drafts},
     usage::InvocationRecord,
 };
@@ -27,7 +34,10 @@ pub struct AmbientProviderConfig {
     #[serde(default)]
     pub enabled: bool,
     pub base_url: String,
-    pub api_key_env: String,
+    #[serde(default)]
+    pub credential_store: CredentialStore,
+    #[serde(skip_serializing, default)]
+    pub credential_value: Option<String>,
     pub web_search_tool: String,
 }
 
@@ -83,7 +93,10 @@ pub struct AmbientProviderSnapshot {
     pub id: String,
     pub enabled: bool,
     pub base_url: String,
-    pub api_key_env: String,
+    pub credential_store: CredentialStore,
+    pub active_credential_store: CredentialStore,
+    pub credential_status: String,
+    pub debug_credential_override: bool,
     pub web_search_tool: String,
     pub availability: String,
 }
@@ -112,6 +125,7 @@ pub struct AmbientTopologyStore {
     runtime_path: PathBuf,
     config: RwLock<AmbientConfig>,
     runtime: RwLock<AmbientRuntimeDocument>,
+    credentials: SecretStore,
 }
 
 impl AmbientTopologyStore {
@@ -139,6 +153,7 @@ impl AmbientTopologyStore {
             }
         };
         let runtime_path = config_path.with_extension("runtime.json");
+        let credential_path = config_path.with_file_name("ambient-provider-secrets.toml");
         let runtime = read_runtime(&runtime_path).await?;
         persist_config(&config_path, &config).await?;
         Ok(Self {
@@ -146,24 +161,36 @@ impl AmbientTopologyStore {
             runtime_path,
             config: RwLock::new(config),
             runtime: RwLock::new(runtime),
+            credentials: SecretStore::open(credential_path).await?,
         })
     }
 
     pub async fn snapshot(&self) -> AmbientSnapshot {
         let config = self.config.read().await.clone();
         let runtime = self.runtime.read().await.clone();
-        let providers = config
-            .providers
-            .iter()
-            .map(|provider| AmbientProviderSnapshot {
+        let mut provider_availabilities = BTreeMap::new();
+        let mut providers = Vec::with_capacity(config.providers.len());
+        for provider in &config.providers {
+            let credential_status = self
+                .credentials
+                .status(&provider.id, provider.credential_store)
+                .await;
+            let availability = provider_availability(provider, credential_status);
+            provider_availabilities.insert(provider.id.clone(), availability.clone());
+            providers.push(AmbientProviderSnapshot {
                 id: provider.id.clone(),
                 enabled: provider.enabled,
                 base_url: provider.base_url.clone(),
-                api_key_env: provider.api_key_env.clone(),
+                credential_store: provider.credential_store,
+                active_credential_store: self.credentials.active_store(provider.credential_store),
+                credential_status: credential_status.as_str().to_owned(),
+                debug_credential_override: self
+                    .credentials
+                    .debug_override(provider.credential_store),
                 web_search_tool: provider.web_search_tool.clone(),
-                availability: provider_availability(provider),
-            })
-            .collect::<Vec<_>>();
+                availability,
+            });
+        }
         let channels = config
             .channels
             .iter()
@@ -175,7 +202,7 @@ impl AmbientTopologyStore {
                     .unwrap_or_default();
                 AmbientChannelSnapshot {
                     config: channel.clone(),
-                    availability: channel_availability(channel, &config.providers),
+                    availability: channel_availability(channel, &provider_availabilities),
                     last_started_at: state.last_started_at,
                     last_succeeded_at: state.last_succeeded_at,
                     last_failed_at: state.last_failed_at,
@@ -189,8 +216,31 @@ impl AmbientTopologyStore {
         }
     }
 
-    pub async fn update(&self, config: AmbientConfig) -> Result<AmbientSnapshot> {
+    pub async fn update(&self, mut config: AmbientConfig) -> Result<AmbientSnapshot> {
         validate_config(&config)?;
+        let prior = self.config.read().await.clone();
+        for provider in &config.providers {
+            if let Some(secret) = provider.credential_value.as_deref() {
+                self.credentials
+                    .write(&provider.id, provider.credential_store, secret)
+                    .await?;
+            }
+        }
+        let next_ids = config
+            .providers
+            .iter()
+            .map(|provider| provider.id.as_str())
+            .collect::<BTreeSet<_>>();
+        for provider in &prior.providers {
+            if !next_ids.contains(provider.id.as_str()) {
+                self.credentials
+                    .remove(&provider.id, provider.credential_store)
+                    .await?;
+            }
+        }
+        for provider in &mut config.providers {
+            provider.credential_value = None;
+        }
         persist_config(&self.config_path, &config).await?;
         *self.config.write().await = config;
         Ok(self.snapshot().await)
@@ -199,18 +249,30 @@ impl AmbientTopologyStore {
     async fn select_due_channel(&self) -> Option<(AmbientChannelConfig, AmbientProviderConfig)> {
         let config = self.config.read().await.clone();
         let runtime = self.runtime.read().await.clone();
-        config
-            .channels
-            .iter()
-            .filter_map(|channel| {
-                let provider = config
-                    .providers
-                    .iter()
-                    .find(|provider| provider.id == channel.provider_id)?;
-                (channel_availability(channel, &config.providers) == "ready")
-                    .then_some((channel, provider))
-            })
-            .filter(|(channel, _)| due(channel, runtime.channels.get(&channel.id)))
+        let mut due_channels = Vec::new();
+        for channel in &config.channels {
+            let Some(provider) = config
+                .providers
+                .iter()
+                .find(|provider| provider.id == channel.provider_id)
+            else {
+                continue;
+            };
+            if !channel.enabled
+                || !provider.enabled
+                || self
+                    .credentials
+                    .status(&provider.id, provider.credential_store)
+                    .await
+                    != CredentialStatus::Configured
+                || !due(channel, runtime.channels.get(&channel.id))
+            {
+                continue;
+            }
+            due_channels.push((channel, provider));
+        }
+        due_channels
+            .into_iter()
             .min_by_key(|(channel, _)| {
                 runtime
                     .channels
@@ -218,6 +280,12 @@ impl AmbientTopologyStore {
                     .and_then(|state| state.last_started_at.clone())
             })
             .map(|(channel, provider)| (channel.clone(), provider.clone()))
+    }
+
+    async fn credential_for(&self, provider: &AmbientProviderConfig) -> Result<Option<String>> {
+        self.credentials
+            .read(&provider.id, provider.credential_store)
+            .await
     }
 
     async fn mark_started(&self, channel_id: &str) -> Result<()> {
@@ -326,8 +394,11 @@ impl AmbientScout {
         input_events: &mut watch::Receiver<u64>,
         events: mpsc::Sender<RuntimeEvent>,
     ) -> Result<AmbientSenseOutcome> {
-        let api_key = env::var(&provider.api_key_env)
-            .with_context(|| format!("read ambient API key from {}", provider.api_key_env))?;
+        let api_key = self
+            .topology
+            .credential_for(provider)
+            .await?
+            .context("ambient Provider has no configured API key")?;
         let started = Utc::now();
         let started_instant = Instant::now();
         let request_id = format!("ambient_{}_{}", channel.id, started.timestamp_micros());
@@ -496,7 +567,6 @@ fn validate_config(config: &AmbientConfig) -> Result<()> {
         {
             anyhow::bail!("ambient API base URL must be an http(s) origin without credentials");
         }
-        validate_env(&provider.api_key_env)?;
         if provider.web_search_tool.trim().is_empty()
             || provider.web_search_tool.chars().count() > 80
         {
@@ -538,7 +608,6 @@ fn is_legacy_openai_seed(config: &AmbientConfig) -> bool {
             if provider.id == "openai"
                 && !provider.enabled
                 && provider.base_url == "https://api.openai.com/v1"
-                && provider.api_key_env == "SYMBIONT_AMBIENT_API_KEY"
                 && provider.web_search_tool == "web_search"
                 && channel.id == "openai-general"
                 && channel.enabled
@@ -561,42 +630,27 @@ fn validate_id(value: &str, kind: &str) -> Result<()> {
     }
     Ok(())
 }
-fn validate_env(value: &str) -> Result<()> {
-    if value.is_empty()
-        || !value
-            .chars()
-            .all(|c| c.is_ascii_uppercase() || c.is_ascii_digit() || c == '_')
-    {
-        anyhow::bail!(
-            "ambient API key environment variable must use uppercase letters, digits, and underscores"
-        );
-    }
-    Ok(())
-}
-fn provider_availability(provider: &AmbientProviderConfig) -> String {
+fn provider_availability(provider: &AmbientProviderConfig, credential: CredentialStatus) -> String {
     if !provider.enabled {
         "disabled".to_owned()
-    } else if env::var(&provider.api_key_env)
-        .ok()
-        .filter(|value| !value.trim().is_empty())
-        .is_none()
-    {
-        format!("missing_key_env:{}", provider.api_key_env)
     } else {
-        "ready".to_owned()
+        match credential {
+            CredentialStatus::Configured => "ready".to_owned(),
+            CredentialStatus::Missing => "missing_credential".to_owned(),
+            CredentialStatus::Unavailable => "credential_unavailable".to_owned(),
+        }
     }
 }
 fn channel_availability(
     channel: &AmbientChannelConfig,
-    providers: &[AmbientProviderConfig],
+    provider_availability: &BTreeMap<String, String>,
 ) -> String {
     if !channel.enabled {
         return "disabled".to_owned();
     }
-    providers
-        .iter()
-        .find(|provider| provider.id == channel.provider_id)
-        .map(provider_availability)
+    provider_availability
+        .get(&channel.provider_id)
+        .cloned()
         .unwrap_or_else(|| "unknown_provider".to_owned())
 }
 fn due(channel: &AmbientChannelConfig, runtime: Option<&AmbientChannelRuntime>) -> bool {
@@ -692,7 +746,8 @@ mod tests {
                 id: "test-provider".to_owned(),
                 enabled: true,
                 base_url: "https://example.test/v1".to_owned(),
-                api_key_env: "TEST_AMBIENT_API_KEY".to_owned(),
+                credential_store: CredentialStore::ConfigFile,
+                credential_value: None,
                 web_search_tool: "web_search".to_owned(),
             }],
             channels: vec![AmbientChannelConfig {
@@ -723,6 +778,15 @@ mod tests {
     #[test]
     fn accepts_an_unconfigured_information_entry_topology() {
         assert!(validate_config(&AmbientConfig::default()).is_ok());
+    }
+
+    #[test]
+    fn provider_secret_is_input_only_and_never_persists_with_topology() {
+        let mut config = test_config();
+        config.providers[0].credential_value = Some("secret-value".to_owned());
+        let persisted = toml::to_string(&config).unwrap();
+        assert!(!persisted.contains("secret-value"));
+        assert!(!persisted.contains("credentialValue"));
     }
 
     #[test]

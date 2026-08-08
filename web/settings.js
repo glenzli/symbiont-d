@@ -114,10 +114,25 @@ export function initSettings(state, triggerExploration) {
     if (runtime.lastError) return `上次失败：${runtime.lastError}`;
     if (availability === "ready") return "就绪";
     if (availability === "disabled") return "已关闭";
-    if (availability?.startsWith("missing_key_env:")) {
-      return `缺少 ${availability.slice("missing_key_env:".length)}`;
-    }
+    if (availability === "missing_credential") return "未配置密钥";
+    if (availability === "credential_unavailable") return "密钥暂不可读取";
     return availability || "尚不可用";
+  }
+
+  function credentialNote(provider) {
+    if (provider.debugCredentialOverride) {
+      return "调试构建：当前强制使用本地配置文件，不会读取系统凭据库。";
+    }
+    const location = provider.activeCredentialStore === "keychain"
+      ? "系统凭据库"
+      : "本地配置文件（权限 600）";
+    if (provider.credentialStatus === "configured") {
+      return `密钥已配置于${location}；不会显示或回传原文。`;
+    }
+    if (provider.credentialStatus === "unavailable") {
+      return `${location}暂不可读取；后台探索不会弹出权限请求。`;
+    }
+    return "尚未配置密钥。保存时填写一次，密钥不会回显。";
   }
 
   function appendAmbientProvider(provider = {}, focus = false) {
@@ -125,11 +140,14 @@ export function initSettings(state, triggerExploration) {
     const row = fragment.querySelector("[data-ambient-provider]");
     row.querySelector('[data-provider-field="id"]').value = provider.id || "";
     row.querySelector('[data-provider-field="baseUrl"]').value = provider.baseUrl || "";
-    row.querySelector('[data-provider-field="apiKeyEnv"]').value = provider.apiKeyEnv || "";
+    row.querySelector('[data-provider-field="credentialStore"]').value =
+      provider.credentialStore || "config_file";
+    row.querySelector('[data-provider-field="credentialValue"]').value = "";
     row.querySelector('[data-provider-field="webSearchTool"]').value = provider.webSearchTool || "web_search";
     row.querySelector('[data-provider-field="enabled"]').checked = provider.enabled === true;
     row.querySelector(".ambient-row-title").textContent = provider.id || "新 Provider";
     row.querySelector(".ambient-row-status").textContent = availabilityText(provider.availability);
+    row.querySelector(".ambient-credential-note").textContent = credentialNote(provider);
     ambientProviderList.append(fragment);
     if (focus) row.querySelector('[data-provider-field="id"]').focus();
   }
@@ -266,7 +284,9 @@ export function initSettings(state, triggerExploration) {
         id: row.querySelector('[data-provider-field="id"]').value.trim(),
         enabled: row.querySelector('[data-provider-field="enabled"]').checked,
         baseUrl: row.querySelector('[data-provider-field="baseUrl"]').value.trim(),
-        apiKeyEnv: row.querySelector('[data-provider-field="apiKeyEnv"]').value.trim(),
+        credentialStore: row.querySelector('[data-provider-field="credentialStore"]').value,
+        credentialValue:
+          row.querySelector('[data-provider-field="credentialValue"]').value || null,
         webSearchTool: row.querySelector('[data-provider-field="webSearchTool"]').value.trim(),
       })),
       channels: [...ambientChannelList.querySelectorAll("[data-ambient-channel]")].map((row) => ({
@@ -530,7 +550,7 @@ export function initSettings(state, triggerExploration) {
         id: "new-provider",
         enabled: false,
         baseUrl: "https://api.openai.com/v1",
-        apiKeyEnv: "SYMBIONT_AMBIENT_API_KEY",
+        credentialStore: "config_file",
         webSearchTool: "web_search",
       },
       true,

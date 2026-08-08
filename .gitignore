@@ -5,6 +5,8 @@
 /data/memory.md
 /data/compute.toml
 /data/compute-policies.toml
+/data/ambient-provider.toml
+/data/ambient-provider-secrets.toml
 /data/profile.toml
 /data/orientation.md
 /data/autonomy.toml

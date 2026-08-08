@@ -1646,6 +1646,8 @@ dependencies = [
  "pcp-store",
  "reqwest",
  "rusqlite",
+ "security-framework",
+ "security-framework-sys",
  "serde",
  "serde_json",
  "sha2",

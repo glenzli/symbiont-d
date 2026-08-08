@@ -35,3 +35,7 @@ tokio-stream = "0.1"
 toml = "1.1"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+[target.'cfg(target_os = "macos")'.dependencies]
+security-framework = "3.7"
+security-framework-sys = "2.17"

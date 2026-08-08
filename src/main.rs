@@ -27,6 +27,7 @@ mod reconciliation;
 mod reflection;
 mod rollover;
 mod runtime_log;
+mod secrets;
 mod sensing;
 mod signals;
 mod symbiont_context;

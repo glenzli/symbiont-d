@@ -896,10 +896,12 @@
         <div class="field-grid">
           <label class="field"><span>ID</span><input data-provider-field="id" type="text" /></label>
           <label class="field"><span>Responses 地址</span><input data-provider-field="baseUrl" type="url" /></label>
-          <label class="field"><span>密钥环境变量</span><input data-provider-field="apiKeyEnv" type="text" /></label>
+          <label class="field"><span>密钥存储</span><select data-provider-field="credentialStore"><option value="config_file">本地配置文件</option><option value="keychain">系统凭据库</option></select></label>
+          <label class="field"><span>API 密钥</span><input data-provider-field="credentialValue" type="password" autocomplete="new-password" placeholder="留空以保持现有密钥" /></label>
           <label class="field"><span>网页搜索工具类型</span><input data-provider-field="webSearchTool" type="text" /></label>
           <label class="toggle-row compact-toggle"><span>启用</span><input data-provider-field="enabled" type="checkbox" /></label>
         </div>
+        <small class="ambient-credential-note"></small>
       </div>
     </template>
     <template id="ambient-channel-template">

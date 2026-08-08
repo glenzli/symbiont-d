@@ -2223,6 +2223,12 @@ html[data-native-shell="macos"] .topbar {
   font-size: 11px;
 }
 
+.ambient-credential-note {
+  color: var(--text-faint);
+  font-size: 9px;
+  line-height: 1.45;
+}
+
 .ambient-row-status {
   min-width: 0;
   overflow: hidden;
