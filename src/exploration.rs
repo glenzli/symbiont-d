@@ -36,6 +36,7 @@ use crate::{
     conversation::ConversationCoordinator,
     curiosity::CuriosityStore,
     luna_input::LunaInput,
+    mail_input::MailInputStore,
     memory::{MemoryEntry, MemoryRole},
     outreach::all_budgets_exhausted,
     profile::{ProfileStore, SetupStatus},
@@ -209,6 +210,7 @@ impl ExplorationHandle {
         usage: Arc<UsageStore>,
         ambient_scout: Arc<AmbientScout>,
         luna_input: Arc<LunaInput>,
+        mail_input: Arc<MailInputStore>,
         sensing: Arc<SensingStore>,
         signals: Arc<SignalStore>,
         conversation: ConversationCoordinator,
@@ -218,7 +220,7 @@ impl ExplorationHandle {
         mut intent_receiver: ExplorationIntentReceiver,
     ) -> Self {
         let projection = manual_runs.projection().await;
-        if ambient_scout.has_configured_input().await {
+        if ambient_scout.has_configured_input().await || mail_input.has_configured_input().await {
             if let Err(error) = attempts.remove_reason("no_input_channel").await {
                 tracing::warn!(%error, "could not clear stale input-configuration skips");
             }
@@ -272,6 +274,7 @@ impl ExplorationHandle {
             usage,
             ambient_scout,
             luna_input,
+            mail_input,
             Arc::clone(&sensing),
             Arc::clone(&signals),
             conversation,
@@ -390,6 +393,7 @@ async fn run_scheduler(
     usage: Arc<UsageStore>,
     ambient_scout: Arc<AmbientScout>,
     luna_input: Arc<LunaInput>,
+    mail_input: Arc<MailInputStore>,
     sensing: Arc<SensingStore>,
     signals: Arc<SignalStore>,
     conversation: ConversationCoordinator,
@@ -493,6 +497,7 @@ async fn run_scheduler(
                     Arc::clone(&usage),
                     Arc::clone(&ambient_scout),
                     Arc::clone(&luna_input),
+                    Arc::clone(&mail_input),
                     Arc::clone(&sensing),
                     Arc::clone(&signals),
                     conversation.clone(),
@@ -684,6 +689,7 @@ async fn run_once(
     usage: Arc<UsageStore>,
     ambient_scout: Arc<AmbientScout>,
     luna_input: Arc<LunaInput>,
+    mail_input: Arc<MailInputStore>,
     sensing: Arc<SensingStore>,
     signals: Arc<SignalStore>,
     conversation: ConversationCoordinator,
@@ -802,7 +808,12 @@ async fn run_once(
             }
         };
         let sensing_context = ambient_sensing_context(&recent_messages, &intake_brief);
-        let has_configured_input = ambient_scout.has_configured_input().await;
+        let has_configured_input =
+            ambient_scout.has_configured_input().await || mail_input.has_configured_input().await;
+        let mailbox_configured = mail_input.has_configured_input().await;
+        let mailbox = Arc::clone(&mail_input);
+        let mailbox_input_events = input_events.clone();
+        let mailbox_task = tokio::spawn(async move { mailbox.poll(mailbox_input_events).await });
         let selected_inputs = ambient_scout
             .select_inputs(autonomy_config.max_input_parallelism as usize)
             .await;
@@ -872,6 +883,9 @@ async fn run_once(
                 }
             }
         }
+        let mailbox_outcome = mailbox_task
+            .await
+            .context("join research inbox polling")??;
         let invocations = sensing_outcomes
             .iter()
             .filter_map(|outcome| outcome.invocation.as_ref())
@@ -882,16 +896,21 @@ async fn run_once(
             stop_activity_relay(runtime_tx, activity_task).await?;
             return Err(error);
         }
-        let interrupted = sensing_outcomes.iter().any(|outcome| outcome.interrupted);
+        let interrupted = mailbox_outcome.interrupted
+            || sensing_outcomes.iter().any(|outcome| outcome.interrupted);
         let channel_failed = invocations.is_empty()
-            && sensing_outcomes
-                .iter()
-                .any(|outcome| outcome.channel_failure.is_some());
+            && (mailbox_outcome.inbox_failure.is_some()
+                || sensing_outcomes
+                    .iter()
+                    .any(|outcome| outcome.channel_failure.is_some()));
         if !interrupted {
-            let batches: Vec<_> = sensing_outcomes
+            let mut batches: Vec<_> = sensing_outcomes
                 .into_iter()
                 .filter_map(|outcome| outcome.actor.map(|actor| (outcome.candidates, actor)))
                 .collect();
+            if let Some(actor) = mailbox_outcome.actor {
+                batches.push((mailbox_outcome.candidates, actor));
+            }
             let update = if batches.is_empty() {
                 sensing.clear().await.map(|_| 0)
             } else {
@@ -936,6 +955,8 @@ async fn run_once(
             stop_activity_relay(runtime_tx, activity_task).await?;
             let outcome = if channel_failed {
                 "channel_failed"
+            } else if mailbox_configured {
+                "mailbox_empty"
             } else if sensing_trace_id.is_none() {
                 if has_configured_input {
                     "input_cooldown"
@@ -945,7 +966,10 @@ async fn run_once(
             } else {
                 "no_candidates"
             };
-            let was_recorded = !invocations.is_empty();
+            // A successful mailbox poll is a real observation attempt even
+            // when there was no new delivery. Otherwise the activity log
+            // would falsely imply that the configured inbox was never run.
+            let was_recorded = !invocations.is_empty() || mailbox_configured;
             settle_sensing_only(
                 &state,
                 &manual_runs,

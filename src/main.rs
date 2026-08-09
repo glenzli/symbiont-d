@@ -17,6 +17,7 @@ mod diagnostics;
 mod exploration;
 mod identity;
 mod luna_input;
+mod mail_input;
 mod maintenance;
 mod memory;
 mod outreach;
@@ -62,6 +63,7 @@ use exploration::{
 };
 use identity::IdentityStore;
 use luna_input::LunaInput;
+use mail_input::MailInputStore;
 use memory::MemoryStore;
 use pcp_index::PcpIndex;
 use permission::PermissionBroker;
@@ -258,6 +260,14 @@ async fn main() -> Result<()> {
     );
     let ambient_scout = Arc::new(AmbientScout::new(Arc::clone(&ambient_provider))?);
     let luna_input = Arc::new(LunaInput::new(Arc::clone(&ambient_provider)));
+    let mail_input = Arc::new(
+        MailInputStore::open(resolve_data_path(
+            &workspace,
+            "SYMBIONT_MAIL_INPUT_PATH",
+            "mail-input.toml",
+        ))
+        .await?,
+    );
     let signals = Arc::new(
         SignalStore::open(resolve_data_path(
             &workspace,
@@ -307,6 +317,7 @@ async fn main() -> Result<()> {
         Arc::clone(&usage),
         Arc::clone(&ambient_scout),
         Arc::clone(&luna_input),
+        Arc::clone(&mail_input),
         Arc::clone(&sensing),
         Arc::clone(&signals),
         conversation.clone(),
@@ -390,6 +401,7 @@ async fn main() -> Result<()> {
         codex,
         compute,
         ambient_provider,
+        mail_input,
         compute_policies,
         usage,
         rate_limits,

@@ -23,6 +23,7 @@ const appState = {
   models: [],
   compute: null,
   ambient: null,
+  mailInput: null,
   computePolicies: [],
   identity: { avatar: null },
   profile: { status: "unconfigured", mode: null, orientation: "" },
@@ -353,7 +354,7 @@ function appendManualExplorationReceipt(receipt) {
   const label = document.createElement("strong");
   label.textContent =
     receipt.outcome === "failed" ||
-    ["no_input_channel", "input_cooldown", "channel_failed"].includes(receipt.outcome)
+    ["no_input_channel", "input_cooldown", "mailbox_empty", "channel_failed"].includes(receipt.outcome)
       ? "探索未实际执行"
       : "探索完成";
   const message = document.createElement("span");
@@ -362,6 +363,8 @@ function appendManualExplorationReceipt(receipt) {
       ? "没有已配置的广域输入通道，因此没有开始实际探索。"
       : receipt.outcome === "input_cooldown"
         ? "广域输入通道已启用，正在等待其下一次观察时间。"
+        : receipt.outcome === "mailbox_empty"
+          ? "已查收私有研究收件箱，但没有新的白名单输入。"
       : receipt.outcome === "channel_failed"
         ? "广域输入通道未能完成，本次没有产生可查看的探索内容。"
       : receipt.outcome === "failed"
@@ -592,6 +595,7 @@ function applyRuntime(payload) {
   appState.identity = payload.identity || appState.identity;
   appState.usage = payload.usage || appState.usage;
   appState.ambient = payload.ambient || appState.ambient;
+  appState.mailInput = payload.mailInput || appState.mailInput;
   appState.exploration = payload.exploration || appState.exploration;
   if (payload.reflection) {
     appState.reflection = appState.reflection?.config

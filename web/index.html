@@ -476,6 +476,37 @@
             <button class="primary-button" type="submit">保存</button>
           </footer>
         </form>
+        <form id="mail-input-form">
+          <section class="compute-policy-section ambient-provider-section">
+            <header class="settings-panel-intro compact-intro">
+              <h3>私有研究收件箱</h3>
+              <p>只读指定 IMAP 文件夹。Google Scholar、Gemini Spark、GitHub 与你手工转发的内容可汇入同一入口；邮件先进入候选池，不会直接写入记忆。</p>
+            </header>
+            <div class="ambient-config-group">
+              <div class="ambient-config-row">
+                <div class="ambient-config-row-head"><strong id="mail-input-name-label">Research Inbox</strong><span id="mail-input-availability" class="ambient-row-status">正在读取</span></div>
+                <div class="field-grid">
+                  <label class="field"><span>显示名称</span><input id="mail-input-name" type="text" maxlength="120"></label>
+                  <label class="field"><span>IMAP 主机</span><input id="mail-input-host" type="text" maxlength="250" placeholder="imap.gmail.com"></label>
+                  <label class="field"><span>端口</span><input id="mail-input-port" type="number" min="1" max="65535"></label>
+                  <label class="field"><span>账号</span><input id="mail-input-username" type="text" maxlength="320" autocomplete="username"></label>
+                  <label class="field"><span>文件夹 / 标签</span><input id="mail-input-folder" type="text" maxlength="320" placeholder="INBOX"></label>
+                  <label class="field"><span>每轮最多读取</span><input id="mail-input-max-messages" type="number" min="1" max="24"></label>
+                  <label class="field"><span>凭据存储</span><select id="mail-input-credential-store"><option value="config_file">本地配置文件</option><option value="keychain">系统凭据库</option></select></label>
+                  <label class="field"><span>IMAP 专用密码</span><input id="mail-input-credential-value" type="password" autocomplete="new-password" placeholder="留空以保持现有凭据"></label>
+                  <label class="toggle-row compact-toggle"><span>启用</span><input id="mail-input-enabled" type="checkbox"></label>
+                </div>
+                <label class="field"><span>允许的发件人</span><textarea id="mail-input-allowed-senders" rows="2" maxlength="2400" placeholder="spark@google.com&#10;@scholar.google.com&#10;@github.com"></textarea><small>每行一个精确地址，或以 @ 开头的域名白名单。未在白名单的邮件不会进入模型上下文。</small></label>
+                <small id="mail-input-credential-note" class="ambient-credential-note"></small>
+                <small id="mail-input-runtime-note" class="ambient-credential-note"></small>
+              </div>
+            </div>
+          </section>
+          <footer class="dialog-actions">
+            <span id="mail-input-save-state" role="status"></span>
+            <button class="primary-button" type="submit">保存收件箱</button>
+          </footer>
+        </form>
       </section>
 
       <section class="tab-panel" data-settings-panel="reflection" hidden>

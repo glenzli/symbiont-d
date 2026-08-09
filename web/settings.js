@@ -21,6 +21,22 @@ export function initSettings(state) {
   const ambientChannelList = document.querySelector("#ambient-channel-list");
   const ambientChannelTemplate = document.querySelector("#ambient-channel-template");
   const addAmbientChannel = document.querySelector("#add-ambient-channel");
+  const mailInputForm = document.querySelector("#mail-input-form");
+  const mailInputName = document.querySelector("#mail-input-name");
+  const mailInputNameLabel = document.querySelector("#mail-input-name-label");
+  const mailInputHost = document.querySelector("#mail-input-host");
+  const mailInputPort = document.querySelector("#mail-input-port");
+  const mailInputUsername = document.querySelector("#mail-input-username");
+  const mailInputFolder = document.querySelector("#mail-input-folder");
+  const mailInputMaxMessages = document.querySelector("#mail-input-max-messages");
+  const mailInputCredentialStore = document.querySelector("#mail-input-credential-store");
+  const mailInputCredentialValue = document.querySelector("#mail-input-credential-value");
+  const mailInputAllowedSenders = document.querySelector("#mail-input-allowed-senders");
+  const mailInputEnabled = document.querySelector("#mail-input-enabled");
+  const mailInputAvailability = document.querySelector("#mail-input-availability");
+  const mailInputCredentialNote = document.querySelector("#mail-input-credential-note");
+  const mailInputRuntimeNote = document.querySelector("#mail-input-runtime-note");
+  const mailInputSaveState = document.querySelector("#mail-input-save-state");
   const computePolicyList = document.querySelector("#compute-policy-list");
   const computePolicyTemplate = document.querySelector(
     "#compute-policy-template",
@@ -113,10 +129,33 @@ export function initSettings(state) {
     );
   }
 
+  function renderMailInput() {
+    if (!state.mailInput) return;
+    const inbox = state.mailInput;
+    mailInputName.value = inbox.name || "Research Inbox";
+    mailInputNameLabel.textContent = inbox.name || "Research Inbox";
+    mailInputHost.value = inbox.host || "";
+    mailInputPort.value = String(inbox.port || 993);
+    mailInputUsername.value = inbox.username || "";
+    mailInputFolder.value = inbox.folder || "INBOX";
+    mailInputMaxMessages.value = String(inbox.maxMessages || 12);
+    mailInputCredentialStore.value = inbox.credentialStore || "config_file";
+    mailInputCredentialValue.value = "";
+    mailInputAllowedSenders.value = (inbox.allowedSenders || []).join("\n");
+    mailInputEnabled.checked = inbox.enabled === true;
+    mailInputAvailability.textContent = availabilityText(inbox.availability, inbox);
+    mailInputCredentialNote.textContent = credentialNote(inbox);
+    const received = inbox.lastReceivedAt
+      ? `上次接收 ${inbox.lastReceivedCount || 0} 封：${new Date(inbox.lastReceivedAt).toLocaleString()}`
+      : "尚未接收到新的白名单邮件。";
+    mailInputRuntimeNote.textContent = inbox.lastError ? `上次连接失败：${inbox.lastError}` : received;
+  }
+
   function availabilityText(availability, runtime = {}) {
     if (runtime.lastError) return `上次失败：${runtime.lastError}`;
     if (availability === "ready") return "就绪";
     if (availability === "disabled") return "已关闭";
+    if (availability === "incomplete") return "配置未完成";
     if (availability === "missing_credential") return "未配置密钥";
     if (availability === "credential_unavailable") return "密钥暂不可读取";
     if (availability === "unavailable") return "Codex 暂不可用";
@@ -335,6 +374,43 @@ export function initSettings(state) {
     }
   }
 
+  function mailInputFormValue() {
+    return {
+      enabled: mailInputEnabled.checked,
+      name: mailInputName.value.trim(),
+      host: mailInputHost.value.trim(),
+      port: Number(mailInputPort.value),
+      username: mailInputUsername.value.trim(),
+      folder: mailInputFolder.value.trim(),
+      credentialStore: mailInputCredentialStore.value,
+      credentialValue: mailInputCredentialValue.value || null,
+      allowedSenders: mailInputAllowedSenders.value
+        .split(/[\n,，]/)
+        .map((sender) => sender.trim())
+        .filter(Boolean),
+      maxMessages: Number(mailInputMaxMessages.value),
+    };
+  }
+
+  async function saveMailInput(event) {
+    event.preventDefault();
+    mailInputSaveState.textContent = "保存中";
+    try {
+      state.mailInput = await responseJson(
+        await fetch("/api/mail-input", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(mailInputFormValue()),
+        }),
+        "研究收件箱保存失败",
+      );
+      renderMailInput();
+      mailInputSaveState.textContent = "已保存";
+    } catch (error) {
+      mailInputSaveState.textContent = error.message;
+    }
+  }
+
   async function saveAutonomy(event) {
     event.preventDefault();
     autonomySaveState.textContent = "保存中";
@@ -406,6 +482,7 @@ export function initSettings(state) {
   function openSettings(tab = "exploration") {
     renderCompute();
     renderAmbient();
+    renderMailInput();
     renderAutonomy();
     renderBridge();
     computeSaveState.textContent = "";
@@ -423,6 +500,7 @@ export function initSettings(state) {
   });
   computeForm.addEventListener("submit", saveCompute);
   ambientForm.addEventListener("submit", saveAmbient);
+  mailInputForm.addEventListener("submit", saveMailInput);
   lunaEnabled.addEventListener("change", saveAmbient);
   addComputePolicy.addEventListener("click", () => appendComputePolicy({}, true));
   computePolicyList.addEventListener("click", (event) => {
@@ -488,6 +566,7 @@ export function initSettings(state) {
     render() {
       renderCompute();
       renderAmbient();
+      renderMailInput();
       renderAutonomy();
       renderBridge();
     },

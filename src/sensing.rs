@@ -44,6 +44,21 @@ impl InputRoleSnapshot {
             channel_id: Some(channel_id.to_owned()),
         }
     }
+
+    /// Presentation identity for a private inbox. The sender of each e-mail
+    /// remains in the candidate provenance; the inbox itself is only the
+    /// neutral transport role in the conversation timeline.
+    pub fn mailbox(name: &str) -> Self {
+        Self {
+            id: "mail_inbox".to_owned(),
+            name: name.to_owned(),
+            model: "IMAP".to_owned(),
+            effort: "input-only".to_owned(),
+            avatar_seed: "mail-inbox".to_owned(),
+            provider_id: Some("imap".to_owned()),
+            channel_id: Some("research-inbox".to_owned()),
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]

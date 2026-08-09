@@ -43,6 +43,7 @@ use crate::{
     diagnostics::TraceEventKind,
     exploration::{ExplorationHandle, ExplorationSnapshot, ManualExplorationRun, today_started_at},
     identity::{AvatarSlot, IdentitySnapshot, IdentityStore},
+    mail_input::{MailInputConfig, MailInputSnapshot, MailInputStore},
     memory::{
         MemoryEntry, MemoryRole, MessageDeliveryState, MessageMetadata, MessageQuote,
         MessageQuoteDraft, MessageRunMetadata,
@@ -110,6 +111,7 @@ pub struct AppState {
     codex: Arc<Mutex<CodexClient>>,
     compute: Arc<ComputeStore>,
     ambient: Arc<AmbientTopologyStore>,
+    mail_input: Arc<MailInputStore>,
     compute_policies: Arc<ComputePolicyStore>,
     usage: Arc<UsageStore>,
     rate_limits: Arc<RwLock<Option<RateLimitInfo>>>,
@@ -137,6 +139,7 @@ impl AppState {
         codex: Arc<Mutex<CodexClient>>,
         compute: Arc<ComputeStore>,
         ambient: Arc<AmbientTopologyStore>,
+        mail_input: Arc<MailInputStore>,
         compute_policies: Arc<ComputePolicyStore>,
         usage: Arc<UsageStore>,
         rate_limits: Arc<RwLock<Option<RateLimitInfo>>>,
@@ -165,6 +168,7 @@ impl AppState {
             codex,
             compute,
             ambient,
+            mail_input,
             compute_policies,
             usage,
             rate_limits,
@@ -224,6 +228,7 @@ struct BootstrapResponse {
     models: Vec<ModelInfo>,
     compute: ComputeConfig,
     ambient: AmbientSnapshot,
+    mail_input: MailInputSnapshot,
     compute_policies: Vec<ComputeTopicPolicy>,
     rate_limits: Option<RateLimitInfo>,
     usage: UsageHeadline,
@@ -250,6 +255,7 @@ struct RuntimeResponse {
     identity: IdentitySnapshot,
     usage: UsageHeadline,
     ambient: AmbientSnapshot,
+    mail_input: MailInputSnapshot,
     exploration: ExplorationSnapshot,
     reflection: ReflectionRuntime,
     reconciliation: ReconciliationRuntime,
@@ -544,6 +550,7 @@ pub fn router(state: AppState) -> Router {
         )
         .route("/api/compute", post(update_compute))
         .route("/api/ambient", post(update_ambient))
+        .route("/api/mail-input", post(update_mail_input))
         .route("/api/compute/policies", post(update_compute_policies))
         .route("/api/stats", get(stats))
         .route("/api/runtime", get(runtime))
@@ -820,6 +827,7 @@ async fn bootstrap(State(state): State<AppState>) -> Result<Json<BootstrapRespon
         models: state.compute.catalog().to_vec(),
         compute: state.compute.snapshot().await,
         ambient: state.ambient.snapshot().await,
+        mail_input: state.mail_input.snapshot().await,
         compute_policies: state.compute_policies.snapshot().await,
         rate_limits: state.rate_limits.read().await.clone(),
         usage,
@@ -1031,6 +1039,25 @@ async fn update_ambient(
     Ok(Json(snapshot))
 }
 
+async fn update_mail_input(
+    State(state): State<AppState>,
+    Json(config): Json<MailInputConfig>,
+) -> Result<Json<MailInputSnapshot>, ApiError> {
+    let snapshot = state
+        .mail_input
+        .update(config)
+        .await
+        .map_err(ApiError::bad_request)?;
+    if state.mail_input.has_configured_input().await || state.ambient.has_configured_input().await {
+        state
+            .exploration
+            .clear_stale_input_configuration_skips()
+            .await
+            .map_err(ApiError::internal)?;
+    }
+    Ok(Json(snapshot))
+}
+
 async fn update_compute_policies(
     State(state): State<AppState>,
     Json(policies): Json<Vec<ComputeTopicPolicyDraft>>,
@@ -1170,6 +1197,7 @@ async fn runtime(
         identity: state.identity.snapshot().await,
         usage,
         ambient: state.ambient.snapshot().await,
+        mail_input: state.mail_input.snapshot().await,
         exploration: state.exploration.snapshot().await,
         reflection: state.reflection.runtime().await,
         reconciliation: state.reconciliation.runtime().await,
