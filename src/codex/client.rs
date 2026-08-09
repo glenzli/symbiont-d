@@ -77,7 +77,11 @@ const REFLECTION_COMPLETE_MARKER: &str = "<symbiont-reflected/>";
 const RECONCILIATION_COMPLETE_MARKER: &str = "<symbiont-reconciled/>";
 const PCP_MAINTENANCE_COMPLETE_MARKER: &str = "<symbiont-pcp-maintained/>";
 const CONTINUATION_SILENT_MARKER: &str = "<symbiont-no-continuation/>";
-const APP_SERVER_START_TIMEOUT: Duration = Duration::from_secs(20);
+// Starting an app-server includes initializing account state and Symbiont's
+// isolated native threads. A cold desktop reconnect can take longer than a
+// plain process spawn; do not mistake that for a dead process.
+const APP_SERVER_START_TIMEOUT: Duration = Duration::from_secs(60);
+const APP_SERVER_START_ATTEMPTS: u8 = 2;
 const APP_SERVER_IDLE_TIMEOUT: Duration = Duration::from_secs(75);
 
 #[derive(Clone)]
@@ -315,6 +319,17 @@ pub struct CodexClient {
     compute_policies: Arc<crate::compute_policy::ComputePolicyStore>,
 }
 
+impl Drop for CodexClient {
+    fn drop(&mut self) {
+        // Tokio does not synchronously reap a Child on drop. Explicitly ask
+        // the app-server to exit whenever an incomplete startup client is
+        // discarded, so a retry cannot leave competing Codex processes behind.
+        if let Err(error) = self._child.start_kill() {
+            debug!(%error, "could not stop discarded Codex app-server");
+        }
+    }
+}
+
 impl CodexClient {
     pub async fn start(
         config: CodexConfig,
@@ -351,7 +366,7 @@ impl CodexClient {
         rate_limits: Arc<RwLock<Option<RateLimitInfo>>>,
     ) -> Result<Self> {
         let mut last_error = None;
-        for attempt in 1..=3 {
+        for attempt in 1..=APP_SERVER_START_ATTEMPTS {
             match timeout(
                 APP_SERVER_START_TIMEOUT,
                 Self::start_once(
@@ -2399,6 +2414,18 @@ fn is_app_server_transport_failure(error: &anyhow::Error) -> bool {
     ]
     .iter()
     .any(|needle| message.contains(needle))
+}
+
+pub(crate) fn is_recoverable_connection_error(error: &anyhow::Error) -> bool {
+    // The app server can surface its own live retry as an ordinary RPC error
+    // (for example, `Reconnecting... 2/5`). That is recoverable to callers,
+    // but it is not a broken transport: force-restarting it would cancel the
+    // recovery it is already performing.
+    is_app_server_transport_failure(error)
+        || error
+            .to_string()
+            .to_ascii_lowercase()
+            .contains("reconnecting")
 }
 
 fn granular_approval_policy() -> Value {

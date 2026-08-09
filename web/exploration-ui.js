@@ -346,6 +346,15 @@ function renderRun(run) {
   const identity = document.createElement("span");
   const outcome = document.createElement("strong");
   const time = document.createElement("time");
+  const sensingOutcome = () => {
+    if (!run.sensingCandidateCount) return "完成感知，没有形成候选";
+    if (!run.sensingReviewed) return "候选交接异常，未完成复核";
+    if (run.sensingInvestigateCount) return "完成感知，已升级深入复核";
+    if (run.sensingBroadcastCount) {
+      return `完成感知，已呈现 ${run.sensingBroadcastCount} 条广域输入`;
+    }
+    return "完成感知，已复核，暂不呈现";
+  };
   outcome.textContent =
     run.status !== "completed"
       ? sensingOnly
@@ -358,7 +367,7 @@ function renderRun(run) {
             ? "留了一条新消息"
             : "发起了一次介入"
         : sensingOnly
-          ? "完成感知，未进入深入复核"
+          ? sensingOutcome()
           : "完成，决定不打扰";
   time.dateTime = run.completedAt;
   time.textContent = new Date(run.completedAt).toLocaleString([], {
@@ -406,11 +415,17 @@ function renderRun(run) {
     silent.textContent = run.detailsRetained
       ? sensingOnly
         ? run.sensingCandidateCount
-          ? `形成了 ${run.sensingCandidateCount} 条临时候选，但本轮没有进入深入复核。`
-          : "完成了外部信息感知，但没有形成值得进入深入复核的候选。"
+          ? !run.sensingReviewed
+            ? `形成了 ${run.sensingCandidateCount} 条临时候选，但交接到复核阶段时发生异常；本轮没有将它们静默丢弃。`
+            : run.sensingBroadcastCount
+              ? `已将 ${run.sensingBroadcastCount} 条可信候选作为可回复的广域输入呈现；它们不会直接写入记忆。`
+              : run.sensingInvestigateCount
+                ? `其中 ${run.sensingInvestigateCount} 条候选已升级为深入复核。`
+                : `已复核 ${run.sensingCandidateCount} 条临时候选，本轮决定暂不呈现。`
+          : "完成了外部信息感知，但没有形成候选。"
         : "模型完成了检索和判断，但没有发现值得介入或留给你的新信号。"
       : sensingOnly
-        ? "本次感知没有进入深入复核；详细过程已过期。"
+        ? "本次感知的详细过程已过期。"
         : "本次没有发出消息；详细判断过程已过期。";
     article.append(silent);
   }

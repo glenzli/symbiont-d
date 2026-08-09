@@ -32,6 +32,7 @@ mod runtime_log;
 mod secrets;
 mod sensing;
 mod signals;
+mod startup;
 mod symbiont_context;
 mod topics;
 mod usage;
@@ -73,7 +74,10 @@ use reflection::{ReflectionHandle, ReflectionStore};
 use sensing::SensingStore;
 use signals::SignalStore;
 use symbiont_context::SymbiontContextStore;
-use tokio::{net::TcpListener, sync::Mutex};
+use tokio::{
+    sync::Mutex,
+    time::{Duration, sleep},
+};
 use tracing::info;
 use usage::UsageStore;
 use web::AppState;
@@ -211,21 +215,59 @@ async fn main() -> Result<()> {
         binary: env::var("CODEX_BIN").unwrap_or_else(|_| "codex".to_owned()),
         workspace: workspace.clone(),
     };
-    let codex = CodexClient::start(
-        codex_config.clone(),
-        Arc::clone(&continuity),
-        Arc::clone(&profile),
-        Arc::clone(&context),
-        Arc::clone(&curiosity),
-        Arc::clone(&reflection_store),
-        Arc::clone(&compute_policies),
-        Arc::clone(&permissions),
-        Arc::clone(&web_fetcher),
-        Arc::clone(&continuations),
-        Arc::clone(&exploration_intents),
-    )
-    .await
-    .context("start the Codex app-server session")?;
+    let bind: SocketAddr = env::var("SYMBIONT_BIND")
+        .unwrap_or_else(|_| DEFAULT_BIND.to_owned())
+        .parse()
+        .context("parse SYMBIONT_BIND")?;
+    let shell = startup::StartupShell::new();
+    let listener = startup::bind(bind)
+        .await
+        .with_context(|| format!("bind the local interface at {bind}"))?;
+    let server_shell = shell.clone();
+    let server = tokio::spawn(async move { startup::serve(listener, server_shell).await });
+    info!("symbiont-d is listening at http://{bind} (Codex may still be reconnecting)");
+
+    let mut retry = shell.retry_subscriber();
+    let codex = loop {
+        let startup = CodexClient::start(
+            codex_config.clone(),
+            Arc::clone(&continuity),
+            Arc::clone(&profile),
+            Arc::clone(&context),
+            Arc::clone(&curiosity),
+            Arc::clone(&reflection_store),
+            Arc::clone(&compute_policies),
+            Arc::clone(&permissions),
+            Arc::clone(&web_fetcher),
+            Arc::clone(&continuations),
+            Arc::clone(&exploration_intents),
+        );
+        match tokio::select! {
+            result = startup => result,
+            changed = retry.changed() => {
+                if changed.is_ok() {
+                    shell.set_status("正在立即重新连接 Codex…").await;
+                    continue;
+                }
+                Err(anyhow::anyhow!("Codex retry control closed"))
+            }
+        } {
+            Ok(client) => break client,
+            Err(error) => {
+                let message = format!("Codex 暂时不可用，正在后台重连：{error}");
+                tracing::warn!(target: runtime_log::TARGET, event = "codex_startup_degraded", %error, "serving startup shell while Codex reconnects");
+                shell.set_status(message).await;
+                tokio::select! {
+                    _ = sleep(Duration::from_secs(5)) => {}
+                    changed = retry.changed() => {
+                        if changed.is_ok() {
+                            shell.set_status("正在立即重新连接 Codex…").await;
+                        }
+                    }
+                }
+            }
+        }
+    };
 
     let compute = Arc::new(
         ComputeStore::open(
@@ -415,23 +457,15 @@ async fn main() -> Result<()> {
         permissions,
         continuations,
     );
-    let app = web::router(state);
-    let bind: SocketAddr = env::var("SYMBIONT_BIND")
-        .unwrap_or_else(|_| DEFAULT_BIND.to_owned())
-        .parse()
-        .context("parse SYMBIONT_BIND")?;
-    let listener = TcpListener::bind(bind)
-        .await
-        .with_context(|| format!("bind the local interface at {bind}"))?;
-
-    info!("symbiont-d is listening at http://{bind}");
+    shell.set_ready(state).await;
     tracing::info!(
         target: runtime_log::TARGET,
         event = "service_ready",
         bind = %bind,
         "symbiont-d is ready"
     );
-    axum::serve(listener, app).await.context("serve symbiont-d")
+    server.await.context("join startup shell")??;
+    Ok(())
 }
 
 fn resolve_memory_path(workspace: &Path) -> PathBuf {

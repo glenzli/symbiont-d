@@ -151,15 +151,7 @@ After private work and any tool calls, return exactly `{silent_marker}`.
 pub fn finding_from_invocations(
     invocations: &[InvocationRecord],
 ) -> Result<Option<ExplorationScoutFinding>> {
-    invocations
-        .iter()
-        .flat_map(|invocation| &invocation.trace_steps)
-        .rev()
-        .find(|step| {
-            step.succeeded
-                && step.namespace == "symbiont"
-                && step.tool == "submit_exploration_finding"
-        })
+    latest_succeeded_symbiont_step(invocations, "submit_exploration_finding")
         .map(|step| {
             serde_json::from_value(step.arguments.clone())
                 .context("parse autonomous reconnaissance finding")
@@ -170,15 +162,7 @@ pub fn finding_from_invocations(
 pub fn sensing_review_from_invocations(
     invocations: &[InvocationRecord],
 ) -> Result<Vec<SensingReviewDecision>> {
-    invocations
-        .iter()
-        .flat_map(|invocation| &invocation.trace_steps)
-        .rev()
-        .find(|step| {
-            step.succeeded
-                && step.namespace == "symbiont"
-                && step.tool == "review_sensing_candidates"
-        })
+    latest_succeeded_symbiont_step(invocations, "review_sensing_candidates")
         .map(|step| {
             step.arguments
                 .get("decisions")
@@ -195,24 +179,36 @@ pub fn sensing_review_from_invocations(
 pub fn sensing_candidates_from_invocations(
     invocations: &[InvocationRecord],
 ) -> Result<Vec<SensingCandidateDraft>> {
-    let candidates: Vec<SensingCandidateDraft> = invocations
-        .iter()
-        .flat_map(|invocation| &invocation.trace_steps)
-        .rev()
-        .find(|step| {
-            step.succeeded
-                && step.namespace == "symbiont"
-                && step.tool == "submit_sensing_candidates"
-        })
-        .map(|step| {
-            step.arguments
-                .get("candidates")
-                .cloned()
-                .context("sensing completion omitted candidates")
-                .and_then(|value| serde_json::from_value(value).context("parse sensing candidates"))
-        })
-        .transpose()?
-        .unwrap_or_default();
+    let candidates: Vec<SensingCandidateDraft> =
+        latest_succeeded_symbiont_step(invocations, "submit_sensing_candidates")
+            .map(|step| {
+                step.arguments
+                    .get("candidates")
+                    .cloned()
+                    .context("sensing completion omitted candidates")
+                    .and_then(|value| {
+                        serde_json::from_value(value).context("parse sensing candidates")
+                    })
+            })
+            .transpose()?
+            .unwrap_or_default();
     validate_candidate_drafts(&candidates)?;
     Ok(candidates)
+}
+
+/// Background runs can contain more than one invocation after a lane change.
+/// Search each invocation and its tool calls in completed order, rather than
+/// relying on a flattened iterator whose order is easy to accidentally change.
+fn latest_succeeded_symbiont_step<'a>(
+    invocations: &'a [InvocationRecord],
+    tool: &str,
+) -> Option<&'a crate::usage::ToolTraceStep> {
+    for invocation in invocations.iter().rev() {
+        for step in invocation.trace_steps.iter().rev() {
+            if step.succeeded && step.namespace == "symbiont" && step.tool == tool {
+                return Some(step);
+            }
+        }
+    }
+    None
 }

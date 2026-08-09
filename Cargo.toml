@@ -35,6 +35,7 @@ tokio = { version = "1.0", features = [
 ] }
 tokio-stream = "0.1"
 toml = "1.1"
+tower = "0.5"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 

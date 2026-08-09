@@ -12,6 +12,7 @@ mod tools;
 mod trace;
 
 pub use autonomous::SensingReviewDisposition;
+pub(crate) use client::is_recoverable_connection_error;
 pub use client::{
     ChatInput, ChatOutcome, CodexClient, CodexConfig, GeneratedImageOutput,
     PcpMaintenanceModelRequest, RateLimitInfo, ReconciliationModelRequest, RuntimeEvent,

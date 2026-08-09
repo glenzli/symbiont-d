@@ -26,6 +26,11 @@ pub struct ExplorationRunSummary {
     pub web_searches: u64,
     pub search_queries: Vec<String>,
     pub sensing_candidate_count: usize,
+    pub sensing_reviewed: bool,
+    pub sensing_broadcast_count: usize,
+    pub sensing_investigate_count: usize,
+    pub sensing_hold_count: usize,
+    pub sensing_discard_count: usize,
     pub pcp_recall_calls: u64,
     pub pcp_write_calls: u64,
     pub details_retained: bool,
@@ -104,6 +109,11 @@ fn summarize(bundle: TraceBundle) -> ExplorationRunSummary {
     let mut sensing_focus = None;
     let mut fetch_focus = None;
     let mut sensing_candidate_count = 0_usize;
+    let mut sensing_reviewed = false;
+    let mut sensing_broadcast_count = 0_usize;
+    let mut sensing_investigate_count = 0_usize;
+    let mut sensing_hold_count = 0_usize;
+    let mut sensing_discard_count = 0_usize;
 
     for run in &bundle.runs {
         for step in &run.steps {
@@ -149,6 +159,30 @@ fn summarize(bundle: TraceBundle) -> ExplorationRunSummary {
                             .filter(|detail| detail != &title),
                         title,
                     });
+                }
+            }
+            if step.succeeded
+                && step.namespace == "symbiont"
+                && step.tool == "review_sensing_candidates"
+            {
+                sensing_reviewed = true;
+                if let Some(decisions) = step
+                    .arguments
+                    .get("decisions")
+                    .and_then(serde_json::Value::as_array)
+                {
+                    for decision in decisions {
+                        match decision
+                            .get("disposition")
+                            .and_then(serde_json::Value::as_str)
+                        {
+                            Some("broadcast") => sensing_broadcast_count += 1,
+                            Some("investigate") => sensing_investigate_count += 1,
+                            Some("hold") => sensing_hold_count += 1,
+                            Some("discard") => sensing_discard_count += 1,
+                            _ => {}
+                        }
+                    }
                 }
             }
             if step.namespace == "symbiont" && step.tool == "fetch_url" {
@@ -263,6 +297,11 @@ fn summarize(bundle: TraceBundle) -> ExplorationRunSummary {
         web_searches,
         search_queries,
         sensing_candidate_count,
+        sensing_reviewed,
+        sensing_broadcast_count,
+        sensing_investigate_count,
+        sensing_hold_count,
+        sensing_discard_count,
         pcp_recall_calls: bundle.pcp_recall_calls,
         pcp_write_calls: bundle.pcp_write_calls,
         details_retained: bundle.details_retained,

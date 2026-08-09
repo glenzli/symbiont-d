@@ -549,6 +549,58 @@ async fn run_scheduler(
                         }
                     }
                     Err(error) => {
+                        if crate::codex::is_recoverable_connection_error(&error)
+                            && let Some(manual_trigger @ ExplorationTrigger::Manual { .. }) =
+                                trigger.clone()
+                        {
+                            let request_id = manual_trigger
+                                .manual_request()
+                                .map(|(request_id, _)| request_id)
+                                .expect("manual trigger has a request id");
+                            if let Err(persistence_error) = manual_runs
+                                .requeue(request_id, Some("codex_reconnecting"))
+                                .await
+                            {
+                                set_error(
+                                    &state,
+                                    &manual_runs,
+                                    trigger.as_ref(),
+                                    format!(
+                                        "{error}; could not preserve the exploration retry: {persistence_error}"
+                                    ),
+                                )
+                                .await;
+                                continue;
+                            }
+                            refresh_manual_projection(&state, &manual_runs).await;
+                            {
+                                let mut snapshot = state.write().await;
+                                snapshot.phase = ExplorationPhase::Waiting;
+                                snapshot.current_activity = None;
+                                snapshot.current_trigger = None;
+                                snapshot.last_error =
+                                    Some("Codex 正在重连；这次探索会自动重新开始。".to_owned());
+                            }
+                            tracing::warn!(
+                                target: crate::runtime_log::TARGET,
+                                event = "manual_exploration_requeued",
+                                request_id,
+                                error = %error,
+                                "manual exploration will retry after Codex reconnects"
+                            );
+                            pending_triggers.push_front(manual_trigger);
+                            let retry_delay = if error
+                                .to_string()
+                                .to_ascii_lowercase()
+                                .contains("reconnecting")
+                            {
+                                Duration::from_secs(10)
+                            } else {
+                                RETRY_DELAY
+                            };
+                            sleep(retry_delay).await;
+                            continue;
+                        }
                         if let Some(id) = intent_id {
                             let _ = intents
                                 .complete(
@@ -1970,6 +2022,12 @@ mod tests {
         assert!(manual.completed_at.is_some());
         let _ = std::fs::remove_file(path);
         let _ = std::fs::remove_file(attempt_path);
+    }
+
+    #[test]
+    fn reconnecting_app_server_errors_are_recoverable() {
+        let error = anyhow::anyhow!("Reconnecting... 2/5");
+        assert!(crate::codex::is_recoverable_connection_error(&error));
     }
 
     #[tokio::test]
