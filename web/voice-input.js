@@ -10,6 +10,8 @@ export function initVoiceInput({
   setPersistentStatus,
   resize,
 }) {
+  const AUTO_STOP_SILENCE_MS = 3_000;
+  const SPEECH_LEVEL_THRESHOLD = 0.085;
   let recorder = null;
   let stream = null;
   let chunks = [];
@@ -22,6 +24,8 @@ export function initVoiceInput({
   let recordingStartedAt = 0;
   let waveformSource = null;
   let lastWaveformSampleAt = 0;
+  let autoStopTimer = null;
+  let heardSpeech = false;
   const waveformRenderer = createWaveformRenderer(waveform);
 
   function configuration() {
@@ -91,6 +95,7 @@ export function initVoiceInput({
   }
 
   function stopRecording() {
+    clearAutoStop();
     if (recorder?.state === "recording") recorder.stop();
   }
 
@@ -182,6 +187,8 @@ export function initVoiceInput({
   function beginRecordingMeter(activeStream) {
     recordingStartedAt = Date.now();
     lastWaveformSampleAt = 0;
+    heardSpeech = false;
+    clearAutoStop();
     updateElapsed();
     elapsedTimer = window.setInterval(updateElapsed, 250);
     const AudioContext = window.AudioContext || window.webkitAudioContext;
@@ -210,6 +217,8 @@ export function initVoiceInput({
     waveformSource = null;
     if (audioContext) audioContext.close().catch(() => {});
     audioContext = null;
+    heardSpeech = false;
+    clearAutoStop();
   }
 
   function renderWaveform() {
@@ -222,7 +231,9 @@ export function initVoiceInput({
         const value = (sample - 128) / 128;
         return sum + value * value;
       }, 0) / samples.length;
-      waveformRenderer.push(Math.min(1, Math.sqrt(variance) * 5.5));
+      const level = Math.min(1, Math.sqrt(variance) * 5.5);
+      waveformRenderer.push(level);
+      observeSpeech(level);
       lastWaveformSampleAt = now;
     }
     waveformFrame = window.requestAnimationFrame(renderWaveform);
@@ -232,6 +243,22 @@ export function initVoiceInput({
     if (!elapsed) return;
     const seconds = Math.floor((Date.now() - recordingStartedAt) / 1000);
     elapsed.textContent = `${Math.floor(seconds / 60)}:${String(seconds % 60).padStart(2, "0")}`;
+  }
+
+  function observeSpeech(level) {
+    if (level < SPEECH_LEVEL_THRESHOLD) return;
+    heardSpeech = true;
+    clearAutoStop();
+    autoStopTimer = window.setTimeout(() => {
+      if (!heardSpeech || recorder?.state !== "recording") return;
+      setPersistentStatus?.("检测到停顿，正在结束录音");
+      stopRecording();
+    }, AUTO_STOP_SILENCE_MS);
+  }
+
+  function clearAutoStop() {
+    if (autoStopTimer !== null) window.clearTimeout(autoStopTimer);
+    autoStopTimer = null;
   }
 
 }
