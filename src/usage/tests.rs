@@ -598,6 +598,67 @@ async fn keeps_a_terminal_sensing_pass_in_recent_exploration_history() {
 }
 
 #[tokio::test]
+async fn mailbox_review_reports_the_external_input_instead_of_internal_reasoning() {
+    let nonce = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_nanos();
+    let path = std::env::temp_dir().join(format!("symbiont-mail-review-{nonce}.sqlite3"));
+    let store = UsageStore::open(path.clone()).await.unwrap();
+    let started = Utc::now();
+    let started_at = started.to_rfc3339_opts(SecondsFormat::Millis, true);
+    let completed_at =
+        (started + Duration::seconds(2)).to_rfc3339_opts(SecondsFormat::Millis, true);
+    store
+        .record_all(&[autonomous_invocation(
+            "mail-review",
+            None,
+            "ambient_review",
+            &started_at,
+            &completed_at,
+            40,
+            false,
+            vec![ToolTraceStep {
+                sequence: 0,
+                namespace: "symbiont".to_owned(),
+                tool: "review_sensing_candidates".to_owned(),
+                started_at: started_at.clone(),
+                completed_at: completed_at.clone(),
+                duration_ms: 2_000,
+                succeeded: true,
+                arguments: json!({
+                    "decisions": [{
+                        "candidate_id": "mail-1",
+                        "disposition": "input",
+                        "reason": "Interesting but attributed",
+                        "input_text": "A research digest reports a new solar observation."
+                    }]
+                }),
+                result: json!({"success": true}),
+            }],
+            vec![ExecutionTraceEvent {
+                sequence: 0,
+                kind: TraceEventKind::ReasoningSummary,
+                occurred_at: started_at.clone(),
+                title: "Model reasoning summary".to_owned(),
+                details: json!({"summary": ["Preparing tool call"]}),
+            }],
+        )])
+        .await
+        .unwrap();
+
+    let runs = store.recent_explorations(5).await.unwrap();
+    assert_eq!(runs[0].sensing_candidate_count, 1);
+    assert_eq!(runs[0].sensing_broadcast_count, 1);
+    assert_eq!(
+        runs[0].focus.as_ref().map(|focus| focus.title.as_str()),
+        Some("A research digest reports a new solar observation.")
+    );
+
+    std::fs::remove_file(path).unwrap();
+}
+
+#[tokio::test]
 async fn does_not_duplicate_legacy_sensing_before_a_full_exploration() {
     let nonce = SystemTime::now()
         .duration_since(UNIX_EPOCH)

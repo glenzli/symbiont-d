@@ -269,7 +269,7 @@ function renderCandidatePool(candidates) {
   const title = document.createElement("strong");
   title.textContent = `最近感知候选 · ${candidates.length} 条`;
   const note = document.createElement("span");
-  note.textContent = "临时信息，不写入记忆；下一次感知会替换";
+  note.textContent = "临时信息，不写入记忆；处理后移除，未处理项会自动过期";
   header.append(title, note);
   const list = document.createElement("ol");
   for (const candidate of candidates) {

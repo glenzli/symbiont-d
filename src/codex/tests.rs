@@ -210,9 +210,11 @@ fn ambient_review_is_bounded_to_candidate_dispositions() {
 
     let prompt = sensing_review_prompt(&[], "<silent/>").unwrap();
     assert!(prompt.contains("discard"));
-    assert!(prompt.contains("broadcast"));
+    assert!(prompt.contains("`input`"));
+    assert!(prompt.contains("`deep`"));
     assert!(prompt.contains("lower than the bar"));
-    assert!(prompt.contains("Never rewrite"));
+    assert!(prompt.contains("qualification, not verification"));
+    assert!(prompt.contains("Reserve `deep` for value"));
     assert!(prompt.contains("write PCP, Hunches, profile"));
     assert!(prompt.contains("You cannot browse"));
     assert!(prompt.contains("Weak or secondary sourcing alone"));
@@ -220,7 +222,7 @@ fn ambient_review_is_bounded_to_candidate_dispositions() {
     assert!(!prompt.contains("`hold`"));
     assert_eq!(
         schema["properties"]["decisions"]["items"]["properties"]["disposition"]["enum"],
-        json!(["discard", "broadcast", "investigate"])
+        json!(["discard", "input", "deep"])
     );
 }
 

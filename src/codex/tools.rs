@@ -559,7 +559,7 @@ impl SymbiontTools {
                     {
                         "type": "function",
                         "name": "review_sensing_candidates",
-                        "description": "During ambient sensing review only, assign one terminal disposition to each supplied transient candidate. This does not publish a message or write durable state.",
+                        "description": "During ambient sensing review only, route each supplied transient candidate to discard, attributed external input, or exceptional deep Symbiont investigation. This does not itself publish a message or write durable state.",
                         "inputSchema": {
                             "type": "object",
                             "properties": {
@@ -571,8 +571,13 @@ impl SymbiontTools {
                                         "type": "object",
                                         "properties": {
                                             "candidate_id": {"type": "string", "maxLength": 160},
-                                            "disposition": {"type": "string", "enum": ["discard", "broadcast", "investigate"]},
-                                            "reason": {"type": "string", "maxLength": 800}
+                                            "disposition": {"type": "string", "enum": ["discard", "input", "deep"]},
+                                            "reason": {"type": "string", "maxLength": 800},
+                                            "input_text": {
+                                                "type": "string",
+                                                "maxLength": 1800,
+                                                "description": "Optional safer attributed wording for an input-route candidate whose supplied prose overstates what its packet supports. Omit when proposed_input is already safe."
+                                            }
                                         },
                                         "required": ["candidate_id", "disposition", "reason"],
                                         "additionalProperties": false
@@ -1761,12 +1766,17 @@ impl SymbiontTools {
                     }
                     if !matches!(
                         required_text(decision, "disposition")?,
-                        "discard" | "broadcast" | "investigate"
+                        "discard" | "input" | "deep"
                     ) {
                         anyhow::bail!("ambient sensing review has an unknown disposition");
                     }
                     if required_text(decision, "reason")?.chars().count() > 800 {
                         anyhow::bail!("ambient sensing review reason exceeds 800 characters");
+                    }
+                    if optional_text(decision, "input_text")
+                        .is_some_and(|value| value.chars().count() > 1_800)
+                    {
+                        anyhow::bail!("ambient sensing review input_text exceeds 1800 characters");
                     }
                 }
                 Ok((

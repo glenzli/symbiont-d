@@ -47,6 +47,31 @@ export function manualRunLabel(run) {
   );
 }
 
+export function manualCompletionNotice(receipt) {
+  const notExecuted =
+    receipt?.outcome === "failed" ||
+    ["no_input_channel", "input_cooldown", "mailbox_empty", "channel_failed"].includes(
+      receipt?.outcome,
+    );
+  const message =
+    {
+      no_input_channel: "没有已配置的广域输入通道，因此没有开始实际探索。",
+      input_cooldown: "广域输入通道已启用，正在等待其下一次观察时间。",
+      mailbox_empty: "已查收私有研究收件箱，但没有新的白名单输入。",
+      channel_failed: "广域输入通道未能完成，本次没有产生可查看的探索内容。",
+      failed: "运行中出现异常，可以稍后重新探索。",
+      input_signals_broadcast:
+        "已带回新的广域输入，可以直接回复；它们仍保持外部输入身份。",
+    }[receipt?.outcome] ||
+    (receipt?.outcome?.startsWith("messaged")
+      ? "已带回一条值得讨论的情报。"
+      : "本次没有发现值得打扰你的新情报。");
+  return {
+    label: notExecuted ? "探索未实际执行" : "探索完成",
+    message,
+  };
+}
+
 function completionFrom(run) {
   return {
     id: run.id,

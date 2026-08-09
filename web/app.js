@@ -4,6 +4,7 @@ import { initReconciliationUi } from "/reconciliation-ui.js";
 import { formatDuration, formatMemorySize, formatTokens } from "/presentation.js";
 import { renderMessageContent, renderRichText } from "/rich-text.js";
 import { initExplorationUi } from "/exploration-ui.js";
+import { manualCompletionNotice } from "/exploration-receipt.js";
 import { initIdentityUi } from "/identity-ui.js";
 import { initComputeModeUi } from "/compute-mode-ui.js";
 import { initComposerContextUi } from "/composer-context-ui.js";
@@ -372,27 +373,11 @@ function appendManualExplorationReceipt(receipt) {
   notice.dataset.receiptId = receipt.id;
   notice.setAttribute("role", "status");
 
+  const completionNotice = manualCompletionNotice(receipt);
   const label = document.createElement("strong");
-  label.textContent =
-    receipt.outcome === "failed" ||
-    ["no_input_channel", "input_cooldown", "mailbox_empty", "channel_failed"].includes(receipt.outcome)
-      ? "探索未实际执行"
-      : "探索完成";
+  label.textContent = completionNotice.label;
   const message = document.createElement("span");
-  message.textContent =
-    receipt.outcome === "no_input_channel"
-      ? "没有已配置的广域输入通道，因此没有开始实际探索。"
-      : receipt.outcome === "input_cooldown"
-        ? "广域输入通道已启用，正在等待其下一次观察时间。"
-        : receipt.outcome === "mailbox_empty"
-          ? "已查收私有研究收件箱，但没有新的白名单输入。"
-      : receipt.outcome === "channel_failed"
-        ? "广域输入通道未能完成，本次没有产生可查看的探索内容。"
-      : receipt.outcome === "failed"
-      ? "运行中出现异常，可以稍后重新探索。"
-      : receipt.outcome.startsWith("messaged")
-        ? "已带回一条值得讨论的情报。"
-        : "本次没有发现值得打扰你的新情报。";
+  message.textContent = completionNotice.message;
   const time = document.createElement("time");
   time.dateTime = receipt.completedAt;
   time.textContent = new Date(receipt.completedAt).toLocaleTimeString([], {

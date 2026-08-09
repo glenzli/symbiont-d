@@ -28,8 +28,8 @@ pub struct ExplorationScoutFinding {
 #[serde(rename_all = "snake_case")]
 pub enum SensingReviewDisposition {
     Discard,
-    Broadcast,
-    Investigate,
+    Input,
+    Deep,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -37,6 +37,8 @@ pub struct SensingReviewDecision {
     pub candidate_id: String,
     pub disposition: SensingReviewDisposition,
     pub reason: String,
+    #[serde(default)]
+    pub input_text: Option<String>,
 }
 
 impl ExplorationScoutFinding {
@@ -75,29 +77,34 @@ pub fn sensing_review_prompt(
     Ok(format!(
         r#"Review the following short-lived external-signal candidates for symbiont-d. No user
 message is waiting. You are a gate, not a co-author: candidates come from input-only model roles
-and their wording must remain attributable to those roles if it is broadcast.
+and their wording must remain attributable to those roles if it enters the input stream.
 
-Evaluate every candidate independently and choose exactly one disposition. You cannot browse in this
+Evaluate every candidate independently and choose exactly one route. You cannot browse in this
 stage, so assess only the supplied packet and never pretend that you opened or verified its links:
 
 - `discard`: a clear duplicate, spam/noise, unsafe material, internal incoherence, or a claim contradicted by the supplied packet;
-- `broadcast`: an attributed, plausible, self-contained input that is independently interesting enough to enter the temporary input stream;
-- `investigate`: an independently interesting candidate whose consequential or specific claims need verification or materially safer reframing before use.
+- `input`: an attributed, independently interesting external input that should enter the temporary input stream without symbiont-d taking over its voice;
+- `deep`: an unusually consequential or generative candidate that merits expensive investigation and a separate decision about whether symbiont-d itself should speak.
 
-`broadcast` is not an autonomous symbiont-d interruption: it is a temporary, attributed input-role
+`input` is not an autonomous symbiont-d interruption: it is a temporary, attributed input-role
 message with a source trail and a reply affordance, not a symbiont-d endorsement or durable claim.
 Its admission bar is therefore lower than the bar for an assistant-authored note or intervention.
-Weak or secondary sourcing alone is not a reason to discard a plausible, interesting input: choose
-`broadcast` when its uncertainty is already framed honestly, or `investigate` when verification or
-rewriting is the only blocker. Do not infer that the user is unaware of an event.
+Weak or secondary sourcing alone is not a reason to discard a plausible, interesting input and is
+never by itself a reason to choose `deep`. When the supplied wording is already appropriately
+qualified, choose `input` and omit `input_text`. When it makes specific claims more confidently than
+the packet supports, still choose `input` if the subject is interesting, but provide a concise,
+self-contained `input_text` that attributes the claim to the external report and names the material
+uncertainty. This is qualification, not verification: do not add facts or say you checked a link.
+Reserve `deep` for value, not for ordinary source cleanup. Do not infer that the user is unaware of
+an event.
 
 Standalone science, mathematics, culture, public events, products, and unusual real-world phenomena
 may be worthwhile without a current-project connection or immediate decision. Relevance to the
 current project is not an admission requirement. A recent or still-developing discussion can be
 timely even when the original event was not today, provided the supplied packet names the accumulated
 evidence or reaction that makes it live now. Judge atomic candidates separately; weakness in a
-neighboring digest item must not poison another candidate. Never rewrite `proposed_input`; if its
-factual framing needs substantive changes, choose `investigate`. The candidate pool is not memory
+neighboring digest item must not poison another candidate. `input_text`, when used, must remain in
+the external input role rather than symbiont-d's voice. The candidate pool is not memory
 and this review must not write PCP, Hunches, profile, or other state.
 
 Call `symbiont.review_sensing_candidates` exactly once. After the tool call, return exactly

@@ -7,7 +7,6 @@ use reqwest::Url;
 use crate::sensing::{SensingCandidateDraft, SensingSource, SensingSourceClass};
 
 const MAX_DOCUMENT_CHARS: usize = 24_000;
-const MAX_CANDIDATES_PER_MESSAGE: usize = 3;
 const MAX_TITLE_CHARS: usize = 240;
 const MAX_SUMMARY_CHARS: usize = 1_000;
 const MAX_INPUT_CHARS: usize = 1_800;
@@ -44,7 +43,6 @@ impl MailDocument {
         let multiple_sections = sections.len() > 1;
         sections
             .into_iter()
-            .take(MAX_CANDIDATES_PER_MESSAGE)
             .map(|section| {
                 let section_title = section_title(&section);
                 let title = if multiple_sections {
@@ -69,9 +67,7 @@ impl MailDocument {
     }
 
     pub(super) fn candidate_count(&self) -> usize {
-        split_digest(&self.body)
-            .len()
-            .min(MAX_CANDIDATES_PER_MESSAGE)
+        split_digest(&self.body).len()
     }
 }
 
@@ -196,8 +192,39 @@ fn canonical_source_url(value: &str) -> Option<String> {
 
 fn classify_section(section: &str) -> SensingSourceClass {
     let normalized = section.to_ascii_lowercase();
+    let heading = section_title(section).to_ascii_lowercase();
+    if ["人工智能", "模型", "产品", "工具", "ai &", "deep learning"]
+        .iter()
+        .any(|term| heading.contains(term))
+    {
+        return SensingSourceClass::ProductsAndTools;
+    }
+    if ["开源", "agent", "生态", "github", "open source"]
+        .iter()
+        .any(|term| heading.contains(term))
+    {
+        return SensingSourceClass::ProjectsAndEcosystems;
+    }
+    if ["政策", "机构", "治理", "policy", "institution"]
+        .iter()
+        .any(|term| heading.contains(term))
+    {
+        return SensingSourceClass::InstitutionsAndPolicy;
+    }
+    if ["产业", "市场", "商业", "industry", "market"]
+        .iter()
+        .any(|term| heading.contains(term))
+    {
+        return SensingSourceClass::IndustryAndMarkets;
+    }
+    if ["文化", "书", "电影", "culture", "essay", "creative"]
+        .iter()
+        .any(|term| heading.contains(term))
+    {
+        return SensingSourceClass::CultureAndIdeas;
+    }
     if [
-        "研究", "物理", "天体", "科学", "论文", "research", "physics", "science",
+        "研究", "物理", "天体", "科学", "论文", "arxiv", "research", "physics", "science",
     ]
     .iter()
     .any(|term| normalized.contains(term))
@@ -262,6 +289,29 @@ mod tests {
         assert!(sections[0].starts_with("一、物理"));
         assert!(sections[1].starts_with("二、人工智能"));
         assert!(sections[2].starts_with("三、开源生态"));
+    }
+
+    #[test]
+    fn keeps_more_topics_than_one_review_batch_for_the_transient_queue() {
+        let document = MailDocument::new(
+            "spark@example.com".to_owned(),
+            "Daily digest".to_owned(),
+            "一、物理\n结果 A https://example.com/a\n二、人工智能\n结果 B https://example.com/b\n三、开源生态\n结果 C https://example.com/c\n四、论文\n结果 D https://example.com/d",
+            None,
+        )
+        .unwrap();
+
+        let candidates = document.into_candidates();
+        assert_eq!(candidates.len(), 4);
+        assert_eq!(
+            candidates[1].source_class,
+            SensingSourceClass::ProductsAndTools
+        );
+        assert_eq!(
+            candidates[2].source_class,
+            SensingSourceClass::ProjectsAndEcosystems
+        );
+        assert_eq!(candidates[3].source_class, SensingSourceClass::Research);
     }
 
     #[test]

@@ -1,6 +1,7 @@
 mod attempt_log;
 mod intent;
 mod manual_run;
+mod sensing_route;
 
 pub use attempt_log::{ExplorationAttemptStore, ExplorationSkippedAttempt};
 pub use intent::{
@@ -10,7 +11,7 @@ pub use intent::{
 pub use manual_run::{ManualExplorationRun, ManualExplorationStatus, ManualExplorationStore};
 
 use std::{
-    collections::{HashSet, VecDeque},
+    collections::VecDeque,
     sync::{
         Arc,
         atomic::{AtomicU64, Ordering},
@@ -30,7 +31,7 @@ use tokio::{
 use crate::{
     ambient_api::{AmbientInput, AmbientScout},
     autonomy::{AutonomyConfig, AutonomyStore, QuietHours},
-    codex::{CodexClient, RuntimeEvent, SensingReviewDisposition},
+    codex::{CodexClient, RuntimeEvent},
     compute::ComputeStore,
     continuity::{ContinuityHost, MessageLinks},
     conversation::ConversationCoordinator,
@@ -49,6 +50,8 @@ use crate::{
     symbiont_context::SymbiontContextStore,
     usage::{UsageHeadline, UsageStore},
 };
+
+use self::sensing_route::plan_sensing_routes;
 
 const POLICY_REFRESH: Duration = Duration::from_secs(30);
 const EXPLORATION_CHAT_TAIL: usize = 14;
@@ -855,6 +858,7 @@ async fn run_once(
     };
     let input_epoch = *input_events.borrow();
     let mut reviewed_candidates = Vec::new();
+    let mut deep_candidate_ids = Vec::new();
     let mut sensing_trace_id = None;
     let mailbox_configured = mail_input.has_configured_input().await;
     if scheduled || mailbox_configured {
@@ -1007,9 +1011,12 @@ async fn run_once(
                 // as consumed and clearing its evidence.
                 Ok(retained_retry_count)
             } else if batches.is_empty() {
-                sensing.clear().await.map(|_| 0)
+                // Unreviewed candidates form a bounded, expiring queue. An
+                // empty provider cycle must not erase the remainder of a
+                // multi-topic mailbox report after the IMAP cursor advanced.
+                sensing.count().await
             } else {
-                sensing.replace_many(batches).await
+                sensing.enqueue_many(batches).await
             };
             if let Err(error) = update {
                 stop_activity_relay(runtime_tx, activity_task).await?;
@@ -1142,29 +1149,24 @@ async fn run_once(
                 return Ok(ExplorationRunCompletion::superseded("newer_user_input"));
             }
 
-            let candidates_by_id = reviewed_candidates
-                .iter()
-                .map(|candidate| (candidate.id.as_str(), candidate))
-                .collect::<std::collections::HashMap<_, _>>();
-            let mut investigate_ids = HashSet::new();
+            let route_plan = plan_sensing_routes(&reviewed_candidates, review.decisions);
             let mut broadcast_count = 0usize;
-            for decision in review.decisions {
-                let Some(candidate) = candidates_by_id.get(decision.candidate_id.as_str()) else {
-                    continue;
-                };
-                match decision.disposition {
-                    SensingReviewDisposition::Broadcast => {
-                        if signals.publish(candidate, decision.reason).await?.is_some() {
-                            broadcast_count += 1;
-                        }
-                    }
-                    SensingReviewDisposition::Investigate => {
-                        investigate_ids.insert(decision.candidate_id);
-                    }
-                    SensingReviewDisposition::Discard => {}
+            for input in route_plan.inputs {
+                if signals
+                    .publish_with_content(&input.candidate, input.content, input.reason)
+                    .await?
+                    .is_some()
+                {
+                    broadcast_count += 1;
                 }
             }
-            if scheduled && investigate_ids.is_empty() {
+            sensing.remove(&route_plan.terminal_ids).await?;
+            reviewed_candidates = route_plan.deep_candidates;
+            deep_candidate_ids = reviewed_candidates
+                .iter()
+                .map(|candidate| candidate.id.clone())
+                .collect();
+            if reviewed_candidates.is_empty() && (scheduled || broadcast_count > 0) {
                 stop_activity_relay(runtime_tx, activity_task).await?;
                 settle_sensing_only(
                     &state,
@@ -1191,7 +1193,6 @@ async fn run_once(
                     completed: true,
                 });
             }
-            reviewed_candidates.retain(|candidate| investigate_ids.contains(&candidate.id));
         }
     }
     let recent_explorations = match usage.recent_explorations(EXPLORATION_JOURNAL_RUNS).await {
@@ -1373,6 +1374,9 @@ async fn run_once(
     } else {
         ExplorationIntentStatus::Silent
     };
+    if !superseded {
+        sensing.remove(&deep_candidate_ids).await?;
+    }
     let outcome_label = match status {
         ExplorationIntentStatus::Messaged => outcome
             .outreach

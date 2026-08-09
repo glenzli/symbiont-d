@@ -171,13 +171,28 @@ fn summarize(bundle: TraceBundle) -> ExplorationRunSummary {
                     .get("decisions")
                     .and_then(serde_json::Value::as_array)
                 {
+                    // Mailbox candidates are created by the host rather than
+                    // `submit_sensing_candidates`, so the review packet is
+                    // their first invocation-level trace. Count it here to
+                    // keep the exploration funnel observable for every input
+                    // provider.
+                    sensing_candidate_count = sensing_candidate_count.max(decisions.len());
+                    if sensing_focus.is_none()
+                        && let Some(decision) = decisions.first()
+                        && let Some(title) = compact_argument(decision, "input_text", 180)
+                    {
+                        sensing_focus = Some(ExplorationFocusSummary {
+                            detail: compact_argument(decision, "reason", 360),
+                            title,
+                        });
+                    }
                     for decision in decisions {
                         match decision
                             .get("disposition")
                             .and_then(serde_json::Value::as_str)
                         {
-                            Some("broadcast") => sensing_broadcast_count += 1,
-                            Some("investigate") => sensing_investigate_count += 1,
+                            Some("input" | "broadcast") => sensing_broadcast_count += 1,
+                            Some("deep" | "investigate") => sensing_investigate_count += 1,
                             Some("hold") => sensing_hold_count += 1,
                             Some("discard") => sensing_discard_count += 1,
                             _ => {}

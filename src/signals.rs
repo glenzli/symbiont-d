@@ -78,9 +78,10 @@ impl SignalStore {
         Ok(store)
     }
 
-    pub async fn publish(
+    pub async fn publish_with_content(
         &self,
         candidate: &SensingCandidate,
+        content: String,
         review_reason: String,
     ) -> Result<Option<SignalEvent>> {
         let now = Utc::now();
@@ -109,7 +110,7 @@ impl SignalStore {
             candidate_id: candidate.id.clone(),
             fingerprint: candidate.fingerprint.clone(),
             actor: candidate.actor.clone(),
-            content: candidate.proposed_input.clone(),
+            content: content.trim().to_owned(),
             title: candidate.title.clone(),
             summary: candidate.summary.clone(),
             sources: candidate.sources.clone(),
@@ -295,18 +296,52 @@ mod tests {
         let store = SignalStore::open(path.clone()).await.unwrap();
 
         let first = store
-            .publish(&candidate("sense_1"), "credible".to_owned())
+            .publish_with_content(
+                &candidate("sense_1"),
+                "A model input.".to_owned(),
+                "credible".to_owned(),
+            )
             .await
             .unwrap()
             .unwrap();
         let duplicate = store
-            .publish(&candidate("sense_1"), "again".to_owned())
+            .publish_with_content(
+                &candidate("sense_1"),
+                "A model input.".to_owned(),
+                "again".to_owned(),
+            )
             .await
             .unwrap()
             .unwrap();
 
         assert_eq!(first.id, duplicate.id);
         assert_eq!(store.visible(10).await.unwrap().len(), 1);
+        let _ = tokio::fs::remove_file(path).await;
+    }
+
+    #[tokio::test]
+    async fn review_can_qualify_external_wording_without_changing_its_role() {
+        let nonce = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let path = std::env::temp_dir().join(format!("symbiont-signals-safe-{nonce}.json"));
+        let store = SignalStore::open(path.clone()).await.unwrap();
+        let candidate = candidate("sense_safe");
+
+        let published = store
+            .publish_with_content(
+                &candidate,
+                "The external report describes this claim; it remains unverified here.".to_owned(),
+                "Interesting input with qualified certainty.".to_owned(),
+            )
+            .await
+            .unwrap()
+            .unwrap();
+
+        assert_eq!(published.actor.id, candidate.actor.id);
+        assert!(published.content.contains("remains unverified"));
+        assert!(!published.content.contains("A model input"));
         let _ = tokio::fs::remove_file(path).await;
     }
 
@@ -338,7 +373,7 @@ mod tests {
 
         assert!(
             store
-                .publish(&old, "credible".to_owned())
+                .publish_with_content(&old, old.proposed_input.clone(), "credible".to_owned())
                 .await
                 .unwrap()
                 .is_none()
@@ -356,14 +391,22 @@ mod tests {
         let path = std::env::temp_dir().join(format!("symbiont-signals-fingerprint-{nonce}.json"));
         let store = SignalStore::open(path.clone()).await.unwrap();
         let first = store
-            .publish(&candidate("sense_first"), "credible".to_owned())
+            .publish_with_content(
+                &candidate("sense_first"),
+                "A model input.".to_owned(),
+                "credible".to_owned(),
+            )
             .await
             .unwrap()
             .unwrap();
         let mut repeated = candidate("sense_second");
         repeated.fingerprint = first.fingerprint.clone();
         let again = store
-            .publish(&repeated, "credible again".to_owned())
+            .publish_with_content(
+                &repeated,
+                repeated.proposed_input.clone(),
+                "credible again".to_owned(),
+            )
             .await
             .unwrap()
             .unwrap();

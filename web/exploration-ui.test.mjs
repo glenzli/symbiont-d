@@ -2,11 +2,22 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import {
+  manualCompletionNotice,
   manualCompletionSince,
   manualRunLabel,
   manualRunPending,
   unpresentedManualCompletions,
 } from "./exploration-receipt.js";
+
+test("describes external inputs without presenting them as Symbiont output", () => {
+  assert.deepEqual(
+    manualCompletionNotice({ outcome: "input_signals_broadcast" }),
+    {
+      label: "探索完成",
+      message: "已带回新的广域输入，可以直接回复；它们仍保持外部输入身份。",
+    },
+  );
+});
 
 test("returns a receipt only for a newer completed manual exploration", () => {
   const completion = manualCompletionSince(

@@ -6,6 +6,7 @@ use serde::{Deserialize, Serialize};
 use tokio::{fs, sync::RwLock};
 
 const CANDIDATE_TTL_HOURS: i64 = 24;
+const MAX_PENDING_CANDIDATES: usize = 24;
 pub const REVIEW_BATCH_SIZE: usize = 3;
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -249,31 +250,33 @@ impl SensingStore {
         Ok(store)
     }
 
-    /// Replaces the short-lived intake pool after a new sensing pass.
-    ///
-    /// Candidates are deliberately not durable memory. A fresh pass supersedes
-    /// the prior pool, even when its earlier candidates were not promoted.
+    /// Adds a test batch to the short-lived intake queue.
     #[cfg(test)]
     pub async fn replace(
         &self,
         drafts: Vec<SensingCandidateDraft>,
         actor: InputRoleSnapshot,
     ) -> Result<usize> {
-        self.replace_many(vec![(drafts, actor)]).await
+        self.enqueue_many(vec![(drafts, actor)]).await
     }
 
-    /// Replaces the transient pool with the results from every input role
-    /// selected in one exploration cycle.
-    pub async fn replace_many(
+    /// Appends the results from every input role selected in one exploration
+    /// cycle. Reviewed candidates are removed separately, so a multi-topic
+    /// report can drain across several bounded review cycles without becoming
+    /// durable memory or being lost when its mailbox cursor advances.
+    pub async fn enqueue_many(
         &self,
         batches: Vec<(Vec<SensingCandidateDraft>, InputRoleSnapshot)>,
     ) -> Result<usize> {
         let now = Utc::now();
         let mut pool = self.pool.write().await;
-        pool.candidates.clear();
+        prune_expired(&mut pool, now);
         let mut appended = 0;
         for (drafts, actor) in batches {
-            for draft in drafts.into_iter().take(REVIEW_BATCH_SIZE) {
+            for draft in drafts {
+                if pool.candidates.len() >= MAX_PENDING_CANDIDATES {
+                    break;
+                }
                 let fingerprint = candidate_fingerprint(&draft);
                 if pool
                     .candidates
@@ -311,10 +314,16 @@ impl SensingStore {
         Ok(appended)
     }
 
-    /// An unavailable intake provider must not leave yesterday's unreviewed
-    /// candidates looking like a fresh signal on the next scheduled cycle.
-    pub async fn clear(&self) -> Result<()> {
-        self.pool.write().await.candidates.clear();
+    /// Removes candidates after the stronger review produced a terminal
+    /// route. Missing decisions remain queued for a later bounded retry.
+    pub async fn remove(&self, ids: &[String]) -> Result<()> {
+        if ids.is_empty() {
+            return Ok(());
+        }
+        let mut pool = self.pool.write().await;
+        pool.candidates
+            .retain(|candidate| !ids.iter().any(|id| id == &candidate.id));
+        drop(pool);
         self.persist().await
     }
 
@@ -488,7 +497,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn a_new_sensing_pass_replaces_the_temporary_candidate_pool() {
+    async fn unreviewed_candidates_remain_queued_across_intake_passes() {
         let nonce = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .unwrap()
@@ -517,9 +526,12 @@ mod tests {
             1
         );
         let batch = store.review_batch(3).await.unwrap();
-        assert_eq!(batch.len(), 1);
-        assert_eq!(batch[0].title, "New signal");
+        assert_eq!(batch.len(), 2);
+        assert_eq!(batch[0].title, "Old signal");
+        assert_eq!(batch[1].title, "New signal");
+        store.remove(&[batch[0].id.clone()]).await.unwrap();
         assert_eq!(store.count().await.unwrap(), 1);
+        assert_eq!(store.review_batch(3).await.unwrap()[0].title, "New signal");
         std::fs::remove_file(path).unwrap();
     }
 

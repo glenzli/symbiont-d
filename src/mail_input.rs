@@ -44,8 +44,9 @@ const MAX_SEEN_MESSAGE_IDS: usize = 400;
 const MAX_SEEN_REMOTE_IDS: usize = 2_000;
 const MAX_MAIL_BODY_CHARS: usize = 24_000;
 const MAX_POLL_MESSAGES: usize = 24;
+const MAX_POLL_CANDIDATES: usize = 12;
 const POLL_TIMEOUT: Duration = Duration::from_secs(25);
-const NORMALIZATION_VERSION: u32 = 3;
+const NORMALIZATION_VERSION: u32 = 4;
 const IMAP_CLIENT_IDENTITY: [(&str, Option<&str>); 3] = [
     ("name", Some("symbiont-d")),
     ("version", Some(env!("CARGO_PKG_VERSION"))),
@@ -353,7 +354,7 @@ impl MailInputStore {
                 .into_iter()
                 .map(|message| message.document.candidate_count())
                 .sum::<usize>()
-                .min(3),
+                .min(MAX_POLL_CANDIDATES),
         })
     }
 
@@ -505,12 +506,12 @@ fn select_new_messages(
             MAX_SEEN_MESSAGE_IDS,
         );
         if !sender_allowed(&message.document.sender, &config.allowed_senders)
-            || candidates.len() >= 3
+            || candidates.len() >= MAX_POLL_CANDIDATES
         {
             continue;
         }
         for candidate in message.document.into_candidates() {
-            if candidates.len() >= 3 {
+            if candidates.len() >= MAX_POLL_CANDIDATES {
                 break;
             }
             candidates.push(candidate);
