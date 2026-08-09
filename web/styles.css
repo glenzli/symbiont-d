@@ -2066,6 +2066,38 @@ html[data-native-shell="macos"] .topbar {
   background: rgb(0 0 0 / 28%);
 }
 
+#settings-dialog[open] {
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+
+#settings-dialog > .dialog-header,
+#settings-dialog > .dialog-tabs,
+#settings-dialog > .settings-dialog-actions {
+  flex: 0 0 auto;
+}
+
+#settings-dialog > .tab-panel {
+  min-height: 0;
+  overflow-y: auto;
+  flex: 1 1 auto;
+}
+
+#settings-dialog > .tab-panel .dialog-actions {
+  display: none;
+}
+
+#settings-dialog > .tab-panel .mail-input-actions {
+  display: flex;
+  padding-block: 10px;
+  border-top: 1px solid var(--border);
+}
+
+.settings-dialog-actions {
+  border-top: 1px solid var(--border);
+}
+
 .trace-dialog {
   width: min(920px, calc(100vw - 32px));
 }

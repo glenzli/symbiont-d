@@ -752,13 +752,18 @@ async fn run_once(
         matches!(&trigger, Some(ExplorationTrigger::DeferredFollowUp));
     let scheduled = trigger.is_none();
     let started_at = timestamp(Utc::now());
+    let mut manual_retry_started_at = None;
     if let Some((request_id, _)) = trigger
         .as_ref()
         .and_then(ExplorationTrigger::manual_request)
     {
-        manual_runs
+        let run = manual_runs
             .mark_exploring(request_id, started_at.clone())
             .await?;
+        manual_retry_started_at = run
+            .filter(|run| run.attempts > 1)
+            .and_then(|run| DateTime::parse_from_rfc3339(&run.requested_at).ok())
+            .map(|requested_at| requested_at.with_timezone(&Utc));
         refresh_manual_projection(&state, &manual_runs).await;
     }
     {
@@ -851,24 +856,32 @@ async fn run_once(
     let input_epoch = *input_events.borrow();
     let mut reviewed_candidates = Vec::new();
     let mut sensing_trace_id = None;
-    if scheduled {
-        let intake_brief = match sensing.next_intake_brief().await {
-            Ok(brief) => brief,
-            Err(error) => {
-                stop_activity_relay(runtime_tx, activity_task).await?;
-                return Err(error);
-            }
+    let mailbox_configured = mail_input.has_configured_input().await;
+    if scheduled || mailbox_configured {
+        let sensing_context = if scheduled {
+            let intake_brief = match sensing.next_intake_brief().await {
+                Ok(brief) => brief,
+                Err(error) => {
+                    stop_activity_relay(runtime_tx, activity_task).await?;
+                    return Err(error);
+                }
+            };
+            ambient_sensing_context(&recent_messages, &intake_brief)
+        } else {
+            String::new()
         };
-        let sensing_context = ambient_sensing_context(&recent_messages, &intake_brief);
         let has_configured_input =
             ambient_scout.has_configured_input().await || mail_input.has_configured_input().await;
-        let mailbox_configured = mail_input.has_configured_input().await;
         let mailbox = Arc::clone(&mail_input);
         let mailbox_input_events = input_events.clone();
         let mailbox_task = tokio::spawn(async move { mailbox.poll(mailbox_input_events).await });
-        let selected_inputs = ambient_scout
-            .select_inputs(autonomy_config.max_input_parallelism as usize)
-            .await;
+        let selected_inputs = if scheduled {
+            ambient_scout
+                .select_inputs(autonomy_config.max_input_parallelism as usize)
+                .await
+        } else {
+            Vec::new()
+        };
         let mut luna_config = None;
         let mut external_tasks = JoinSet::new();
         for input in selected_inputs {
@@ -956,14 +969,44 @@ async fn run_once(
                     .iter()
                     .any(|outcome| outcome.channel_failure.is_some()));
         if !interrupted {
-            let mut batches: Vec<_> = sensing_outcomes
-                .into_iter()
-                .filter_map(|outcome| outcome.actor.map(|actor| (outcome.candidates, actor)))
-                .collect();
-            if let Some(actor) = mailbox_outcome.actor {
-                batches.push((mailbox_outcome.candidates, actor));
-            }
-            let update = if batches.is_empty() {
+            // A newly delivered private research report is already an
+            // intentional input from a user-configured source. Give its
+            // independently normalized topics the current three-candidate
+            // review window; otherwise model channels could fill that window
+            // first and the mailbox cursor would make the skipped report look
+            // consumed forever. When the inbox is empty, use the ordinary
+            // multi-provider sensing results as before.
+            let batches = if !mailbox_outcome.candidates.is_empty() {
+                mailbox_outcome
+                    .actor
+                    .map(|actor| vec![(mailbox_outcome.candidates, actor)])
+                    .unwrap_or_default()
+            } else {
+                sensing_outcomes
+                    .into_iter()
+                    .filter_map(|outcome| outcome.actor.map(|actor| (outcome.candidates, actor)))
+                    .collect::<Vec<_>>()
+            };
+            let retained_retry_count = if let Some(requested_at) = manual_retry_started_at {
+                sensing
+                    .candidates()
+                    .await?
+                    .iter()
+                    .filter(|candidate| {
+                        observation_is_current(&candidate.observed_at, requested_at)
+                    })
+                    .count()
+            } else {
+                0
+            };
+            let update = if batches.is_empty() && retained_retry_count > 0 {
+                // A recoverable Codex reconnect happens after intake has
+                // already advanced the mailbox cursor. Keep the transient
+                // candidates created by this same manual request so the next
+                // attempt can resume review instead of treating the message
+                // as consumed and clearing its evidence.
+                Ok(retained_retry_count)
+            } else if batches.is_empty() {
                 sensing.clear().await.map(|_| 0)
             } else {
                 sensing.replace_many(batches).await
@@ -1003,7 +1046,7 @@ async fn run_once(
                 return Err(error);
             }
         };
-        if reviewed_candidates.is_empty() {
+        if scheduled && reviewed_candidates.is_empty() {
             stop_activity_relay(runtime_tx, activity_task).await?;
             let outcome = if channel_failed {
                 "channel_failed"
@@ -1044,110 +1087,112 @@ async fn run_once(
             });
         }
 
-        let Ok(mut client) = codex.try_lock() else {
-            stop_activity_relay(runtime_tx, activity_task).await?;
-            settle_sensing_only(
-                &state,
-                &manual_runs,
-                &attempts,
-                trigger.as_ref(),
-                ExplorationIntentStatus::Superseded,
-                "superseded",
-                pending_candidate_count,
-                Some("codex_busy"),
-                false,
-            )
-            .await?;
-            return Ok(ExplorationRunCompletion::superseded("codex_busy"));
-        };
-        let review = client
-            .review_sensing(
-                &reviewed_candidates,
-                &compute,
-                &profile,
-                input_events.clone(),
-                runtime_tx.clone(),
-            )
-            .await;
-        drop(client);
-        let review = match review {
-            Ok(outcome) => outcome,
-            Err(error) => {
+        if !reviewed_candidates.is_empty() {
+            let Ok(mut client) = codex.try_lock() else {
+                stop_activity_relay(runtime_tx, activity_task).await?;
+                settle_sensing_only(
+                    &state,
+                    &manual_runs,
+                    &attempts,
+                    trigger.as_ref(),
+                    ExplorationIntentStatus::Superseded,
+                    "superseded",
+                    pending_candidate_count,
+                    Some("codex_busy"),
+                    false,
+                )
+                .await?;
+                return Ok(ExplorationRunCompletion::superseded("codex_busy"));
+            };
+            let review = client
+                .review_sensing(
+                    &reviewed_candidates,
+                    &compute,
+                    &profile,
+                    input_events.clone(),
+                    runtime_tx.clone(),
+                )
+                .await;
+            drop(client);
+            let review = match review {
+                Ok(outcome) => outcome,
+                Err(error) => {
+                    stop_activity_relay(runtime_tx, activity_task).await?;
+                    return Err(error);
+                }
+            };
+            if let Err(error) = usage.record_all(&review.invocations).await {
                 stop_activity_relay(runtime_tx, activity_task).await?;
                 return Err(error);
             }
-        };
-        if let Err(error) = usage.record_all(&review.invocations).await {
-            stop_activity_relay(runtime_tx, activity_task).await?;
-            return Err(error);
-        }
-        if review.interrupted {
-            stop_activity_relay(runtime_tx, activity_task).await?;
-            settle_sensing_only(
-                &state,
-                &manual_runs,
-                &attempts,
-                trigger.as_ref(),
-                ExplorationIntentStatus::Superseded,
-                "superseded",
-                pending_candidate_count,
-                Some("newer_user_input"),
-                false,
-            )
-            .await?;
-            return Ok(ExplorationRunCompletion::superseded("newer_user_input"));
-        }
-
-        let candidates_by_id = reviewed_candidates
-            .iter()
-            .map(|candidate| (candidate.id.as_str(), candidate))
-            .collect::<std::collections::HashMap<_, _>>();
-        let mut investigate_ids = HashSet::new();
-        let mut broadcast_count = 0usize;
-        for decision in review.decisions {
-            let Some(candidate) = candidates_by_id.get(decision.candidate_id.as_str()) else {
-                continue;
-            };
-            match decision.disposition {
-                SensingReviewDisposition::Broadcast => {
-                    if signals.publish(candidate, decision.reason).await?.is_some() {
-                        broadcast_count += 1;
-                    }
-                }
-                SensingReviewDisposition::Investigate => {
-                    investigate_ids.insert(decision.candidate_id);
-                }
-                SensingReviewDisposition::Discard | SensingReviewDisposition::Hold => {}
+            if review.interrupted {
+                stop_activity_relay(runtime_tx, activity_task).await?;
+                settle_sensing_only(
+                    &state,
+                    &manual_runs,
+                    &attempts,
+                    trigger.as_ref(),
+                    ExplorationIntentStatus::Superseded,
+                    "superseded",
+                    pending_candidate_count,
+                    Some("newer_user_input"),
+                    false,
+                )
+                .await?;
+                return Ok(ExplorationRunCompletion::superseded("newer_user_input"));
             }
+
+            let candidates_by_id = reviewed_candidates
+                .iter()
+                .map(|candidate| (candidate.id.as_str(), candidate))
+                .collect::<std::collections::HashMap<_, _>>();
+            let mut investigate_ids = HashSet::new();
+            let mut broadcast_count = 0usize;
+            for decision in review.decisions {
+                let Some(candidate) = candidates_by_id.get(decision.candidate_id.as_str()) else {
+                    continue;
+                };
+                match decision.disposition {
+                    SensingReviewDisposition::Broadcast => {
+                        if signals.publish(candidate, decision.reason).await?.is_some() {
+                            broadcast_count += 1;
+                        }
+                    }
+                    SensingReviewDisposition::Investigate => {
+                        investigate_ids.insert(decision.candidate_id);
+                    }
+                    SensingReviewDisposition::Discard => {}
+                }
+            }
+            if scheduled && investigate_ids.is_empty() {
+                stop_activity_relay(runtime_tx, activity_task).await?;
+                settle_sensing_only(
+                    &state,
+                    &manual_runs,
+                    &attempts,
+                    trigger.as_ref(),
+                    ExplorationIntentStatus::Silent,
+                    if broadcast_count > 0 {
+                        "input_signals_broadcast"
+                    } else {
+                        "reviewed_silent"
+                    },
+                    pending_candidate_count,
+                    None,
+                    true,
+                )
+                .await?;
+                return Ok(ExplorationRunCompletion {
+                    status: ExplorationIntentStatus::Silent,
+                    trace_id: sensing_trace_id,
+                    result_revision_id: None,
+                    retry_reason: None,
+                    attempted_at: Utc::now(),
+                    completed: true,
+                });
+            }
+            reviewed_candidates.retain(|candidate| investigate_ids.contains(&candidate.id));
         }
-        if investigate_ids.is_empty() {
-            stop_activity_relay(runtime_tx, activity_task).await?;
-            settle_sensing_only(
-                &state,
-                &manual_runs,
-                &attempts,
-                trigger.as_ref(),
-                ExplorationIntentStatus::Silent,
-                if broadcast_count > 0 {
-                    "input_signals_broadcast"
-                } else {
-                    "reviewed_silent"
-                },
-                pending_candidate_count,
-                None,
-                true,
-            )
-            .await?;
-            return Ok(ExplorationRunCompletion {
-                status: ExplorationIntentStatus::Silent,
-                trace_id: sensing_trace_id,
-                result_revision_id: None,
-                retry_reason: None,
-                attempted_at: Utc::now(),
-                completed: true,
-            });
-        }
-        reviewed_candidates.retain(|candidate| investigate_ids.contains(&candidate.id));
     }
     let recent_explorations = match usage.recent_explorations(EXPLORATION_JOURNAL_RUNS).await {
         Ok(runs) => runs,
@@ -1841,6 +1886,12 @@ fn timestamp(value: DateTime<Utc>) -> String {
     value.to_rfc3339_opts(chrono::SecondsFormat::Millis, true)
 }
 
+fn observation_is_current(observed_at: &str, requested_at: DateTime<Utc>) -> bool {
+    DateTime::parse_from_rfc3339(observed_at)
+        .map(|observed_at| observed_at.with_timezone(&Utc) >= requested_at)
+        .unwrap_or(false)
+}
+
 #[cfg(test)]
 mod tests {
     use std::time::{SystemTime, UNIX_EPOCH};
@@ -1852,7 +1903,8 @@ mod tests {
         ExplorationIntentStatus, ExplorationPhase, ExplorationSnapshot, ExplorationTrigger, Gate,
         ManualExplorationStatus, ManualExplorationStore, ambient_sensing_context,
         bounded_message_excerpt, conversation_edge, evaluate_gate, exploration_working_context,
-        quiet_end, refresh_manual_projection, set_error, settle_sensing_only, today_started_at,
+        observation_is_current, quiet_end, refresh_manual_projection, set_error,
+        settle_sensing_only, today_started_at,
     };
     use crate::{
         autonomy::{AutonomyConfig, QuietHours},
@@ -1864,6 +1916,20 @@ mod tests {
     #[test]
     fn daily_boundary_is_an_rfc3339_timestamp() {
         assert!(DateTime::parse_from_rfc3339(&today_started_at()).is_ok());
+    }
+
+    #[test]
+    fn retry_only_retains_candidates_created_for_the_same_manual_request() {
+        let requested_at = Utc.with_ymd_and_hms(2026, 8, 9, 18, 11, 53).unwrap();
+        assert!(observation_is_current(
+            "2026-08-09T18:11:55.120Z",
+            requested_at
+        ));
+        assert!(!observation_is_current(
+            "2026-08-09T17:41:28.215Z",
+            requested_at
+        ));
+        assert!(!observation_is_current("not-a-time", requested_at));
     }
 
     #[test]

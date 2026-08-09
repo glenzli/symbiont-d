@@ -28,7 +28,6 @@ pub struct ExplorationScoutFinding {
 #[serde(rename_all = "snake_case")]
 pub enum SensingReviewDisposition {
     Discard,
-    Hold,
     Broadcast,
     Investigate,
 }
@@ -78,24 +77,28 @@ pub fn sensing_review_prompt(
 message is waiting. You are a gate, not a co-author: candidates come from input-only model roles
 and their wording must remain attributable to those roles if it is broadcast.
 
-For every candidate, independently inspect its source support and choose exactly one disposition:
+Evaluate every candidate independently and choose exactly one disposition. You cannot browse in this
+stage, so assess only the supplied packet and never pretend that you opened or verified its links:
 
-- `discard`: duplicate, unsupported, unsafe, or strong noise;
-- `hold`: the source is credible but materially incomplete or ambiguous;
-- `broadcast`: a credible, fresh, self-contained input worth placing in the temporary input stream;
-- `investigate`: needs directed work because it may justify a separate symbiont-d discussion, note, or intervention.
+- `discard`: a clear duplicate, spam/noise, unsafe material, internal incoherence, or a claim contradicted by the supplied packet;
+- `broadcast`: an attributed, plausible, self-contained input that is independently interesting enough to enter the temporary input stream;
+- `investigate`: an independently interesting candidate whose consequential or specific claims need verification or materially safer reframing before use.
 
 `broadcast` is not an autonomous symbiont-d interruption: it is a temporary, attributed input-role
-message with a clear source and a reply affordance. Therefore, when a candidate is credible, fresh,
-self-contained, and genuinely interesting, prefer `broadcast` even without a current-project
-connection or an immediate decision. Do not infer that the user is unaware of an event. Reserve
-`hold` for real evidentiary ambiguity and `investigate` for candidates that warrant a separate
-assistant-led move; do not send ordinary broad inputs through that higher bar. An old release,
-publication, or incident is not fresh just because it was rediscovered: broadcast it only when the
-supplied evidence itself describes a newer concrete development or accumulated reaction; otherwise
-discard or investigate it. Never rewrite `proposed_input`; if its factual framing needs substantive
-changes, choose `investigate` or reject it. The candidate pool is not memory and this review must not
-write PCP, Hunches, profile, or other state.
+message with a source trail and a reply affordance, not a symbiont-d endorsement or durable claim.
+Its admission bar is therefore lower than the bar for an assistant-authored note or intervention.
+Weak or secondary sourcing alone is not a reason to discard a plausible, interesting input: choose
+`broadcast` when its uncertainty is already framed honestly, or `investigate` when verification or
+rewriting is the only blocker. Do not infer that the user is unaware of an event.
+
+Standalone science, mathematics, culture, public events, products, and unusual real-world phenomena
+may be worthwhile without a current-project connection or immediate decision. Relevance to the
+current project is not an admission requirement. A recent or still-developing discussion can be
+timely even when the original event was not today, provided the supplied packet names the accumulated
+evidence or reaction that makes it live now. Judge atomic candidates separately; weakness in a
+neighboring digest item must not poison another candidate. Never rewrite `proposed_input`; if its
+factual framing needs substantive changes, choose `investigate`. The candidate pool is not memory
+and this review must not write PCP, Hunches, profile, or other state.
 
 Call `symbiont.review_sensing_candidates` exactly once. After the tool call, return exactly
 `{silent_marker}`.
@@ -110,7 +113,7 @@ pub fn luna_sensing_prompt(focus: &str, sensing_context: &str, silent_marker: &s
     format!(
         r#"Privately run one low-cost, input-only wide-observation pass for symbiont-d. No user message is waiting. You are Luna, an independent intake role rather than the conversational assistant. Search broadly within the supplied remit; a development may be worth noticing because evidence, adoption, reaction, or a concrete tension has accumulated, even when it is not new today.
 
-Do not write PCP memory, alter any symbiont state, infer user preferences, plan work, or draft a reply. You may use live web search for grounded evidence. If and only if you have one to three compact candidates with concrete sources, call `symbiont.submit_sensing_candidates` exactly once. The proposed_input must be a self-contained, natural two-to-four sentence observation in Luna's own voice; it remains private intake for a stronger review stage. It is valid to submit nothing.
+Do not write PCP memory, alter any symbiont state, infer user preferences, plan work, or draft a reply. You may use live web search for grounded evidence. Standalone science, mathematics, culture, public events, products, and unusual real-world phenomena are valid candidates without a project connection. Do not spend this pass proving user relevance. When search yields at least one credible concrete development or an older event with genuinely accumulated recent evidence or reaction, default to submitting it for independent review rather than silently filtering it yourself. Submit nothing only when search or tooling produced no defensible signal. Call `symbiont.submit_sensing_candidates` at most once with one to three compact candidates and concrete sources. The proposed_input must be a self-contained, natural two-to-four sentence observation in Luna's own voice; it remains private intake for a stronger review stage.
 
 After the optional tool call, return exactly `{silent_marker}`.
 

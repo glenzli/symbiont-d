@@ -211,9 +211,17 @@ fn ambient_review_is_bounded_to_candidate_dispositions() {
     let prompt = sensing_review_prompt(&[], "<silent/>").unwrap();
     assert!(prompt.contains("discard"));
     assert!(prompt.contains("broadcast"));
-    assert!(prompt.contains("prefer `broadcast`"));
+    assert!(prompt.contains("lower than the bar"));
     assert!(prompt.contains("Never rewrite"));
     assert!(prompt.contains("write PCP, Hunches, profile"));
+    assert!(prompt.contains("You cannot browse"));
+    assert!(prompt.contains("Weak or secondary sourcing alone"));
+    assert!(prompt.contains("Standalone science, mathematics, culture"));
+    assert!(!prompt.contains("`hold`"));
+    assert_eq!(
+        schema["properties"]["decisions"]["items"]["properties"]["disposition"]["enum"],
+        json!(["discard", "broadcast", "investigate"])
+    );
 }
 
 #[test]

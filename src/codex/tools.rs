@@ -571,7 +571,7 @@ impl SymbiontTools {
                                         "type": "object",
                                         "properties": {
                                             "candidate_id": {"type": "string", "maxLength": 160},
-                                            "disposition": {"type": "string", "enum": ["discard", "hold", "broadcast", "investigate"]},
+                                            "disposition": {"type": "string", "enum": ["discard", "broadcast", "investigate"]},
                                             "reason": {"type": "string", "maxLength": 800}
                                         },
                                         "required": ["candidate_id", "disposition", "reason"],
@@ -1761,7 +1761,7 @@ impl SymbiontTools {
                     }
                     if !matches!(
                         required_text(decision, "disposition")?,
-                        "discard" | "hold" | "broadcast" | "investigate"
+                        "discard" | "broadcast" | "investigate"
                     ) {
                         anyhow::bail!("ambient sensing review has an unknown disposition");
                     }

@@ -4,34 +4,53 @@
 //! policy. It deliberately emits only short-lived sensing candidates: e-mail
 //! is an external input surface, never a memory-writing surface.
 
-use std::{collections::VecDeque, io::ErrorKind, path::PathBuf, time::Duration};
+mod normalization;
+
+use std::{
+    collections::{HashSet, VecDeque},
+    io::ErrorKind,
+    path::PathBuf,
+    sync::Arc,
+    time::Duration,
+};
 
 use anyhow::{Context, Result};
+use async_imap::{Client as ImapClient, Session as ImapSession};
 use chrono::{DateTime, SecondsFormat, Utc};
-use imap_rs::{
-    client::{SearchKey, SearchQuery},
-    connect_tls,
-    credentials::Password,
-};
+use futures::StreamExt;
 use mail_parser::MessageParser;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use tokio::{
     fs,
-    sync::{RwLock, watch},
+    net::TcpStream,
+    sync::{Mutex, RwLock, oneshot, watch},
     time::timeout,
 };
+use tokio_rustls::{
+    TlsConnector,
+    client::TlsStream,
+    rustls::{ClientConfig, RootCertStore, pki_types::ServerName},
+};
 
+use self::normalization::MailDocument;
 use crate::{
     secrets::{CredentialStatus, CredentialStore, SecretStore},
-    sensing::{InputRoleSnapshot, SensingCandidateDraft, SensingSource, SensingSourceClass},
+    sensing::{InputRoleSnapshot, SensingCandidateDraft},
 };
 
 const INBOX_SECRET_ID: &str = "research-inbox";
 const MAX_SEEN_MESSAGE_IDS: usize = 400;
-const MAX_BODY_CHARS: usize = 1_800;
+const MAX_SEEN_REMOTE_IDS: usize = 2_000;
+const MAX_MAIL_BODY_CHARS: usize = 24_000;
 const MAX_POLL_MESSAGES: usize = 24;
 const POLL_TIMEOUT: Duration = Duration::from_secs(25);
+const NORMALIZATION_VERSION: u32 = 3;
+const IMAP_CLIENT_IDENTITY: [(&str, Option<&str>); 3] = [
+    ("name", Some("symbiont-d")),
+    ("version", Some(env!("CARGO_PKG_VERSION"))),
+    ("vendor", Some("symbiont-d")),
+];
 
 /// The one private mailbox that accepts reports from any number of outside
 /// services. Its sender allow-list is mandatory when enabled so an arbitrary
@@ -95,7 +114,11 @@ fn default_max_messages() -> usize {
 #[serde(rename_all = "camelCase")]
 struct MailInputRuntime {
     #[serde(default)]
+    normalization_version: u32,
+    #[serde(default)]
     seen_message_ids: VecDeque<String>,
+    #[serde(default)]
+    seen_remote_ids: VecDeque<String>,
     last_started_at: Option<String>,
     last_succeeded_at: Option<String>,
     last_failed_at: Option<String>,
@@ -103,6 +126,20 @@ struct MailInputRuntime {
     last_received_at: Option<String>,
     #[serde(default)]
     last_received_count: usize,
+    #[serde(default)]
+    last_message_count: u32,
+    #[serde(default)]
+    last_searchable_message_count: usize,
+    #[serde(default)]
+    last_selected_message_count: usize,
+    #[serde(default)]
+    last_fetched_message_count: usize,
+    #[serde(default)]
+    last_body_message_count: usize,
+    #[serde(default)]
+    last_parsed_message_count: usize,
+    #[serde(default)]
+    last_allowed_message_count: usize,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -120,6 +157,31 @@ pub struct MailInputSnapshot {
     pub last_error: Option<String>,
     pub last_received_at: Option<String>,
     pub last_received_count: usize,
+    pub last_message_count: u32,
+    pub last_searchable_message_count: usize,
+    pub last_selected_message_count: usize,
+    pub last_fetched_message_count: usize,
+    pub last_body_message_count: usize,
+    pub last_parsed_message_count: usize,
+    pub last_allowed_message_count: usize,
+}
+
+/// Result of an end-to-end, read-only mailbox health check. It exercises the
+/// same search, fetch and MIME parsing path as background intake, but does not
+/// persist a cursor, create candidates, or alter remote message flags.
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MailInputConnectionTest {
+    pub checked_at: String,
+    pub folder: String,
+    pub message_count: u32,
+    pub searchable_message_count: usize,
+    pub selected_message_count: usize,
+    pub fetched_message_count: usize,
+    pub body_message_count: usize,
+    pub parsed_message_count: usize,
+    pub allowed_message_count: usize,
+    pub candidate_count: usize,
 }
 
 pub struct MailInputOutcome {
@@ -135,6 +197,7 @@ pub struct MailInputStore {
     config: RwLock<MailInputConfig>,
     runtime: RwLock<MailInputRuntime>,
     credentials: SecretStore,
+    test_cancellation: Mutex<Option<oneshot::Sender<()>>>,
 }
 
 impl MailInputStore {
@@ -156,7 +219,18 @@ impl MailInputStore {
         };
         let runtime_path = config_path.with_extension("runtime.json");
         let credential_path = config_path.with_file_name("mail-input-secrets.toml");
-        let runtime = read_runtime(&runtime_path).await?;
+        let mut runtime = read_runtime(&runtime_path).await?;
+        if migrate_runtime(&mut runtime) {
+            // The previous whole-message representation could permanently
+            // consume a mixed digest after one weak item poisoned review.
+            // Replay the bounded mailbox window once under the atomic-topic
+            // normalizer instead of silently losing those independent inputs.
+            persist_runtime(&runtime_path, &runtime).await?;
+            tracing::info!(
+                version = NORMALIZATION_VERSION,
+                "mail input cursor reset for candidate normalization upgrade"
+            );
+        }
         persist_config(&config_path, &config).await?;
         Ok(Self {
             config_path,
@@ -164,6 +238,7 @@ impl MailInputStore {
             config: RwLock::new(config),
             runtime: RwLock::new(runtime),
             credentials: SecretStore::open(credential_path).await?,
+            test_cancellation: Mutex::new(None),
         })
     }
 
@@ -186,6 +261,13 @@ impl MailInputStore {
             last_error: runtime.last_error,
             last_received_at: runtime.last_received_at,
             last_received_count: runtime.last_received_count,
+            last_message_count: runtime.last_message_count,
+            last_searchable_message_count: runtime.last_searchable_message_count,
+            last_selected_message_count: runtime.last_selected_message_count,
+            last_fetched_message_count: runtime.last_fetched_message_count,
+            last_body_message_count: runtime.last_body_message_count,
+            last_parsed_message_count: runtime.last_parsed_message_count,
+            last_allowed_message_count: runtime.last_allowed_message_count,
         }
     }
 
@@ -212,6 +294,79 @@ impl MailInputStore {
                 == CredentialStatus::Configured
     }
 
+    /// Verifies an in-memory mailbox form snapshot through the full intake
+    /// read path.
+    ///
+    /// This intentionally stays separate from [`Self::poll`]: a settings
+    /// check may fetch bodies with `BODY.PEEK`, but never alters the cursor,
+    /// creates candidates, changes remote flags, or spends an exploration run.
+    pub async fn test_connection(
+        &self,
+        mut config: MailInputConfig,
+    ) -> Result<MailInputConnectionTest> {
+        validate_connection_config(&config)?;
+        let secret = match config.credential_value.take() {
+            Some(secret) if !secret.trim().is_empty() => secret,
+            _ => self
+                .credentials
+                .read(INBOX_SECRET_ID, config.credential_store)
+                .await?
+                .context("research inbox credential is not configured")?,
+        };
+        let (cancellation_tx, mut cancellation_rx) = oneshot::channel();
+        {
+            let mut active_test = self.test_cancellation.lock().await;
+            if active_test.is_some() {
+                anyhow::bail!("research inbox connection test is already running");
+            }
+            *active_test = Some(cancellation_tx);
+        }
+        let no_seen_remote_ids = HashSet::new();
+        let result = tokio::select! {
+            result = timeout(POLL_TIMEOUT, read_mailbox(&config, secret, &no_seen_remote_ids)) => {
+                match result {
+                    Ok(result) => result,
+                    Err(error) => Err(anyhow::Error::new(error)
+                        .context("test research inbox connection timed out")),
+                }
+            }
+            _ = &mut cancellation_rx => Err(anyhow::anyhow!("research inbox connection test cancelled")),
+        };
+        *self.test_cancellation.lock().await = None;
+        let mailbox = result?;
+        let allowed_messages = mailbox
+            .messages
+            .iter()
+            .filter(|message| sender_allowed(&message.document.sender, &config.allowed_senders))
+            .collect::<Vec<_>>();
+        Ok(MailInputConnectionTest {
+            checked_at: timestamp(Utc::now()),
+            folder: config.folder.trim().to_owned(),
+            message_count: mailbox.message_count,
+            searchable_message_count: mailbox.searchable_message_count,
+            selected_message_count: mailbox.selected_message_count,
+            fetched_message_count: mailbox.fetched_message_count,
+            body_message_count: mailbox.body_message_count,
+            parsed_message_count: mailbox.parsed_message_count,
+            allowed_message_count: allowed_messages.len(),
+            candidate_count: allowed_messages
+                .into_iter()
+                .map(|message| message.document.candidate_count())
+                .sum::<usize>()
+                .min(3),
+        })
+    }
+
+    /// Stops the currently running settings-only connection test, if any.
+    /// It never affects the normal background mailbox poll.
+    pub async fn cancel_connection_test(&self) -> bool {
+        self.test_cancellation
+            .lock()
+            .await
+            .take()
+            .is_some_and(|sender| sender.send(()).is_ok())
+    }
+
     /// Polls the selected mailbox without changing any message flags or
     /// mailbox state. New user input cancels the network operation promptly.
     pub async fn poll(&self, mut input_events: watch::Receiver<u64>) -> Result<MailInputOutcome> {
@@ -229,8 +384,16 @@ impl MailInputStore {
         };
         self.update_runtime(|runtime| runtime.last_started_at = Some(timestamp(Utc::now())))
             .await?;
+        let seen_remote_ids = self
+            .runtime
+            .read()
+            .await
+            .seen_remote_ids
+            .iter()
+            .cloned()
+            .collect::<HashSet<_>>();
         let result = tokio::select! {
-            result = timeout(POLL_TIMEOUT, poll_mailbox(&config, secret)) => match result {
+            result = timeout(POLL_TIMEOUT, read_mailbox(&config, secret, &seen_remote_ids)) => match result {
                 Ok(result) => result,
                 Err(error) => Err(anyhow::Error::new(error).context("poll research inbox timed out")),
             },
@@ -240,12 +403,26 @@ impl MailInputStore {
             }
         };
         match result {
-            Ok(messages) => {
-                let candidates = self.accept_new_messages(&config, messages).await?;
+            Ok(mailbox) => {
+                let allowed_message_count = mailbox
+                    .messages
+                    .iter()
+                    .filter(|message| {
+                        sender_allowed(&message.document.sender, &config.allowed_senders)
+                    })
+                    .count();
+                let candidates = self.accept_new_messages(&config, mailbox.messages).await?;
                 self.update_runtime(|runtime| {
                     runtime.last_succeeded_at = Some(timestamp(Utc::now()));
                     runtime.last_error = None;
                     runtime.last_received_count = candidates.len();
+                    runtime.last_message_count = mailbox.message_count;
+                    runtime.last_searchable_message_count = mailbox.searchable_message_count;
+                    runtime.last_selected_message_count = mailbox.selected_message_count;
+                    runtime.last_fetched_message_count = mailbox.fetched_message_count;
+                    runtime.last_body_message_count = mailbox.body_message_count;
+                    runtime.last_parsed_message_count = mailbox.parsed_message_count;
+                    runtime.last_allowed_message_count = allowed_message_count;
                     if !candidates.is_empty() {
                         runtime.last_received_at = Some(timestamp(Utc::now()));
                     }
@@ -280,21 +457,7 @@ impl MailInputStore {
         messages: Vec<RawMail>,
     ) -> Result<Vec<SensingCandidateDraft>> {
         let mut runtime = self.runtime.write().await;
-        let mut candidates = Vec::new();
-        for message in messages {
-            if runtime
-                .seen_message_ids
-                .iter()
-                .any(|seen| seen == &message.id)
-            {
-                continue;
-            }
-            remember(&mut runtime.seen_message_ids, message.id.clone());
-            if !sender_allowed(&message.sender, &config.allowed_senders) || candidates.len() >= 3 {
-                continue;
-            }
-            candidates.push(message.into_candidate());
-        }
+        let candidates = select_new_messages(&mut runtime, config, messages);
         let snapshot = runtime.clone();
         drop(runtime);
         persist_runtime(&self.runtime_path, &snapshot).await?;
@@ -310,6 +473,52 @@ impl MailInputStore {
     }
 }
 
+fn select_new_messages(
+    runtime: &mut MailInputRuntime,
+    config: &MailInputConfig,
+    messages: Vec<RawMail>,
+) -> Vec<SensingCandidateDraft> {
+    let mut candidates = Vec::new();
+    for message in messages {
+        if runtime
+            .seen_remote_ids
+            .iter()
+            .any(|seen| seen == &message.remote_id)
+        {
+            continue;
+        }
+        remember_with_limit(
+            &mut runtime.seen_remote_ids,
+            message.remote_id.clone(),
+            MAX_SEEN_REMOTE_IDS,
+        );
+        if runtime
+            .seen_message_ids
+            .iter()
+            .any(|seen| seen == &message.id)
+        {
+            continue;
+        }
+        remember_with_limit(
+            &mut runtime.seen_message_ids,
+            message.id.clone(),
+            MAX_SEEN_MESSAGE_IDS,
+        );
+        if !sender_allowed(&message.document.sender, &config.allowed_senders)
+            || candidates.len() >= 3
+        {
+            continue;
+        }
+        for candidate in message.document.into_candidates() {
+            if candidates.len() >= 3 {
+                break;
+            }
+            candidates.push(candidate);
+        }
+    }
+    candidates
+}
+
 fn empty_outcome() -> MailInputOutcome {
     MailInputOutcome {
         candidates: Vec::new(),
@@ -321,72 +530,164 @@ fn empty_outcome() -> MailInputOutcome {
 
 #[derive(Debug)]
 struct RawMail {
+    remote_id: String,
     id: String,
-    sender: String,
-    subject: String,
-    body: String,
-    event_at: Option<String>,
+    document: MailDocument,
 }
 
-impl RawMail {
-    fn into_candidate(self) -> SensingCandidateDraft {
-        let sources = extract_sources(&self.body, &self.sender, &self.subject);
-        SensingCandidateDraft {
-            title: self.subject.clone(),
-            summary: compact_text(&self.body, 1_000),
-            proposed_input: compact_text(&self.body, MAX_BODY_CHARS),
-            event_at: self.event_at,
-            source_class: SensingSourceClass::OpenDiscovery,
-            possible_connection: Some(format!("Private research inbox · {}", self.sender)),
-            sources,
-        }
-    }
+struct MailboxRead {
+    message_count: u32,
+    searchable_message_count: usize,
+    selected_message_count: usize,
+    fetched_message_count: usize,
+    body_message_count: usize,
+    parsed_message_count: usize,
+    messages: Vec<RawMail>,
 }
 
-async fn poll_mailbox(config: &MailInputConfig, secret: String) -> Result<Vec<RawMail>> {
-    let session = connect_tls(config.host.trim(), config.port)
-        .await
-        .context("connect to IMAP over TLS")?;
-    let auth = session
-        .login(config.username.trim(), Password::new(secret))
-        .await
-        .context("authenticate IMAP account")?;
-    let mut inbox = auth
+async fn read_mailbox(
+    config: &MailInputConfig,
+    secret: String,
+    seen_remote_ids: &HashSet<String>,
+) -> Result<MailboxRead> {
+    let mut inbox = connect_mailbox(config, &secret).await?;
+    let mailbox = inbox
         .examine(config.folder.trim())
         .await
-        .context("open IMAP folder read-only")?;
-    let mut sequences = inbox
-        .search(SearchQuery::new(SearchKey::All))
+        .map_err(|error| anyhow::anyhow!("open IMAP folder read-only: {error:?}"))?;
+    let mut uids = inbox
+        .uid_search("ALL")
         .await
-        .context("list IMAP messages")?;
-    sequences.sort_unstable();
+        .context("list IMAP message UIDs")?
+        .drain()
+        .collect::<Vec<_>>();
+    uids.sort_unstable();
+    let searchable_message_count = uids.len();
+    let uid_validity = mailbox.uid_validity.unwrap_or_default();
     let limit = config.max_messages.clamp(1, MAX_POLL_MESSAGES);
-    let sequences = sequences.into_iter().rev().take(limit).collect::<Vec<_>>();
-    if sequences.is_empty() {
+    let uids = uids
+        .into_iter()
+        .rev()
+        .filter(|uid| !seen_remote_ids.contains(&remote_message_id(config, uid_validity, *uid)))
+        .take(limit)
+        .collect::<Vec<_>>();
+    let selected_message_count = uids.len();
+    if uids.is_empty() {
         let _ = inbox.logout().await;
-        return Ok(Vec::new());
+        return Ok(MailboxRead {
+            message_count: mailbox.exists,
+            searchable_message_count,
+            selected_message_count,
+            fetched_message_count: 0,
+            body_message_count: 0,
+            parsed_message_count: 0,
+            messages: Vec::new(),
+        });
     }
-    let sequence_set = sequences
+    let uid_set = uids
         .iter()
         .rev()
         .map(u32::to_string)
         .collect::<Vec<_>>()
         .join(",");
-    let fetched = inbox
-        .fetch(&sequence_set, "UID BODY.PEEK[]")
-        .await
-        .context("fetch IMAP messages without marking read")?;
+    let (mut messages, fetched_message_count, body_message_count) = {
+        let mut fetched = inbox
+            .uid_fetch(&uid_set, "(UID BODY.PEEK[])")
+            .await
+            .context("fetch IMAP messages without marking read")?;
+        let mut messages = Vec::new();
+        let mut fetched_message_count = 0;
+        let mut body_message_count = 0;
+        while let Some(message) = fetched.next().await {
+            let message = message.context("read IMAP message")?;
+            fetched_message_count += 1;
+            let Some(body) = message
+                .body()
+                .map(<[u8]>::to_vec)
+                .or_else(|| assemble_message(message.header(), message.text()))
+            else {
+                continue;
+            };
+            body_message_count += 1;
+            let Some(uid) = message.uid else {
+                continue;
+            };
+            if let Some(mail) = parse_message(body, remote_message_id(config, uid_validity, uid)) {
+                messages.push((uid, mail));
+            }
+        }
+        (messages, fetched_message_count, body_message_count)
+    };
     let _ = inbox.logout().await;
-    let mut messages = fetched
+    messages.sort_unstable_by_key(|(uid, _)| std::cmp::Reverse(*uid));
+    let messages = messages
         .into_iter()
-        .filter_map(|message| message.body)
-        .filter_map(parse_message)
+        .map(|(_, message)| message)
         .collect::<Vec<_>>();
-    messages.reverse();
-    Ok(messages)
+    let parsed_message_count = messages.len();
+    Ok(MailboxRead {
+        message_count: mailbox.exists,
+        searchable_message_count,
+        selected_message_count,
+        fetched_message_count,
+        body_message_count,
+        parsed_message_count,
+        messages,
+    })
 }
 
-fn parse_message(raw: Vec<u8>) -> Option<RawMail> {
+fn assemble_message(header: Option<&[u8]>, text: Option<&[u8]>) -> Option<Vec<u8>> {
+    let mut raw = header?.to_vec();
+    if !raw.ends_with(b"\r\n\r\n") {
+        if !raw.ends_with(b"\r\n") {
+            raw.extend_from_slice(b"\r\n");
+        }
+        raw.extend_from_slice(b"\r\n");
+    }
+    raw.extend_from_slice(text?);
+    Some(raw)
+}
+
+async fn connect_mailbox(
+    config: &MailInputConfig,
+    secret: &str,
+) -> Result<ImapSession<TlsStream<TcpStream>>> {
+    let host = config.host.trim();
+    let stream = TcpStream::connect((host, config.port))
+        .await
+        .context("connect to IMAP over TLS")?;
+    let server_name = ServerName::try_from(host)
+        .context("validate IMAP TLS hostname")?
+        .to_owned();
+    let tls = imap_tls_connector()?
+        .connect(server_name, stream)
+        .await
+        .context("complete IMAP TLS handshake")?;
+    let mut session = ImapClient::new(tls)
+        .login(config.username.trim(), secret)
+        .await
+        .map_err(|(error, _)| anyhow::anyhow!("authenticate IMAP account: {error:?}"))?;
+    session
+        .id(IMAP_CLIENT_IDENTITY)
+        .await
+        .map_err(|error| anyhow::anyhow!("identify IMAP client: {error:?}"))?;
+    Ok(session)
+}
+
+fn imap_tls_connector() -> Result<TlsConnector> {
+    let mut root_store = RootCertStore::empty();
+    root_store.extend(webpki_roots::TLS_SERVER_ROOTS.iter().cloned());
+    let config = ClientConfig::builder_with_provider(Arc::new(
+        tokio_rustls::rustls::crypto::ring::default_provider(),
+    ))
+    .with_safe_default_protocol_versions()
+    .context("configure IMAP TLS versions")?
+    .with_root_certificates(root_store)
+    .with_no_client_auth();
+    Ok(TlsConnector::from(Arc::new(config)))
+}
+
+fn parse_message(raw: Vec<u8>, remote_id: String) -> Option<RawMail> {
     let parsed = MessageParser::default().parse(&raw)?;
     let sender = parsed
         .from()?
@@ -398,10 +699,9 @@ fn parse_message(raw: Vec<u8>) -> Option<RawMail> {
         return None;
     }
     let subject = compact_text(parsed.subject().unwrap_or("External research input"), 240);
-    let body = compact_text(parsed.body_text(0).as_deref().unwrap_or(""), MAX_BODY_CHARS);
-    if body.is_empty() {
-        return None;
-    }
+    let body = parsed
+        .body_text(0)
+        .or_else(|| parsed.body_preview(MAX_MAIL_BODY_CHARS))?;
     let id = parsed
         .message_id()
         .map(str::to_owned)
@@ -411,40 +711,21 @@ fn parse_message(raw: Vec<u8>) -> Option<RawMail> {
         .date()
         .and_then(|date| DateTime::<Utc>::from_timestamp(date.to_timestamp(), 0))
         .map(timestamp);
+    let document = MailDocument::new(sender, subject, body.as_ref(), event_at)?;
     Some(RawMail {
+        remote_id,
         id,
-        sender,
-        subject,
-        body,
-        event_at,
+        document,
     })
 }
 
-fn extract_sources(body: &str, sender: &str, subject: &str) -> Vec<SensingSource> {
-    let sources = body
-        .split_whitespace()
-        .filter_map(|token| {
-            let url = token.trim_matches(|character: char| {
-                matches!(
-                    character,
-                    '<' | '>' | '(' | ')' | '[' | ']' | ',' | '.' | ';' | '"' | '\''
-                )
-            });
-            (url.starts_with("https://") || url.starts_with("http://")).then(|| SensingSource {
-                url: url.to_owned(),
-                detail: format!("Linked from {sender}: {subject}"),
-            })
-        })
-        .take(3)
-        .collect::<Vec<_>>();
-    if sources.is_empty() {
-        vec![SensingSource {
-            url: format!("mailto:{sender}"),
-            detail: format!("Private research inbox: {subject}"),
-        }]
-    } else {
-        sources
-    }
+fn remote_message_id(config: &MailInputConfig, uid_validity: u32, uid: u32) -> String {
+    format!(
+        "{}|{}|{}|{uid_validity}|{uid}",
+        config.host.trim().to_ascii_lowercase(),
+        config.username.trim().to_ascii_lowercase(),
+        config.folder.trim().to_ascii_lowercase(),
+    )
 }
 
 fn sender_allowed(sender: &str, allowed_senders: &[String]) -> bool {
@@ -457,11 +738,21 @@ fn sender_allowed(sender: &str, allowed_senders: &[String]) -> bool {
         })
 }
 
-fn remember(seen: &mut VecDeque<String>, id: String) {
+fn remember_with_limit(seen: &mut VecDeque<String>, id: String, limit: usize) {
     seen.push_back(id);
-    while seen.len() > MAX_SEEN_MESSAGE_IDS {
+    while seen.len() > limit {
         seen.pop_front();
     }
+}
+
+fn migrate_runtime(runtime: &mut MailInputRuntime) -> bool {
+    if runtime.normalization_version >= NORMALIZATION_VERSION {
+        return false;
+    }
+    runtime.seen_message_ids.clear();
+    runtime.seen_remote_ids.clear();
+    runtime.normalization_version = NORMALIZATION_VERSION;
+    true
 }
 
 fn fingerprint(value: &[u8]) -> String {
@@ -520,6 +811,22 @@ fn validate_config(config: &MailInputConfig) -> Result<()> {
     }
     if config.max_messages == 0 || config.max_messages > MAX_POLL_MESSAGES {
         anyhow::bail!("mail input max messages must be between 1 and {MAX_POLL_MESSAGES}");
+    }
+    Ok(())
+}
+
+fn validate_connection_config(config: &MailInputConfig) -> Result<()> {
+    if config.host.trim().is_empty() || config.host.chars().count() > 250 {
+        anyhow::bail!("mail input host is required and must contain at most 250 characters");
+    }
+    if config.port == 0 {
+        anyhow::bail!("mail input port is required");
+    }
+    if config.username.trim().is_empty() || config.username.chars().count() > 320 {
+        anyhow::bail!("mail input username is required and must contain at most 320 characters");
+    }
+    if config.folder.trim().is_empty() || config.folder.chars().count() > 320 {
+        anyhow::bail!("mail input folder is required and must contain at most 320 characters");
     }
     Ok(())
 }
@@ -604,12 +911,88 @@ mod tests {
     #[test]
     fn parses_plain_text_mail_without_preserving_raw_headers() {
         let raw = b"From: Spark <spark@google.com>\r\nSubject: Daily research\r\nMessage-ID: <daily-1@example.com>\r\nDate: Sat, 9 Aug 2026 08:00:00 +0000\r\nContent-Type: text/plain; charset=utf-8\r\n\r\nA new paper is relevant: https://example.com/paper\r\n".to_vec();
-        let message = parse_message(raw).unwrap();
-        assert_eq!(message.sender, "spark@google.com");
+        let message = parse_message(raw, "mailbox|1|7".to_owned()).unwrap();
+        assert_eq!(message.remote_id, "mailbox|1|7");
+        assert_eq!(message.document.sender, "spark@google.com");
         assert_eq!(message.id, "daily-1@example.com");
-        let candidate = message.into_candidate();
+        let candidate = message.document.into_candidates().remove(0);
         assert_eq!(candidate.sources[0].url, "https://example.com/paper");
         assert!(candidate.proposed_input.contains("new paper"));
+    }
+
+    #[test]
+    fn parses_html_only_mail_through_the_preview_fallback() {
+        let raw = b"From: Gemini <glenzli92@gmail.com>\r\nSubject: Daily exploration\r\nMessage-ID: <gemini-1@example.com>\r\nMIME-Version: 1.0\r\nContent-Type: text/html; charset=utf-8\r\n\r\n<html><body><h1>Useful signal</h1><p>A concrete research result.</p></body></html>\r\n".to_vec();
+        let message = parse_message(raw, "mailbox|1|8".to_owned()).unwrap();
+        assert!(message.document.body.contains("Useful signal"));
+        assert!(message.document.body.contains("concrete research result"));
+    }
+
+    #[test]
+    fn rebuilds_a_message_from_read_only_header_and_text_sections() {
+        let raw = assemble_message(
+            Some(b"From: Spark <spark@google.com>\r\nSubject: Daily research\r\n"),
+            Some(b"A useful result."),
+        )
+        .unwrap();
+        let message = parse_message(raw, "mailbox|1|9".to_owned()).unwrap();
+        assert_eq!(message.document.sender, "spark@google.com");
+        assert_eq!(message.document.body, "A useful result.");
+    }
+
+    #[test]
+    fn remote_cursor_is_scoped_to_the_mailbox_and_uid_validity() {
+        let config = MailInputConfig {
+            host: "IMAP.EXAMPLE.COM".to_owned(),
+            username: "Bridge@Example.com".to_owned(),
+            folder: "INBOX".to_owned(),
+            ..MailInputConfig::default()
+        };
+        assert_eq!(
+            remote_message_id(&config, 41, 9),
+            "imap.example.com|bridge@example.com|inbox|41|9"
+        );
+    }
+
+    #[test]
+    fn local_remote_cursor_prevents_duplicate_candidates() {
+        let config = MailInputConfig {
+            allowed_senders: vec!["spark@google.com".to_owned()],
+            ..MailInputConfig::default()
+        };
+        let message = || RawMail {
+            remote_id: "mailbox|1|10".to_owned(),
+            id: "daily-10@example.com".to_owned(),
+            document: MailDocument::new(
+                "spark@google.com".to_owned(),
+                "Daily research".to_owned(),
+                "A useful result.",
+                None,
+            )
+            .unwrap(),
+        };
+        let mut runtime = MailInputRuntime::default();
+        assert_eq!(
+            select_new_messages(&mut runtime, &config, vec![message()]).len(),
+            1
+        );
+        assert!(select_new_messages(&mut runtime, &config, vec![message()]).is_empty());
+        assert_eq!(runtime.seen_remote_ids.len(), 1);
+        assert_eq!(runtime.seen_message_ids.len(), 1);
+    }
+
+    #[test]
+    fn normalization_upgrade_replays_the_bounded_mailbox_window_once() {
+        let mut runtime = MailInputRuntime {
+            seen_message_ids: VecDeque::from(["old-message".to_owned()]),
+            seen_remote_ids: VecDeque::from(["old-remote".to_owned()]),
+            ..MailInputRuntime::default()
+        };
+        assert!(migrate_runtime(&mut runtime));
+        assert!(runtime.seen_message_ids.is_empty());
+        assert!(runtime.seen_remote_ids.is_empty());
+        assert_eq!(runtime.normalization_version, NORMALIZATION_VERSION);
+        assert!(!migrate_runtime(&mut runtime));
     }
 
     #[test]
@@ -626,5 +1009,32 @@ mod tests {
             "other@google.com",
             &["spark@google.com".to_owned()]
         ));
+    }
+
+    #[test]
+    fn connection_test_accepts_an_unsaved_connection_without_routing_rules() {
+        let config = MailInputConfig {
+            enabled: false,
+            host: "imap.example.com".to_owned(),
+            username: "bridge@example.com".to_owned(),
+            ..MailInputConfig::default()
+        };
+        assert!(validate_connection_config(&config).is_ok());
+    }
+
+    #[test]
+    fn connection_test_requires_the_mailbox_connection_fields() {
+        let config = MailInputConfig {
+            host: "imap.example.com".to_owned(),
+            ..MailInputConfig::default()
+        };
+        assert!(validate_connection_config(&config).is_err());
+    }
+
+    #[test]
+    fn identifies_the_imap_client_before_opening_a_mailbox() {
+        assert_eq!(IMAP_CLIENT_IDENTITY[0], ("name", Some("symbiont-d")));
+        assert_eq!(IMAP_CLIENT_IDENTITY[2], ("vendor", Some("symbiont-d")));
+        assert!(IMAP_CLIENT_IDENTITY[1].1.is_some());
     }
 }

@@ -47,7 +47,7 @@ use crate::{
     diagnostics::TraceEventKind,
     exploration::{ExplorationHandle, ExplorationSnapshot, ManualExplorationRun, today_started_at},
     identity::{AvatarSlot, IdentitySnapshot, IdentityStore},
-    mail_input::{MailInputConfig, MailInputSnapshot, MailInputStore},
+    mail_input::{MailInputConfig, MailInputConnectionTest, MailInputSnapshot, MailInputStore},
     memory::{
         MemoryEntry, MemoryRole, MessageDeliveryState, MessageMetadata, MessageQuote,
         MessageQuoteDraft, MessageRunMetadata,
@@ -562,6 +562,11 @@ pub fn router(state: AppState) -> Router {
         .route("/api/compute", post(update_compute))
         .route("/api/ambient", post(update_ambient))
         .route("/api/mail-input", post(update_mail_input))
+        .route("/api/mail-input/test", post(test_mail_input_connection))
+        .route(
+            "/api/mail-input/test/cancel",
+            post(cancel_mail_input_connection_test),
+        )
         .route("/api/audio-transcription", post(update_audio_transcription))
         .route("/api/voice/transcriptions", post(transcribe_voice))
         .route("/api/compute/policies", post(update_compute_policies))
@@ -1077,6 +1082,33 @@ async fn update_mail_input(
             .map_err(ApiError::internal)?;
     }
     Ok(Json(snapshot))
+}
+
+async fn test_mail_input_connection(
+    State(state): State<AppState>,
+    Json(config): Json<MailInputConfig>,
+) -> Result<Json<MailInputConnectionTest>, ApiError> {
+    state
+        .mail_input
+        .test_connection(config)
+        .await
+        .map(Json)
+        .map_err(|error| ApiError::bad_request(mail_input_test_error(&error)))
+}
+
+/// A connection test is an explicit, local diagnostic action. Preserve the
+/// server's bounded error chain here so people can distinguish an
+/// authentication failure from a mailbox/folder failure without exposing any
+/// credential material.
+fn mail_input_test_error(error: &anyhow::Error) -> String {
+    let message = format!("{error:#}");
+    let normalized = message.split_whitespace().collect::<Vec<_>>().join(" ");
+    normalized.chars().take(800).collect()
+}
+
+async fn cancel_mail_input_connection_test(State(state): State<AppState>) -> StatusCode {
+    state.mail_input.cancel_connection_test().await;
+    StatusCode::NO_CONTENT
 }
 
 async fn update_audio_transcription(
@@ -2941,6 +2973,16 @@ mod tests {
             context
                 .content
                 .contains("Codex:\nKeep task execution in Codex.")
+        );
+    }
+
+    #[test]
+    fn mail_input_test_error_keeps_the_imap_server_cause() {
+        let error = anyhow::anyhow!("server replied: NO [NONEXISTENT] Unknown Mailbox: INBOX")
+            .context("open IMAP folder read-only");
+        assert_eq!(
+            mail_input_test_error(&error),
+            "open IMAP folder read-only: server replied: NO [NONEXISTENT] Unknown Mailbox: INBOX"
         );
     }
 }

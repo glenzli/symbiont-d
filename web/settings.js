@@ -6,11 +6,13 @@ import {
 
 export function initSettings(state) {
   const dialog = document.querySelector("#settings-dialog");
+  const settingsSaveState = document.querySelector("#settings-save-state");
+  const settingsSave = document.querySelector("#settings-save");
   const computeForm = document.querySelector("#compute-form");
   const routingSelect = document.querySelector("#routing");
-  const computeSaveState = document.querySelector("#compute-save-state");
+  const computeSaveState = settingsSaveState;
   const ambientForm = document.querySelector("#ambient-form");
-  const ambientSaveState = document.querySelector("#ambient-save-state");
+  const ambientSaveState = settingsSaveState;
   const ambientEmptyState = document.querySelector("#ambient-empty-state");
   const lunaEnabled = document.querySelector("#luna-enabled");
   const lunaFocus = document.querySelector("#luna-focus");
@@ -36,7 +38,8 @@ export function initSettings(state) {
   const mailInputAvailability = document.querySelector("#mail-input-availability");
   const mailInputCredentialNote = document.querySelector("#mail-input-credential-note");
   const mailInputRuntimeNote = document.querySelector("#mail-input-runtime-note");
-  const mailInputSaveState = document.querySelector("#mail-input-save-state");
+  const mailInputSaveState = settingsSaveState;
+  const mailInputTestConnection = document.querySelector("#mail-input-test-connection");
   const audioTranscriptionForm = document.querySelector("#audio-transcription-form");
   const audioTranscriptionBaseUrl = document.querySelector("#audio-transcription-base-url");
   const audioTranscriptionLanguage = document.querySelector("#audio-transcription-language");
@@ -45,7 +48,7 @@ export function initSettings(state) {
   const audioTranscriptionEnabled = document.querySelector("#audio-transcription-enabled");
   const audioTranscriptionAvailability = document.querySelector("#audio-transcription-availability");
   const audioTranscriptionCredentialNote = document.querySelector("#audio-transcription-credential-note");
-  const audioTranscriptionSaveState = document.querySelector("#audio-transcription-save-state");
+  const audioTranscriptionSaveState = settingsSaveState;
   const computePolicyList = document.querySelector("#compute-policy-list");
   const computePolicyTemplate = document.querySelector(
     "#compute-policy-template",
@@ -63,12 +66,14 @@ export function initSettings(state) {
   const quietHoursStart = document.querySelector("#quiet-hours-start");
   const quietHoursEnd = document.querySelector("#quiet-hours-end");
   const autonomyAvailability = document.querySelector("#autonomy-availability");
-  const autonomySaveState = document.querySelector("#autonomy-save-state");
+  const autonomySaveState = settingsSaveState;
   const bridgeForm = document.querySelector("#bridge-form");
   const codexTaskAccess = document.querySelector("#codex-task-access");
-  const bridgeSaveState = document.querySelector("#bridge-save-state");
+  const bridgeSaveState = settingsSaveState;
   const tabButtons = [...dialog.querySelectorAll("[data-settings-tab]")];
   const tabPanels = [...dialog.querySelectorAll("[data-settings-panel]")];
+  let activeSettingsTab = "exploration";
+  let mailInputTestController = null;
 
   function modelBySlug(slug) {
     return state.models.find(
@@ -157,7 +162,12 @@ export function initSettings(state) {
     const received = inbox.lastReceivedAt
       ? `上次接收 ${inbox.lastReceivedCount || 0} 封：${new Date(inbox.lastReceivedAt).toLocaleString()}`
       : "尚未接收到新的白名单邮件。";
-    mailInputRuntimeNote.textContent = inbox.lastError ? `上次连接失败：${inbox.lastError}` : received;
+    const intake = inbox.lastSucceededAt
+      ? `上次读取：搜索 ${inbox.lastSearchableMessageCount || 0}，本轮选择 ${inbox.lastSelectedMessageCount || 0}，抓取 ${inbox.lastFetchedMessageCount || 0}，正文 ${inbox.lastBodyMessageCount || 0}，解析 ${inbox.lastParsedMessageCount || 0}，白名单 ${inbox.lastAllowedMessageCount || 0}。`
+      : "";
+    mailInputRuntimeNote.textContent = inbox.lastError
+      ? `上次连接失败：${inbox.lastError}`
+      : `${received}${intake ? ` ${intake}` : ""}`;
   }
 
   function renderAudioTranscription() {
@@ -350,7 +360,7 @@ export function initSettings(state) {
   }
 
   async function saveCompute(event) {
-    event.preventDefault();
+    event?.preventDefault();
     computeSaveState.textContent = "保存中";
     try {
       state.compute = await responseJson(
@@ -371,8 +381,10 @@ export function initSettings(state) {
       );
       renderCompute();
       computeSaveState.textContent = "已保存";
+      return true;
     } catch (error) {
       computeSaveState.textContent = error.message;
+      return false;
     }
   }
 
@@ -390,8 +402,10 @@ export function initSettings(state) {
       );
       renderAmbient();
       ambientSaveState.textContent = "已保存";
+      return true;
     } catch (error) {
       ambientSaveState.textContent = error.message;
+      return false;
     }
   }
 
@@ -413,22 +427,67 @@ export function initSettings(state) {
     };
   }
 
+  async function persistMailInput() {
+    return responseJson(
+      await fetch("/api/mail-input", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(mailInputFormValue()),
+      }),
+      "研究收件箱保存失败",
+    );
+  }
+
   async function saveMailInput(event) {
-    event.preventDefault();
+    event?.preventDefault();
     mailInputSaveState.textContent = "保存中";
     try {
-      state.mailInput = await responseJson(
-        await fetch("/api/mail-input", {
+      state.mailInput = await persistMailInput();
+      renderMailInput();
+      mailInputSaveState.textContent = "已保存";
+      return true;
+    } catch (error) {
+      mailInputSaveState.textContent = error.message;
+      return false;
+    }
+  }
+
+  async function testMailInputConnection() {
+    if (mailInputTestController) {
+      mailInputTestConnection.disabled = true;
+      mailInputSaveState.textContent = "正在停止连接测试…";
+      try {
+        await fetch("/api/mail-input/test/cancel", { method: "POST" });
+      } finally {
+        mailInputTestController.abort();
+      }
+      return;
+    }
+    const controller = new AbortController();
+    mailInputTestController = controller;
+    mailInputTestConnection.textContent = "停止测试";
+    mailInputSaveState.textContent = "正在验证连接、正文抓取与解析…";
+    try {
+      const result = await responseJson(
+        await fetch("/api/mail-input/test", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify(mailInputFormValue()),
+          signal: controller.signal,
         }),
-        "研究收件箱保存失败",
+        "研究收件箱连接测试失败",
       );
-      renderMailInput();
-      mailInputSaveState.textContent = "已保存";
+      mailInputSaveState.textContent = `读取正常：「${result.folder}」共 ${result.messageCount || 0} 封，抓取 ${result.fetchedMessageCount || 0}，解析 ${result.parsedMessageCount || 0}，白名单 ${result.allowedMessageCount || 0}，拆分候选 ${result.candidateCount || 0}；尚未保存`;
     } catch (error) {
-      mailInputSaveState.textContent = error.message;
+      mailInputSaveState.textContent = controller.signal.aborted
+        ? "连接测试已取消"
+        : `连接失败：${error.message}`;
+    } finally {
+      if (mailInputTestController === controller) {
+        mailInputTestController = null;
+        mailInputTestConnection.disabled = false;
+        mailInputTestConnection.textContent = "测试";
+      }
     }
   }
 
@@ -443,7 +502,7 @@ export function initSettings(state) {
   }
 
   async function saveAudioTranscription(event) {
-    event.preventDefault();
+    event?.preventDefault();
     audioTranscriptionSaveState.textContent = "保存中";
     try {
       state.audioTranscription = await responseJson(
@@ -456,13 +515,15 @@ export function initSettings(state) {
       );
       renderAudioTranscription();
       audioTranscriptionSaveState.textContent = "已保存";
+      return true;
     } catch (error) {
       audioTranscriptionSaveState.textContent = error.message;
+      return false;
     }
   }
 
   async function saveAutonomy(event) {
-    event.preventDefault();
+    event?.preventDefault();
     autonomySaveState.textContent = "保存中";
     const config = {
       enabled: autonomyEnabled.checked,
@@ -491,13 +552,15 @@ export function initSettings(state) {
         state.profile.status === "ready" && state.autonomy.enabled;
       autonomySaveState.textContent = "已保存";
       renderAutonomy();
+      return true;
     } catch (error) {
       autonomySaveState.textContent = error.message;
+      return false;
     }
   }
 
   async function saveBridge(event) {
-    event.preventDefault();
+    event?.preventDefault();
     bridgeSaveState.textContent = "保存中";
     try {
       state.bridge = await responseJson(
@@ -512,12 +575,44 @@ export function initSettings(state) {
       );
       bridgeSaveState.textContent = "已保存";
       renderBridge();
+      return true;
     } catch (error) {
       bridgeSaveState.textContent = error.message;
+      return false;
+    }
+  }
+
+  async function saveCurrentSettings() {
+    if (activeSettingsTab === "general") {
+      settingsSaveState.textContent = "头像会在选择或还原时立即保存";
+      return;
+    }
+    if (activeSettingsTab === "exploration") {
+      await saveAutonomy();
+      return;
+    }
+    if (activeSettingsTab === "sources") {
+      if (await saveAmbient()) await saveMailInput();
+      return;
+    }
+    if (activeSettingsTab === "reflection") {
+      window.dispatchEvent(new Event("symbiont:save-reflection-settings"));
+      return;
+    }
+    if (activeSettingsTab === "models") {
+      await saveCompute();
+      return;
+    }
+    if (activeSettingsTab === "system") {
+      if (await saveBridge()) await saveAudioTranscription();
     }
   }
 
   function activateTab(name) {
+    activeSettingsTab = name;
+    const hasPageSave = name !== "general";
+    settingsSave.disabled = !hasPageSave;
+    settingsSave.textContent = hasPageSave ? "保存当前页" : "无需保存";
     for (const button of tabButtons) {
       button.setAttribute(
         "aria-selected",
@@ -536,9 +631,7 @@ export function initSettings(state) {
     renderAudioTranscription();
     renderAutonomy();
     renderBridge();
-    computeSaveState.textContent = "";
-    ambientSaveState.textContent = "";
-    autonomySaveState.textContent = "";
+    settingsSaveState.textContent = "";
     activateTab(normalizeSettingsTab(tab));
     dialog.showModal();
   }
@@ -552,8 +645,17 @@ export function initSettings(state) {
   computeForm.addEventListener("submit", saveCompute);
   ambientForm.addEventListener("submit", saveAmbient);
   mailInputForm.addEventListener("submit", saveMailInput);
+  mailInputTestConnection.addEventListener("click", testMailInputConnection);
+  settingsSave.addEventListener("click", saveCurrentSettings);
+  dialog.addEventListener("input", (event) => {
+    if (event.target.matches("input, select, textarea")) {
+      settingsSaveState.textContent = "有未保存的更改";
+    }
+  });
   audioTranscriptionForm.addEventListener("submit", saveAudioTranscription);
-  lunaEnabled.addEventListener("change", saveAmbient);
+  lunaEnabled.addEventListener("change", () => {
+    settingsSaveState.textContent = "有未保存的更改";
+  });
   addComputePolicy.addEventListener("click", () => appendComputePolicy({}, true));
   computePolicyList.addEventListener("click", (event) => {
     const button = event.target.closest(".remove-compute-policy");

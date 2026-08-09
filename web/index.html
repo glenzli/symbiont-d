@@ -463,14 +463,14 @@
         <form id="ambient-form">
           <header class="settings-panel-intro">
             <h3>探索通道</h3>
-            <p>这是主动探索的第一步：每轮从已启用通道中选择输入，形成临时候选，再交给统一复核与深入判断。</p>
+            <p>每轮收集临时输入，再统一复核。</p>
           </header>
           <section class="compute-policy-section ambient-provider-section">
             <div class="ambient-config-group luna-input-group">
               <div class="ambient-config-heading"><strong>内置输入</strong></div>
               <div class="ambient-config-row">
                 <div class="ambient-config-row-head"><strong>Luna · 广域输入</strong><span id="luna-availability" class="ambient-row-status">正在读取</span></div>
-                <p class="ambient-credential-note">通过已连接的 Codex 进行低成本广域感知；不需要 API Key。它与外部 Provider 一样，由统一探索调度轮换选用。</p>
+                <p class="ambient-credential-note">使用已连接的 Codex 做低成本广域感知，无需 API Key。</p>
                 <label class="toggle-row compact-toggle">
                   <span>启用 Luna</span>
                   <input id="luna-enabled" type="checkbox">
@@ -497,7 +497,7 @@
           <section class="compute-policy-section ambient-provider-section">
             <header class="settings-panel-intro compact-intro">
               <h3>私有研究收件箱</h3>
-              <p>只读指定 IMAP 文件夹。Google Scholar、Gemini Spark、GitHub 与你手工转发的内容可汇入同一入口；邮件先进入候选池，不会直接写入记忆。</p>
+              <p>只读指定 IMAP 文件夹；邮件先进入候选池，不直接写入记忆。</p>
             </header>
             <div class="ambient-config-group">
               <div class="ambient-config-row">
@@ -513,15 +513,15 @@
                   <label class="field"><span>IMAP 专用密码</span><input id="mail-input-credential-value" type="password" autocomplete="new-password" placeholder="留空以保持现有凭据"></label>
                   <label class="toggle-row compact-toggle"><span>启用</span><input id="mail-input-enabled" type="checkbox"></label>
                 </div>
-                <label class="field"><span>允许的发件人</span><textarea id="mail-input-allowed-senders" rows="2" maxlength="2400" placeholder="spark@google.com&#10;@scholar.google.com&#10;@github.com"></textarea><small>每行一个精确地址，或以 @ 开头的域名白名单。未在白名单的邮件不会进入模型上下文。</small></label>
+                <label class="field"><span>允许的发件人</span><textarea id="mail-input-allowed-senders" rows="2" maxlength="2400" placeholder="spark@google.com&#10;@scholar.google.com&#10;@github.com"></textarea><small>每行一个地址或 @域名；仅白名单邮件进入模型上下文。</small></label>
                 <small id="mail-input-credential-note" class="ambient-credential-note"></small>
                 <small id="mail-input-runtime-note" class="ambient-credential-note"></small>
               </div>
             </div>
           </section>
-          <footer class="dialog-actions">
+          <footer class="dialog-actions mail-input-actions">
             <span id="mail-input-save-state" role="status"></span>
-            <button class="primary-button" type="submit">保存收件箱</button>
+            <button id="mail-input-test-connection" class="secondary-button" type="button" title="使用当前填写内容验证连接、正文抓取与解析；不会保存配置、替换凭据或标记远端已读">测试</button>
           </footer>
         </form>
       </section>
@@ -718,6 +718,10 @@
           </footer>
         </form>
       </section>
+      <footer class="dialog-actions settings-dialog-actions">
+        <span id="settings-save-state" role="status"></span>
+        <button id="settings-save" class="primary-button" type="button">保存当前页</button>
+      </footer>
     </dialog>
 
     <dialog id="usage-dialog" class="panel-dialog usage-dialog">

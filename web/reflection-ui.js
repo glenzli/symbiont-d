@@ -22,6 +22,7 @@ export function initReflectionUi(state) {
   const runtimeState = document.querySelector("#reflection-runtime-state");
   const healthState = document.querySelector("#reflection-health-state");
   const saveState = document.querySelector("#reflection-save-state");
+  const settingsSaveState = document.querySelector("#settings-save-state");
   const runButton = document.querySelector("#run-reflection");
   const archive = document.querySelector("#reflection-archive");
   const archiveTab = document.querySelector(
@@ -50,9 +51,14 @@ export function initReflectionUi(state) {
     runButton.disabled = runtime.phase === "reflecting";
   }
 
+  function setSaveState(message) {
+    saveState.textContent = message;
+    if (settingsSaveState) settingsSaveState.textContent = message;
+  }
+
   async function save(event) {
-    event.preventDefault();
-    saveState.textContent = "保存中";
+    event?.preventDefault();
+    setSaveState("保存中");
     try {
       const config = await responseJson(
         await fetch("/api/reflection/config", {
@@ -72,11 +78,13 @@ export function initReflectionUi(state) {
         "保存失败",
       );
       state.reflection = { ...(state.reflection || {}), config };
-      saveState.textContent = "已保存";
+      setSaveState("已保存");
       renderConfig();
       renderRuntime();
+      return true;
     } catch (error) {
-      saveState.textContent = error.message;
+      setSaveState(error.message);
+      return false;
     }
   }
 
@@ -232,6 +240,9 @@ export function initReflectionUi(state) {
   }
 
   form.addEventListener("submit", save);
+  window.addEventListener("symbiont:save-reflection-settings", () => {
+    void save();
+  });
   runButton.addEventListener("click", run);
   archiveTab.addEventListener("click", loadArchive);
 
