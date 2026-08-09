@@ -634,7 +634,14 @@ async fn mailbox_review_reports_the_external_input_instead_of_internal_reasoning
                         "input_text": "A research digest reports a new solar observation."
                     }]
                 }),
-                result: json!({"success": true}),
+                result: json!({
+                    "accepted": true,
+                    "hostRouting": {
+                        "publishedInputCount": 1,
+                        "suppressedInputCount": 0,
+                        "deferredCandidateCount": 0
+                    }
+                }),
             }],
             vec![ExecutionTraceEvent {
                 sequence: 0,
@@ -649,7 +656,9 @@ async fn mailbox_review_reports_the_external_input_instead_of_internal_reasoning
 
     let runs = store.recent_explorations(5).await.unwrap();
     assert_eq!(runs[0].sensing_candidate_count, 1);
-    assert_eq!(runs[0].sensing_broadcast_count, 1);
+    assert_eq!(runs[0].sensing_input_count, 1);
+    assert_eq!(runs[0].sensing_published_count, 1);
+    assert_eq!(runs[0].sensing_suppressed_count, 0);
     assert_eq!(
         runs[0].focus.as_ref().map(|focus| focus.title.as_str()),
         Some("A research digest reports a new solar observation.")

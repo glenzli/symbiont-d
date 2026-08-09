@@ -46,12 +46,15 @@ use crate::{
         REVIEW_BATCH_SIZE, SensingCandidate, SensingIntakeBrief, SensingStore,
         format_candidate_pool,
     },
-    signals::SignalStore,
+    signals::{SignalPublishOutcome, SignalStore},
     symbiont_context::SymbiontContextStore,
     usage::{UsageHeadline, UsageStore},
 };
 
-use self::sensing_route::plan_sensing_routes;
+use self::sensing_route::{
+    annotate_sensing_delivery, link_sensing_invocations, plan_sensing_routes,
+    prioritize_candidate_batches,
+};
 
 const POLICY_REFRESH: Duration = Duration::from_secs(30);
 const EXPLORATION_CHAT_TAIL: usize = 14;
@@ -859,9 +862,11 @@ async fn run_once(
     let input_epoch = *input_events.borrow();
     let mut reviewed_candidates = Vec::new();
     let mut deep_candidate_ids = Vec::new();
+    let mut published_input_count = 0usize;
     let mut sensing_trace_id = None;
     let mailbox_configured = mail_input.has_configured_input().await;
-    if scheduled || mailbox_configured {
+    let runs_intake = trigger_runs_intake(trigger.as_ref());
+    if runs_intake {
         let sensing_context = if scheduled {
             let intake_brief = match sensing.next_intake_brief().await {
                 Ok(brief) => brief,
@@ -876,9 +881,11 @@ async fn run_once(
         };
         let has_configured_input =
             ambient_scout.has_configured_input().await || mail_input.has_configured_input().await;
+        let mailbox_capacity = sensing.available_capacity().await?;
         let mailbox = Arc::clone(&mail_input);
         let mailbox_input_events = input_events.clone();
-        let mailbox_task = tokio::spawn(async move { mailbox.poll(mailbox_input_events).await });
+        let mailbox_task =
+            tokio::spawn(async move { mailbox.poll(mailbox_input_events, mailbox_capacity).await });
         let selected_inputs = if scheduled {
             ambient_scout
                 .select_inputs(autonomy_config.max_input_parallelism as usize)
@@ -955,12 +962,12 @@ async fn run_once(
         let mailbox_outcome = mailbox_task
             .await
             .context("join research inbox polling")??;
-        let invocations = sensing_outcomes
+        let mut invocations = sensing_outcomes
             .iter()
             .filter_map(|outcome| outcome.invocation.as_ref())
             .cloned()
             .collect::<Vec<_>>();
-        sensing_trace_id = invocations.first().map(|invocation| invocation.id.clone());
+        sensing_trace_id = link_sensing_invocations(&mut invocations, None);
         if let Err(error) = usage.record_all(&invocations).await {
             stop_activity_relay(runtime_tx, activity_task).await?;
             return Err(error);
@@ -973,24 +980,19 @@ async fn run_once(
                     .iter()
                     .any(|outcome| outcome.channel_failure.is_some()));
         if !interrupted {
-            // A newly delivered private research report is already an
-            // intentional input from a user-configured source. Give its
-            // independently normalized topics the current three-candidate
-            // review window; otherwise model channels could fill that window
-            // first and the mailbox cursor would make the skipped report look
-            // consumed forever. When the inbox is empty, use the ordinary
-            // multi-provider sensing results as before.
-            let batches = if !mailbox_outcome.candidates.is_empty() {
-                mailbox_outcome
-                    .actor
-                    .map(|actor| vec![(mailbox_outcome.candidates, actor)])
-                    .unwrap_or_default()
-            } else {
-                sensing_outcomes
-                    .into_iter()
-                    .filter_map(|outcome| outcome.actor.map(|actor| (outcome.candidates, actor)))
-                    .collect::<Vec<_>>()
-            };
+            // Mailbox topics go first because their IMAP cursor has already
+            // advanced, but all successful channels enter the same bounded
+            // queue. Do not throw away model-provider results merely because
+            // the inbox also delivered something in this cycle.
+            let ambient_batches = sensing_outcomes
+                .into_iter()
+                .filter_map(|outcome| outcome.actor.map(|actor| (outcome.candidates, actor)))
+                .collect();
+            let batches = prioritize_candidate_batches(
+                mailbox_outcome.candidates,
+                mailbox_outcome.actor,
+                ambient_batches,
+            );
             let retained_retry_count = if let Some(requested_at) = manual_retry_started_at {
                 sensing
                     .candidates()
@@ -1121,13 +1123,15 @@ async fn run_once(
                 )
                 .await;
             drop(client);
-            let review = match review {
+            let mut review = match review {
                 Ok(outcome) => outcome,
                 Err(error) => {
                     stop_activity_relay(runtime_tx, activity_task).await?;
                     return Err(error);
                 }
             };
+            sensing_trace_id =
+                link_sensing_invocations(&mut review.invocations, sensing_trace_id.as_deref());
             if let Err(error) = usage.record_all(&review.invocations).await {
                 stop_activity_relay(runtime_tx, activity_task).await?;
                 return Err(error);
@@ -1150,23 +1154,35 @@ async fn run_once(
             }
 
             let route_plan = plan_sensing_routes(&reviewed_candidates, review.decisions);
-            let mut broadcast_count = 0usize;
+            let mut suppressed_input_count = 0usize;
             for input in route_plan.inputs {
-                if signals
+                match signals
                     .publish_with_content(&input.candidate, input.content, input.reason)
                     .await?
-                    .is_some()
                 {
-                    broadcast_count += 1;
+                    SignalPublishOutcome::Published => published_input_count += 1,
+                    SignalPublishOutcome::Existing | SignalPublishOutcome::RejectedStale => {
+                        suppressed_input_count += 1;
+                    }
                 }
             }
-            sensing.remove(&route_plan.terminal_ids).await?;
+            annotate_sensing_delivery(
+                &mut review.invocations,
+                published_input_count,
+                suppressed_input_count,
+                route_plan.deferred_ids.len(),
+            );
+            usage.record_all(&review.invocations).await?;
+            sensing
+                .settle_review(&route_plan.terminal_ids, &route_plan.deferred_ids)
+                .await?;
             reviewed_candidates = route_plan.deep_candidates;
             deep_candidate_ids = reviewed_candidates
                 .iter()
                 .map(|candidate| candidate.id.clone())
                 .collect();
-            if reviewed_candidates.is_empty() && (scheduled || broadcast_count > 0) {
+            if reviewed_candidates.is_empty() && (scheduled || published_input_count > 0) {
+                let pending_candidate_count = sensing.count().await?;
                 stop_activity_relay(runtime_tx, activity_task).await?;
                 settle_sensing_only(
                     &state,
@@ -1174,8 +1190,8 @@ async fn run_once(
                     &attempts,
                     trigger.as_ref(),
                     ExplorationIntentStatus::Silent,
-                    if broadcast_count > 0 {
-                        "input_signals_broadcast"
+                    if published_input_count > 0 {
+                        "input_signals_published"
                     } else {
                         "reviewed_silent"
                     },
@@ -1384,6 +1400,7 @@ async fn run_once(
             .map(|outreach| format!("messaged_{}", outreach.kind.as_str()))
             .unwrap_or_else(|| "messaged".to_owned()),
         ExplorationIntentStatus::Superseded => "superseded".to_owned(),
+        _ if published_input_count > 0 => "input_signals_published".to_owned(),
         _ => "silent".to_owned(),
     };
     let completed_at = timestamp(Utc::now());
@@ -1619,6 +1636,10 @@ async fn stop_activity_relay(
     activity_task
         .await
         .context("join exploration activity relay")
+}
+
+fn trigger_runs_intake(trigger: Option<&ExplorationTrigger>) -> bool {
+    trigger.is_none() || matches!(trigger, Some(ExplorationTrigger::Manual { .. }))
 }
 
 async fn settle_sensing_only(
@@ -1908,7 +1929,7 @@ mod tests {
         ManualExplorationStatus, ManualExplorationStore, ambient_sensing_context,
         bounded_message_excerpt, conversation_edge, evaluate_gate, exploration_working_context,
         observation_is_current, quiet_end, refresh_manual_projection, set_error,
-        settle_sensing_only, today_started_at,
+        settle_sensing_only, today_started_at, trigger_runs_intake,
     };
     use crate::{
         autonomy::{AutonomyConfig, QuietHours},
@@ -1934,6 +1955,37 @@ mod tests {
             requested_at
         ));
         assert!(!observation_is_current("not-a-time", requested_at));
+    }
+
+    #[test]
+    fn mailbox_intake_never_hijacks_thought_or_deferred_follow_up_triggers() {
+        let manual = ExplorationTrigger::Manual {
+            request_id: "manual".to_owned(),
+            requested_at: "2026-08-10T00:00:00Z".to_owned(),
+            bypass_token_limit: false,
+        };
+        let intent = ExplorationTrigger::Intent(ExplorationIntent {
+            id: "intent".to_owned(),
+            question: "A focused question".to_owned(),
+            why_now: "A focused reason".to_owned(),
+            source_revision_ids: vec![],
+            origin: ExplorationIntentOrigin::Interactive,
+            status: ExplorationIntentStatus::Queued,
+            requested_at: "2026-08-10T00:00:00Z".to_owned(),
+            not_before: "2026-08-10T00:00:00Z".to_owned(),
+            started_at: None,
+            completed_at: None,
+            trace_id: None,
+            result_revision_id: None,
+            error: None,
+        });
+
+        assert!(trigger_runs_intake(None));
+        assert!(trigger_runs_intake(Some(&manual)));
+        assert!(!trigger_runs_intake(Some(
+            &ExplorationTrigger::DeferredFollowUp
+        )));
+        assert!(!trigger_runs_intake(Some(&intent)));
     }
 
     #[test]

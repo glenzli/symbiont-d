@@ -327,6 +327,43 @@ impl SensingStore {
         self.persist().await
     }
 
+    /// Applies one bounded review atomically. Terminal candidates leave the
+    /// transient pool; candidates omitted by a malformed or partial model
+    /// response move behind untouched work so they cannot block the queue
+    /// head forever.
+    pub async fn settle_review(
+        &self,
+        terminal_ids: &[String],
+        deferred_ids: &[String],
+    ) -> Result<()> {
+        if terminal_ids.is_empty() && deferred_ids.is_empty() {
+            return Ok(());
+        }
+        let terminal_ids = terminal_ids
+            .iter()
+            .collect::<std::collections::HashSet<_>>();
+        let deferred_ids = deferred_ids
+            .iter()
+            .collect::<std::collections::HashSet<_>>();
+        let mut pool = self.pool.write().await;
+        let mut retained = Vec::with_capacity(pool.candidates.len());
+        let mut deferred = Vec::new();
+        for candidate in pool.candidates.drain(..) {
+            if terminal_ids.contains(&candidate.id) {
+                continue;
+            }
+            if deferred_ids.contains(&candidate.id) {
+                deferred.push(candidate);
+            } else {
+                retained.push(candidate);
+            }
+        }
+        retained.extend(deferred);
+        pool.candidates = retained;
+        drop(pool);
+        self.persist().await
+    }
+
     pub async fn next_intake_brief(&self) -> Result<SensingIntakeBrief> {
         let mut pool = self.pool.write().await;
         let index = pool.next_intake_channel % INTAKE_CHANNELS.len();
@@ -376,6 +413,12 @@ impl SensingStore {
             self.persist().await?;
         }
         Ok(count)
+    }
+
+    /// Remaining transient capacity available to a source with an
+    /// irreversible cursor, such as the research inbox.
+    pub async fn available_capacity(&self) -> Result<usize> {
+        Ok(MAX_PENDING_CANDIDATES.saturating_sub(self.count().await?))
     }
 
     async fn persist(&self) -> Result<()> {
@@ -477,8 +520,8 @@ mod tests {
     use std::time::{SystemTime, UNIX_EPOCH};
 
     use super::{
-        InputRoleSnapshot, SensingCandidateDraft, SensingSource, SensingSourceClass, SensingStore,
-        format_candidate_pool,
+        InputRoleSnapshot, MAX_PENDING_CANDIDATES, SensingCandidateDraft, SensingSource,
+        SensingSourceClass, SensingStore, format_candidate_pool,
     };
 
     fn candidate(title: &str, url: &str) -> SensingCandidateDraft {
@@ -532,6 +575,65 @@ mod tests {
         store.remove(&[batch[0].id.clone()]).await.unwrap();
         assert_eq!(store.count().await.unwrap(), 1);
         assert_eq!(store.review_batch(3).await.unwrap()[0].title, "New signal");
+        std::fs::remove_file(path).unwrap();
+    }
+
+    #[tokio::test]
+    async fn partial_review_moves_omitted_candidates_behind_fresh_work() {
+        let nonce = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let path = std::env::temp_dir().join(format!("symbiont-sensing-deferred-{nonce}.json"));
+        let store = SensingStore::open(path.clone()).await.unwrap();
+        let actor = InputRoleSnapshot::ambient("test", "Test observer", "test", "test-provider");
+        store
+            .replace(
+                vec![
+                    candidate("First", "https://example.test/first"),
+                    candidate("Omitted", "https://example.test/omitted"),
+                    candidate("Third", "https://example.test/third"),
+                ],
+                actor,
+            )
+            .await
+            .unwrap();
+        let batch = store.review_batch(3).await.unwrap();
+
+        store
+            .settle_review(&[batch[0].id.clone()], &[batch[1].id.clone()])
+            .await
+            .unwrap();
+
+        let remaining = store.candidates().await.unwrap();
+        assert_eq!(remaining[0].title, "Third");
+        assert_eq!(remaining[1].title, "Omitted");
+        std::fs::remove_file(path).unwrap();
+    }
+
+    #[tokio::test]
+    async fn available_capacity_tracks_the_bounded_transient_pool() {
+        let nonce = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let path = std::env::temp_dir().join(format!("symbiont-sensing-capacity-{nonce}.json"));
+        let store = SensingStore::open(path.clone()).await.unwrap();
+        let actor = InputRoleSnapshot::ambient("test", "Test observer", "test", "test-provider");
+
+        assert_eq!(
+            store.available_capacity().await.unwrap(),
+            MAX_PENDING_CANDIDATES
+        );
+        store
+            .replace(vec![candidate("One", "https://example.test/one")], actor)
+            .await
+            .unwrap();
+        assert_eq!(
+            store.available_capacity().await.unwrap(),
+            MAX_PENDING_CANDIDATES - 1
+        );
+
         std::fs::remove_file(path).unwrap();
     }
 

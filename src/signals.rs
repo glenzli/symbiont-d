@@ -51,6 +51,13 @@ pub struct SignalStore {
     document: RwLock<SignalDocument>,
 }
 
+#[derive(Clone, Debug)]
+pub enum SignalPublishOutcome {
+    Published,
+    Existing,
+    RejectedStale,
+}
+
 impl SignalStore {
     pub async fn open(path: PathBuf) -> Result<Self> {
         let mut document = match fs::read_to_string(&path).await {
@@ -83,7 +90,7 @@ impl SignalStore {
         candidate: &SensingCandidate,
         content: String,
         review_reason: String,
-    ) -> Result<Option<SignalEvent>> {
+    ) -> Result<SignalPublishOutcome> {
         let now = Utc::now();
         if event_is_too_old(candidate.event_at.as_deref(), now) {
             tracing::info!(
@@ -91,18 +98,18 @@ impl SignalStore {
                 event_at = ?candidate.event_at,
                 "skipping stale external input signal"
             );
-            return Ok(None);
+            return Ok(SignalPublishOutcome::RejectedStale);
         }
         let mut document = self.document.write().await;
-        if let Some(existing) = document
+        if document
             .signals
             .iter()
             .find(|signal| {
                 signal.candidate_id == candidate.id || signal.fingerprint == candidate.fingerprint
             })
-            .cloned()
+            .is_some()
         {
-            return Ok(Some(existing));
+            return Ok(SignalPublishOutcome::Existing);
         }
         let sequence = document.signals.len();
         let event = SignalEvent {
@@ -125,7 +132,7 @@ impl SignalStore {
         normalize_and_prune(&mut document, now);
         drop(document);
         self.persist().await?;
-        Ok(Some(event))
+        Ok(SignalPublishOutcome::Published)
     }
 
     pub async fn visible(&self, limit: usize) -> Result<Vec<SignalEvent>> {
@@ -263,7 +270,7 @@ fn timestamp(value: DateTime<Utc>) -> String {
 mod tests {
     use std::time::{SystemTime, UNIX_EPOCH};
 
-    use super::SignalStore;
+    use super::{SignalPublishOutcome, SignalStore};
     use crate::sensing::{InputRoleSnapshot, SensingCandidate, SensingSource, SensingSourceClass};
 
     fn candidate(id: &str) -> SensingCandidate {
@@ -295,27 +302,28 @@ mod tests {
         let path = std::env::temp_dir().join(format!("symbiont-signals-{nonce}.json"));
         let store = SignalStore::open(path.clone()).await.unwrap();
 
-        let first = store
+        let first_outcome = store
             .publish_with_content(
                 &candidate("sense_1"),
                 "A model input.".to_owned(),
                 "credible".to_owned(),
             )
             .await
-            .unwrap()
             .unwrap();
-        let duplicate = store
+        let duplicate_outcome = store
             .publish_with_content(
                 &candidate("sense_1"),
                 "A model input.".to_owned(),
                 "again".to_owned(),
             )
             .await
-            .unwrap()
             .unwrap();
 
-        assert_eq!(first.id, duplicate.id);
-        assert_eq!(store.visible(10).await.unwrap().len(), 1);
+        assert!(matches!(first_outcome, SignalPublishOutcome::Published));
+        assert!(matches!(duplicate_outcome, SignalPublishOutcome::Existing));
+        let visible = store.visible(10).await.unwrap();
+        assert_eq!(visible.len(), 1);
+        assert_eq!(visible[0].candidate_id, "sense_1");
         let _ = tokio::fs::remove_file(path).await;
     }
 
@@ -329,15 +337,17 @@ mod tests {
         let store = SignalStore::open(path.clone()).await.unwrap();
         let candidate = candidate("sense_safe");
 
-        let published = store
+        let published_outcome = store
             .publish_with_content(
                 &candidate,
                 "The external report describes this claim; it remains unverified here.".to_owned(),
                 "Interesting input with qualified certainty.".to_owned(),
             )
             .await
-            .unwrap()
             .unwrap();
+        assert!(matches!(published_outcome, SignalPublishOutcome::Published));
+        let visible = store.visible(10).await.unwrap();
+        let published = &visible[0];
 
         assert_eq!(published.actor.id, candidate.actor.id);
         assert!(published.content.contains("remains unverified"));
@@ -371,13 +381,13 @@ mod tests {
         let mut old = candidate("sense_old");
         old.event_at = Some("2025-01-01".to_owned());
 
-        assert!(
+        assert!(matches!(
             store
                 .publish_with_content(&old, old.proposed_input.clone(), "credible".to_owned())
                 .await
-                .unwrap()
-                .is_none()
-        );
+                .unwrap(),
+            SignalPublishOutcome::RejectedStale
+        ));
         assert!(store.visible(10).await.unwrap().is_empty());
         let _ = tokio::fs::remove_file(path).await;
     }
@@ -390,27 +400,28 @@ mod tests {
             .as_nanos();
         let path = std::env::temp_dir().join(format!("symbiont-signals-fingerprint-{nonce}.json"));
         let store = SignalStore::open(path.clone()).await.unwrap();
-        let first = store
+        let first_outcome = store
             .publish_with_content(
                 &candidate("sense_first"),
                 "A model input.".to_owned(),
                 "credible".to_owned(),
             )
             .await
-            .unwrap()
             .unwrap();
+        assert!(matches!(first_outcome, SignalPublishOutcome::Published));
+        let first = store.visible(10).await.unwrap().remove(0);
         let mut repeated = candidate("sense_second");
         repeated.fingerprint = first.fingerprint.clone();
-        let again = store
+        let again_outcome = store
             .publish_with_content(
                 &repeated,
                 repeated.proposed_input.clone(),
                 "credible again".to_owned(),
             )
             .await
-            .unwrap()
             .unwrap();
-
+        assert!(matches!(again_outcome, SignalPublishOutcome::Existing));
+        let again = store.visible(10).await.unwrap().remove(0);
         assert_eq!(first.id, again.id);
         assert_eq!(store.visible(10).await.unwrap().len(), 1);
         let _ = tokio::fs::remove_file(path).await;

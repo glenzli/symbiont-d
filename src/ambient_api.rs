@@ -22,7 +22,7 @@ use crate::{
     codex::RuntimeEvent,
     secrets::{CredentialStatus, CredentialStore, SecretStore},
     sensing::{InputRoleSnapshot, SensingCandidateDraft, validate_candidate_drafts},
-    usage::InvocationRecord,
+    usage::{InvocationRecord, ToolTraceStep},
 };
 
 /// A connection and secret reference. Providers never decide what gets
@@ -572,6 +572,26 @@ impl AmbientScout {
         }
         let candidates = response_candidates(&payload)?;
         let completed = Utc::now();
+        let started_at = timestamp(started);
+        let completed_at = timestamp(completed);
+        let trace_steps = (!candidates.is_empty())
+            .then(|| ToolTraceStep {
+                sequence: 0,
+                namespace: "symbiont".to_owned(),
+                tool: "submit_sensing_candidates".to_owned(),
+                started_at: started_at.clone(),
+                completed_at: completed_at.clone(),
+                duration_ms: started_instant.elapsed().as_millis() as u64,
+                succeeded: true,
+                arguments: json!({"candidates": &candidates}),
+                result: json!({"accepted": true, "candidateCount": candidates.len()}),
+            })
+            .into_iter()
+            .collect();
+        let mut tool_calls = vec![provider.web_search_tool.clone()];
+        if !candidates.is_empty() {
+            tool_calls.push("submit_sensing_candidates".to_owned());
+        }
         let invocation = InvocationRecord {
             id: response_id.unwrap_or_else(|| request_id.clone()),
             parent_id: None,
@@ -588,8 +608,8 @@ impl AmbientScout {
             model_display_name: channel.name.clone(),
             effort: "input-only".to_owned(),
             service_tier: None,
-            started_at: timestamp(started),
-            completed_at: timestamp(completed),
+            started_at,
+            completed_at,
             duration_ms: started_instant.elapsed().as_millis() as u64,
             status: "completed".to_owned(),
             input_tokens: token(&payload, "/usage/input_tokens"),
@@ -600,12 +620,9 @@ impl AmbientScout {
                 "/usage/output_tokens_details/reasoning_tokens",
             ),
             total_tokens: token(&payload, "/usage/total_tokens"),
-            tool_calls: vec![
-                provider.web_search_tool.clone(),
-                "submit_sensing_candidates".to_owned(),
-            ],
+            tool_calls,
             produced_message: false,
-            trace_steps: Vec::new(),
+            trace_steps,
             context_snapshot: None,
             trace_events: Vec::new(),
         };

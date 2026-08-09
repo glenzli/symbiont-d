@@ -62,6 +62,8 @@ export function manualCompletionNotice(receipt) {
       failed: "运行中出现异常，可以稍后重新探索。",
       input_signals_broadcast:
         "已带回新的广域输入，可以直接回复；它们仍保持外部输入身份。",
+      input_signals_published:
+        "已带回新的广域输入，可以直接回复；它们仍保持外部输入身份。",
     }[receipt?.outcome] ||
     (receipt?.outcome?.startsWith("messaged")
       ? "已带回一条值得讨论的情报。"

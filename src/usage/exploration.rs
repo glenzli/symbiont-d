@@ -27,9 +27,10 @@ pub struct ExplorationRunSummary {
     pub search_queries: Vec<String>,
     pub sensing_candidate_count: usize,
     pub sensing_reviewed: bool,
-    pub sensing_broadcast_count: usize,
-    pub sensing_investigate_count: usize,
-    pub sensing_hold_count: usize,
+    pub sensing_input_count: usize,
+    pub sensing_published_count: usize,
+    pub sensing_suppressed_count: usize,
+    pub sensing_deep_count: usize,
     pub sensing_discard_count: usize,
     pub pcp_recall_calls: u64,
     pub pcp_write_calls: u64,
@@ -110,9 +111,10 @@ fn summarize(bundle: TraceBundle) -> ExplorationRunSummary {
     let mut fetch_focus = None;
     let mut sensing_candidate_count = 0_usize;
     let mut sensing_reviewed = false;
-    let mut sensing_broadcast_count = 0_usize;
-    let mut sensing_investigate_count = 0_usize;
-    let mut sensing_hold_count = 0_usize;
+    let mut sensing_input_count = 0_usize;
+    let mut sensing_published_count = 0_usize;
+    let mut sensing_suppressed_count = 0_usize;
+    let mut sensing_deep_count = 0_usize;
     let mut sensing_discard_count = 0_usize;
 
     for run in &bundle.runs {
@@ -191,13 +193,22 @@ fn summarize(bundle: TraceBundle) -> ExplorationRunSummary {
                             .get("disposition")
                             .and_then(serde_json::Value::as_str)
                         {
-                            Some("input" | "broadcast") => sensing_broadcast_count += 1,
-                            Some("deep" | "investigate") => sensing_investigate_count += 1,
-                            Some("hold") => sensing_hold_count += 1,
+                            Some("input" | "broadcast") => sensing_input_count += 1,
+                            Some("deep" | "investigate") => sensing_deep_count += 1,
                             Some("discard") => sensing_discard_count += 1,
                             _ => {}
                         }
                     }
+                    sensing_published_count +=
+                        step.result
+                            .pointer("/hostRouting/publishedInputCount")
+                            .and_then(serde_json::Value::as_u64)
+                            .unwrap_or_default() as usize;
+                    sensing_suppressed_count +=
+                        step.result
+                            .pointer("/hostRouting/suppressedInputCount")
+                            .and_then(serde_json::Value::as_u64)
+                            .unwrap_or_default() as usize;
                 }
             }
             if step.namespace == "symbiont" && step.tool == "fetch_url" {
@@ -313,9 +324,10 @@ fn summarize(bundle: TraceBundle) -> ExplorationRunSummary {
         search_queries,
         sensing_candidate_count,
         sensing_reviewed,
-        sensing_broadcast_count,
-        sensing_investigate_count,
-        sensing_hold_count,
+        sensing_input_count,
+        sensing_published_count,
+        sensing_suppressed_count,
+        sensing_deep_count,
         sensing_discard_count,
         pcp_recall_calls: bundle.pcp_recall_calls,
         pcp_write_calls: bundle.pcp_write_calls,

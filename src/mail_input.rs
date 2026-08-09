@@ -222,14 +222,10 @@ impl MailInputStore {
         let credential_path = config_path.with_file_name("mail-input-secrets.toml");
         let mut runtime = read_runtime(&runtime_path).await?;
         if migrate_runtime(&mut runtime) {
-            // The previous whole-message representation could permanently
-            // consume a mixed digest after one weak item poisoned review.
-            // Replay the bounded mailbox window once under the atomic-topic
-            // normalizer instead of silently losing those independent inputs.
             persist_runtime(&runtime_path, &runtime).await?;
             tracing::info!(
                 version = NORMALIZATION_VERSION,
-                "mail input cursor reset for candidate normalization upgrade"
+                "mail input normalization state upgraded without replaying consumed mail"
             );
         }
         persist_config(&config_path, &config).await?;
@@ -370,7 +366,11 @@ impl MailInputStore {
 
     /// Polls the selected mailbox without changing any message flags or
     /// mailbox state. New user input cancels the network operation promptly.
-    pub async fn poll(&self, mut input_events: watch::Receiver<u64>) -> Result<MailInputOutcome> {
+    pub async fn poll(
+        &self,
+        mut input_events: watch::Receiver<u64>,
+        candidate_capacity: usize,
+    ) -> Result<MailInputOutcome> {
         let config = self.config.read().await.clone();
         if !config.enabled {
             return Ok(empty_outcome());
@@ -412,7 +412,9 @@ impl MailInputStore {
                         sender_allowed(&message.document.sender, &config.allowed_senders)
                     })
                     .count();
-                let candidates = self.accept_new_messages(&config, mailbox.messages).await?;
+                let candidates = self
+                    .accept_new_messages(&config, mailbox.messages, candidate_capacity)
+                    .await?;
                 self.update_runtime(|runtime| {
                     runtime.last_succeeded_at = Some(timestamp(Utc::now()));
                     runtime.last_error = None;
@@ -456,9 +458,10 @@ impl MailInputStore {
         &self,
         config: &MailInputConfig,
         messages: Vec<RawMail>,
+        candidate_capacity: usize,
     ) -> Result<Vec<SensingCandidateDraft>> {
         let mut runtime = self.runtime.write().await;
-        let candidates = select_new_messages(&mut runtime, config, messages);
+        let candidates = select_new_messages(&mut runtime, config, messages, candidate_capacity);
         let snapshot = runtime.clone();
         drop(runtime);
         persist_runtime(&self.runtime_path, &snapshot).await?;
@@ -478,7 +481,9 @@ fn select_new_messages(
     runtime: &mut MailInputRuntime,
     config: &MailInputConfig,
     messages: Vec<RawMail>,
+    candidate_capacity: usize,
 ) -> Vec<SensingCandidateDraft> {
+    let candidate_limit = candidate_capacity.min(MAX_POLL_CANDIDATES);
     let mut candidates = Vec::new();
     for message in messages {
         if runtime
@@ -488,34 +493,49 @@ fn select_new_messages(
         {
             continue;
         }
-        remember_with_limit(
-            &mut runtime.seen_remote_ids,
-            message.remote_id.clone(),
-            MAX_SEEN_REMOTE_IDS,
-        );
         if runtime
             .seen_message_ids
             .iter()
             .any(|seen| seen == &message.id)
         {
+            remember_with_limit(
+                &mut runtime.seen_remote_ids,
+                message.remote_id,
+                MAX_SEEN_REMOTE_IDS,
+            );
             continue;
+        }
+        if !sender_allowed(&message.document.sender, &config.allowed_senders) {
+            remember_with_limit(
+                &mut runtime.seen_remote_ids,
+                message.remote_id,
+                MAX_SEEN_REMOTE_IDS,
+            );
+            remember_with_limit(
+                &mut runtime.seen_message_ids,
+                message.id,
+                MAX_SEEN_MESSAGE_IDS,
+            );
+            continue;
+        }
+        let message_candidates = message.document.into_candidates();
+        if candidates.len() + message_candidates.len() > candidate_limit {
+            // Do not advance either local cursor until the entire message can
+            // enter the transient queue. The next poll will retry it after the
+            // newer bounded batch has drained.
+            break;
         }
         remember_with_limit(
+            &mut runtime.seen_remote_ids,
+            message.remote_id,
+            MAX_SEEN_REMOTE_IDS,
+        );
+        remember_with_limit(
             &mut runtime.seen_message_ids,
-            message.id.clone(),
+            message.id,
             MAX_SEEN_MESSAGE_IDS,
         );
-        if !sender_allowed(&message.document.sender, &config.allowed_senders)
-            || candidates.len() >= MAX_POLL_CANDIDATES
-        {
-            continue;
-        }
-        for candidate in message.document.into_candidates() {
-            if candidates.len() >= MAX_POLL_CANDIDATES {
-                break;
-            }
-            candidates.push(candidate);
-        }
+        candidates.extend(message_candidates);
     }
     candidates
 }
@@ -750,8 +770,6 @@ fn migrate_runtime(runtime: &mut MailInputRuntime) -> bool {
     if runtime.normalization_version >= NORMALIZATION_VERSION {
         return false;
     }
-    runtime.seen_message_ids.clear();
-    runtime.seen_remote_ids.clear();
     runtime.normalization_version = NORMALIZATION_VERSION;
     true
 }
@@ -974,26 +992,89 @@ mod tests {
         };
         let mut runtime = MailInputRuntime::default();
         assert_eq!(
-            select_new_messages(&mut runtime, &config, vec![message()]).len(),
+            select_new_messages(&mut runtime, &config, vec![message()], MAX_POLL_CANDIDATES,).len(),
             1
         );
-        assert!(select_new_messages(&mut runtime, &config, vec![message()]).is_empty());
+        assert!(
+            select_new_messages(&mut runtime, &config, vec![message()], MAX_POLL_CANDIDATES,)
+                .is_empty()
+        );
         assert_eq!(runtime.seen_remote_ids.len(), 1);
         assert_eq!(runtime.seen_message_ids.len(), 1);
     }
 
     #[test]
-    fn normalization_upgrade_replays_the_bounded_mailbox_window_once() {
+    fn normalization_upgrade_preserves_the_consumed_mail_cursor() {
         let mut runtime = MailInputRuntime {
             seen_message_ids: VecDeque::from(["old-message".to_owned()]),
             seen_remote_ids: VecDeque::from(["old-remote".to_owned()]),
             ..MailInputRuntime::default()
         };
         assert!(migrate_runtime(&mut runtime));
-        assert!(runtime.seen_message_ids.is_empty());
-        assert!(runtime.seen_remote_ids.is_empty());
+        assert_eq!(runtime.seen_message_ids, ["old-message"]);
+        assert_eq!(runtime.seen_remote_ids, ["old-remote"]);
         assert_eq!(runtime.normalization_version, NORMALIZATION_VERSION);
         assert!(!migrate_runtime(&mut runtime));
+    }
+
+    #[test]
+    fn mailbox_cursor_waits_when_the_candidate_batch_cannot_fit_an_entire_message() {
+        let config = MailInputConfig {
+            allowed_senders: vec!["spark@google.com".to_owned()],
+            ..MailInputConfig::default()
+        };
+        let messages = (0..13)
+            .map(|index| RawMail {
+                remote_id: format!("mailbox|1|{index}"),
+                id: format!("daily-{index}@example.com"),
+                document: MailDocument::new(
+                    "spark@google.com".to_owned(),
+                    format!("Daily research {index}"),
+                    "A useful result.",
+                    None,
+                )
+                .unwrap(),
+            })
+            .collect();
+        let mut runtime = MailInputRuntime::default();
+
+        let candidates = select_new_messages(&mut runtime, &config, messages, MAX_POLL_CANDIDATES);
+
+        assert_eq!(candidates.len(), MAX_POLL_CANDIDATES);
+        assert_eq!(runtime.seen_remote_ids.len(), MAX_POLL_CANDIDATES);
+        assert_eq!(runtime.seen_message_ids.len(), MAX_POLL_CANDIDATES);
+        assert!(
+            !runtime
+                .seen_remote_ids
+                .iter()
+                .any(|id| id == "mailbox|1|12")
+        );
+    }
+
+    #[test]
+    fn full_candidate_pool_leaves_allowed_mail_unconsumed() {
+        let config = MailInputConfig {
+            allowed_senders: vec!["spark@google.com".to_owned()],
+            ..MailInputConfig::default()
+        };
+        let message = RawMail {
+            remote_id: "mailbox|1|pending".to_owned(),
+            id: "pending@example.com".to_owned(),
+            document: MailDocument::new(
+                "spark@google.com".to_owned(),
+                "Pending research".to_owned(),
+                "A useful result.",
+                None,
+            )
+            .unwrap(),
+        };
+        let mut runtime = MailInputRuntime::default();
+
+        let candidates = select_new_messages(&mut runtime, &config, vec![message], 0);
+
+        assert!(candidates.is_empty());
+        assert!(runtime.seen_remote_ids.is_empty());
+        assert!(runtime.seen_message_ids.is_empty());
     }
 
     #[test]

@@ -349,9 +349,12 @@ function renderRun(run) {
   const sensingOutcome = () => {
     if (!run.sensingCandidateCount) return "完成感知，没有形成候选";
     if (!run.sensingReviewed) return "候选交接异常，未完成复核";
-    if (run.sensingInvestigateCount) return "完成感知，已升级深入复核";
-    if (run.sensingBroadcastCount) {
-      return `完成感知，已呈现 ${run.sensingBroadcastCount} 条广域输入`;
+    if (run.sensingDeepCount) return "完成感知，已升级深入复核";
+    if (run.sensingPublishedCount) {
+      return `完成感知，已呈现 ${run.sensingPublishedCount} 条广域输入`;
+    }
+    if (run.sensingInputCount) {
+      return `完成感知，${run.sensingInputCount} 条候选通过评审，但没有新增输入`;
     }
     return "完成感知，已复核，暂不呈现";
   };
@@ -366,9 +369,11 @@ function renderRun(run) {
           : run.outreachKind === "note"
             ? "留了一条新消息"
             : "发起了一次介入"
-        : sensingOnly
-          ? sensingOutcome()
-          : "完成，决定不打扰";
+        : run.sensingPublishedCount
+          ? `带回了 ${run.sensingPublishedCount} 条外部输入`
+          : sensingOnly
+            ? sensingOutcome()
+            : "完成，决定不打扰";
   time.dateTime = run.completedAt;
   time.textContent = new Date(run.completedAt).toLocaleString([], {
     month: "numeric",
@@ -417,13 +422,17 @@ function renderRun(run) {
         ? run.sensingCandidateCount
           ? !run.sensingReviewed
             ? `形成了 ${run.sensingCandidateCount} 条临时候选，但交接到复核阶段时发生异常；本轮没有将它们静默丢弃。`
-            : run.sensingBroadcastCount
-              ? `已将 ${run.sensingBroadcastCount} 条可信候选作为可回复的广域输入呈现；它们不会直接写入记忆。`
-              : run.sensingInvestigateCount
-                ? `其中 ${run.sensingInvestigateCount} 条候选已升级为深入复核。`
-                : `已复核 ${run.sensingCandidateCount} 条临时候选，本轮决定暂不呈现。`
+            : run.sensingPublishedCount
+              ? `已将 ${run.sensingPublishedCount} 条候选作为可回复的外部输入呈现；它们不会直接写入记忆。`
+              : run.sensingInputCount
+                ? `${run.sensingInputCount} 条候选通过了外部输入评审，但重复或过期内容没有再次呈现。`
+                : run.sensingDeepCount
+                  ? `其中 ${run.sensingDeepCount} 条候选已升级为深入复核。`
+                  : `已复核 ${run.sensingCandidateCount} 条临时候选，本轮决定暂不呈现。`
           : "完成了外部信息感知，但没有形成候选。"
-        : "模型完成了检索和判断，但没有发现值得介入或留给你的新信号。"
+        : run.sensingPublishedCount
+          ? `本轮同时完成了深入判断，并带回 ${run.sensingPublishedCount} 条保持来源身份的外部输入。`
+          : "模型完成了检索和判断，但没有发现值得介入或留给你的新信号。"
       : sensingOnly
         ? "本次感知的详细过程已过期。"
         : "本次没有发出消息；详细判断过程已过期。";
