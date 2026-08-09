@@ -303,6 +303,22 @@ completionHandler:(void (^)(NSArray<NSURL *> *URLs))completionHandler {
     }];
 }
 
+- (void)webView:(WKWebView *)webView
+requestMediaCapturePermissionForOrigin:(WKSecurityOrigin *)origin
+initiatedByFrame:(WKFrameInfo *)frame
+          type:(WKMediaCaptureType)type
+decisionHandler:(void (^)(WKPermissionDecision decision))decisionHandler {
+    (void)webView;
+    BOOL isMainFrame = frame.isMainFrame;
+    BOOL isApplicationOrigin = [origin.protocol isEqualToString:self.endpoint.scheme] &&
+                               [origin.host isEqualToString:self.endpoint.host] &&
+                               origin.port == self.endpoint.port.integerValue;
+    BOOL requestsOnlyMicrophone = type == WKMediaCaptureTypeMicrophone;
+    decisionHandler(isMainFrame && isApplicationOrigin && requestsOnlyMicrophone
+        ? WKPermissionDecisionGrant
+        : WKPermissionDecisionDeny);
+}
+
 - (void)userContentController:(WKUserContentController *)userContentController
       didReceiveScriptMessage:(WKScriptMessage *)message {
     (void)userContentController;

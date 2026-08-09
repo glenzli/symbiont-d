@@ -94,7 +94,7 @@
               <div class="top-menu-memory-state" title="当前本地记忆长度">
                 <span>context</span>
                 <strong id="memory-size">0</strong>
-              </div>
+            </div>
             </div>
           </details>
         </div>
@@ -236,6 +236,12 @@
                 </section>
               </div>
             </div>
+              <div id="voice-recording-status" class="voice-recording-status" role="status" hidden>
+                <span class="voice-recording-indicator" aria-hidden="true"></span>
+                <span id="voice-recording-label" class="voice-recording-label">正在录音</span>
+                <canvas id="voice-waveform" class="voice-waveform" aria-hidden="true"></canvas>
+                <time id="voice-recording-elapsed" class="voice-recording-elapsed">0:00</time>
+              </div>
             <div class="composer-controls">
               <div class="compute-mode-picker">
                 <label class="sr-only" for="compute-mode">本轮计算级别</label>
@@ -269,6 +275,14 @@
                 </div>
               </div>
               <button
+                id="voice-input"
+                class="composer-voice-button"
+                type="button"
+                title="语音输入"
+                aria-label="语音输入"
+                data-tooltip="语音输入"
+              ><i data-lucide="mic" aria-hidden="true"></i><span class="voice-stop-symbol" aria-hidden="true"></span></button>
+              <button
                 id="send"
                 class="composer-send-button"
                 type="submit"
@@ -295,8 +309,11 @@
           multiple
           hidden
         >
-        <p id="composer-state" class="composer-state" role="status"></p>
       </form>
+      <footer id="app-statusbar" class="app-statusbar" aria-live="polite">
+        <span id="app-status-message" class="app-status-message" role="status"></span>
+        <span id="app-status-runtime" class="app-status-runtime"></span>
+      </footer>
     </main>
 
     <dialog id="settings-dialog" class="panel-dialog">
@@ -658,8 +675,8 @@
       <section class="tab-panel" data-settings-panel="system" hidden>
         <form id="bridge-form">
           <header class="settings-panel-intro">
-            <h3>连接与权限</h3>
-            <p>控制 symbiont-d 如何读取 Codex 任务，以及 Codex 如何请求相关上下文。</p>
+            <h3>连接、本地服务与权限</h3>
+            <p>控制 symbiont-d 如何读取 Codex 任务、使用本地转写，以及 Codex 如何请求相关上下文。</p>
           </header>
           <div class="setting-section">
             <label class="toggle-row">
@@ -677,6 +694,27 @@
           <footer class="dialog-actions">
             <span id="bridge-save-state" role="status"></span>
             <button class="primary-button" type="submit">保存</button>
+          </footer>
+        </form>
+        <form id="audio-transcription-form">
+          <header class="settings-panel-intro compact-intro">
+            <h3>本地语音转写</h3>
+            <p>录音仅在本机临时保留，转写后进入可编辑输入框；只有你发送的文字才会进入对话与 PCP。请先在 infer-runtime 中为 <code>symbiont-d</code> 注册本地 consumer，并填入它的令牌。</p>
+          </header>
+          <div class="setting-section">
+            <div class="ambient-config-row-head"><strong>infer-runtime</strong><span id="audio-transcription-availability" class="ambient-row-status">正在读取</span></div>
+            <div class="field-grid">
+              <label class="field"><span>本地地址</span><input id="audio-transcription-base-url" type="url" maxlength="300" placeholder="http://127.0.0.1:8787"></label>
+              <label class="field"><span>语言</span><input id="audio-transcription-language" type="text" maxlength="16" placeholder="zh"></label>
+              <label class="field"><span>令牌存储</span><select id="audio-transcription-credential-store"><option value="config_file">本地配置文件</option><option value="keychain">系统凭据库</option></select></label>
+              <label class="field"><span>infer-runtime 令牌</span><input id="audio-transcription-credential-value" type="password" autocomplete="new-password" placeholder="留空以保持现有令牌"></label>
+              <label class="toggle-row compact-toggle"><span>启用</span><input id="audio-transcription-enabled" type="checkbox"></label>
+            </div>
+            <small id="audio-transcription-credential-note" class="ambient-credential-note"></small>
+          </div>
+          <footer class="dialog-actions">
+            <span id="audio-transcription-save-state" role="status"></span>
+            <button class="primary-button" type="submit">保存语音转写</button>
           </footer>
         </form>
       </section>

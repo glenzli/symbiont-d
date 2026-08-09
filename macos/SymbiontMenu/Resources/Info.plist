@@ -33,5 +33,7 @@
   </dict>
   <key>NSHighResolutionCapable</key>
   <true/>
+  <key>NSMicrophoneUsageDescription</key>
+  <string>symbiont-d uses the microphone only while you explicitly record a voice message for local transcription.</string>
 </dict>
 </plist>

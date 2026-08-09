@@ -2,6 +2,7 @@
 
 mod ambient_api;
 mod asset;
+mod audio_transcription;
 mod autonomy;
 mod bridge;
 mod codex;
@@ -50,6 +51,7 @@ use std::{
 use ambient_api::{AmbientScout, AmbientTopologyStore};
 use anyhow::{Context, Result};
 use asset::AssetStore;
+use audio_transcription::AudioTranscriptionStore;
 use autonomy::AutonomyStore;
 use bridge::CodexBridge;
 use codex::{CodexClient, CodexConfig, CodexTaskSources};
@@ -310,6 +312,14 @@ async fn main() -> Result<()> {
         ))
         .await?,
     );
+    let audio_transcription = Arc::new(
+        AudioTranscriptionStore::open(resolve_data_path(
+            &workspace,
+            "SYMBIONT_AUDIO_TRANSCRIPTION_PATH",
+            "infer-runtime.toml",
+        ))
+        .await?,
+    );
     let signals = Arc::new(
         SignalStore::open(resolve_data_path(
             &workspace,
@@ -444,6 +454,7 @@ async fn main() -> Result<()> {
         compute,
         ambient_provider,
         mail_input,
+        audio_transcription,
         compute_policies,
         usage,
         rate_limits,

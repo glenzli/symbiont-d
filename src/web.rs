@@ -22,6 +22,10 @@ use tokio_stream::{StreamExt, wrappers::ReceiverStream};
 use crate::{
     ambient_api::{AmbientConfig, AmbientSnapshot, AmbientTopologyStore},
     asset::{AssetStore, MAX_IMAGE_BYTES, MAX_IMAGES_PER_MESSAGE, SavedImage},
+    audio_transcription::{
+        AudioTranscriptionConfig, AudioTranscriptionSnapshot, AudioTranscriptionStore,
+        MAX_AUDIO_BYTES, TranscriptionResult,
+    },
     autonomy::{AutonomyConfig, AutonomyStore},
     bridge::{
         BridgeContextPacket, BridgeExpandRequest, BridgeRecallBundle, BridgeRecallExpansion,
@@ -79,6 +83,7 @@ const IDENTITY_UI_JS: &str = include_str!("../web/identity-ui.js");
 const SETTINGS_JS: &str = include_str!("../web/settings.js");
 const USAGE_UI_JS: &str = include_str!("../web/usage-ui.js");
 const COMPOSER_CONTEXT_UI_JS: &str = include_str!("../web/composer-context-ui.js");
+const VOICE_INPUT_JS: &str = include_str!("../web/voice-input.js");
 const EXPLORATION_UI_JS: &str = include_str!("../web/exploration-ui.js");
 const EXPLORATION_RECEIPT_JS: &str = include_str!("../web/exploration-receipt.js");
 const REFLECTION_UI_JS: &str = include_str!("../web/reflection-ui.js");
@@ -112,6 +117,7 @@ pub struct AppState {
     compute: Arc<ComputeStore>,
     ambient: Arc<AmbientTopologyStore>,
     mail_input: Arc<MailInputStore>,
+    audio_transcription: Arc<AudioTranscriptionStore>,
     compute_policies: Arc<ComputePolicyStore>,
     usage: Arc<UsageStore>,
     rate_limits: Arc<RwLock<Option<RateLimitInfo>>>,
@@ -140,6 +146,7 @@ impl AppState {
         compute: Arc<ComputeStore>,
         ambient: Arc<AmbientTopologyStore>,
         mail_input: Arc<MailInputStore>,
+        audio_transcription: Arc<AudioTranscriptionStore>,
         compute_policies: Arc<ComputePolicyStore>,
         usage: Arc<UsageStore>,
         rate_limits: Arc<RwLock<Option<RateLimitInfo>>>,
@@ -169,6 +176,7 @@ impl AppState {
             compute,
             ambient,
             mail_input,
+            audio_transcription,
             compute_policies,
             usage,
             rate_limits,
@@ -229,6 +237,7 @@ struct BootstrapResponse {
     compute: ComputeConfig,
     ambient: AmbientSnapshot,
     mail_input: MailInputSnapshot,
+    audio_transcription: AudioTranscriptionSnapshot,
     compute_policies: Vec<ComputeTopicPolicy>,
     rate_limits: Option<RateLimitInfo>,
     usage: UsageHeadline,
@@ -256,6 +265,7 @@ struct RuntimeResponse {
     usage: UsageHeadline,
     ambient: AmbientSnapshot,
     mail_input: MailInputSnapshot,
+    audio_transcription: AudioTranscriptionSnapshot,
     exploration: ExplorationSnapshot,
     reflection: ReflectionRuntime,
     reconciliation: ReconciliationRuntime,
@@ -501,6 +511,7 @@ pub fn router(state: AppState) -> Router {
         .route("/settings.js", get(settings_js))
         .route("/usage-ui.js", get(usage_ui_js))
         .route("/composer-context-ui.js", get(composer_context_ui_js))
+        .route("/voice-input.js", get(voice_input_js))
         .route("/exploration-ui.js", get(exploration_ui_js))
         .route("/exploration-receipt.js", get(exploration_receipt_js))
         .route("/reflection-ui.js", get(reflection_ui_js))
@@ -551,6 +562,8 @@ pub fn router(state: AppState) -> Router {
         .route("/api/compute", post(update_compute))
         .route("/api/ambient", post(update_ambient))
         .route("/api/mail-input", post(update_mail_input))
+        .route("/api/audio-transcription", post(update_audio_transcription))
+        .route("/api/voice/transcriptions", post(transcribe_voice))
         .route("/api/compute/policies", post(update_compute_policies))
         .route("/api/stats", get(stats))
         .route("/api/runtime", get(runtime))
@@ -673,6 +686,13 @@ async fn composer_context_ui_js() -> impl IntoResponse {
     (
         [(header::CONTENT_TYPE, "text/javascript; charset=utf-8")],
         COMPOSER_CONTEXT_UI_JS,
+    )
+}
+
+async fn voice_input_js() -> impl IntoResponse {
+    (
+        [(header::CONTENT_TYPE, "text/javascript; charset=utf-8")],
+        VOICE_INPUT_JS,
     )
 }
 
@@ -828,6 +848,7 @@ async fn bootstrap(State(state): State<AppState>) -> Result<Json<BootstrapRespon
         compute: state.compute.snapshot().await,
         ambient: state.ambient.snapshot().await,
         mail_input: state.mail_input.snapshot().await,
+        audio_transcription: state.audio_transcription.snapshot().await,
         compute_policies: state.compute_policies.snapshot().await,
         rate_limits: state.rate_limits.read().await.clone(),
         usage,
@@ -1058,6 +1079,57 @@ async fn update_mail_input(
     Ok(Json(snapshot))
 }
 
+async fn update_audio_transcription(
+    State(state): State<AppState>,
+    Json(config): Json<AudioTranscriptionConfig>,
+) -> Result<Json<AudioTranscriptionSnapshot>, ApiError> {
+    state
+        .audio_transcription
+        .update(config)
+        .await
+        .map(Json)
+        .map_err(ApiError::bad_request)
+}
+
+async fn transcribe_voice(
+    State(state): State<AppState>,
+    mut multipart: Multipart,
+) -> Result<Json<TranscriptionResult>, ApiError> {
+    let mut audio = None;
+    while let Some(field) = multipart
+        .next_field()
+        .await
+        .map_err(|error| ApiError::bad_request(format!("Invalid voice body: {error}")))?
+    {
+        if field.name() != Some("audio") {
+            continue;
+        }
+        if audio.is_some() {
+            return Err(ApiError::bad_request(
+                "Only one audio recording is allowed.",
+            ));
+        }
+        let filename = field.file_name().map(str::to_owned);
+        let mime_type = field.content_type().map(ToString::to_string);
+        let bytes = field.bytes().await.map_err(|error| {
+            ApiError::bad_request(format!("Could not read voice recording: {error}"))
+        })?;
+        if bytes.len() > MAX_AUDIO_BYTES {
+            return Err(ApiError::bad_request("Voice recording exceeds 25 MiB."));
+        }
+        audio = Some((filename, mime_type, bytes.to_vec()));
+    }
+    let Some((filename, mime_type, audio)) = audio else {
+        return Err(ApiError::bad_request("Choose a voice recording first."));
+    };
+    state
+        .audio_transcription
+        .transcribe(filename.as_deref(), mime_type.as_deref(), audio)
+        .await
+        .map(Json)
+        .map_err(ApiError::bad_request)
+}
+
 async fn update_compute_policies(
     State(state): State<AppState>,
     Json(policies): Json<Vec<ComputeTopicPolicyDraft>>,
@@ -1198,6 +1270,7 @@ async fn runtime(
         usage,
         ambient: state.ambient.snapshot().await,
         mail_input: state.mail_input.snapshot().await,
+        audio_transcription: state.audio_transcription.snapshot().await,
         exploration: state.exploration.snapshot().await,
         reflection: state.reflection.runtime().await,
         reconciliation: state.reconciliation.runtime().await,

@@ -11,6 +11,8 @@
 /data/mail-input.toml
 /data/mail-input.runtime.json
 /data/mail-input-secrets.toml
+/data/infer-runtime.toml
+/data/infer-runtime-secrets.toml
 /data/profile.toml
 /data/orientation.md
 /data/autonomy.toml

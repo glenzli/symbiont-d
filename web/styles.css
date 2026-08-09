@@ -109,7 +109,7 @@ input:focus-visible {
   height: 100dvh;
   margin: 0 auto;
   display: grid;
-  grid-template-rows: auto minmax(0, 1fr) auto auto;
+  grid-template-rows: auto minmax(0, 1fr) auto auto auto;
   background: var(--surface);
   border-inline: 1px solid var(--border);
 }
@@ -1362,6 +1362,7 @@ html[data-native-shell="macos"] .topbar {
   display: flex;
   align-items: center;
   justify-content: space-between;
+  gap: 6px;
   position: relative;
 }
 
@@ -1376,6 +1377,10 @@ html[data-native-shell="macos"] .topbar {
   min-height: 34px;
   display: flex;
   align-items: center;
+}
+
+.composer-footer:has(.voice-recording-status:not([hidden])) .compute-mode-picker {
+  display: none;
 }
 
 .compute-mode-picker {
@@ -1483,6 +1488,59 @@ html[data-native-shell="macos"] .topbar {
   color: var(--button-text);
   background: var(--button);
   transition: background 140ms ease, opacity 140ms ease;
+}
+
+.composer .composer-voice-button {
+  width: 30px;
+  height: 30px;
+  margin-right: 4px;
+  padding: 0;
+  display: inline-grid;
+  place-items: center;
+  border: 0;
+  border-radius: 50%;
+  color: var(--text-soft);
+  background: transparent;
+  transition: color 140ms ease, background 140ms ease;
+}
+
+.composer .composer-voice-button:hover:not(:disabled) {
+  color: var(--text);
+  background: var(--surface-subtle);
+}
+
+.composer .composer-voice-button svg {
+  width: 16px;
+  height: 16px;
+}
+
+.voice-stop-symbol {
+  width: 10px;
+  height: 10px;
+  display: none;
+  border-radius: 2px;
+  background: currentcolor;
+}
+
+.composer .composer-voice-button.recording {
+  color: var(--danger-text);
+  background: color-mix(in srgb, var(--danger-text) 12%, transparent);
+}
+
+.composer .composer-voice-button.recording svg {
+  display: none;
+}
+
+.composer .composer-voice-button.recording .voice-stop-symbol {
+  display: block;
+}
+
+.composer .composer-voice-button.transcribing svg {
+  animation: voice-transcribing 900ms ease-in-out infinite alternate;
+}
+
+@keyframes voice-transcribing {
+  to { opacity: 0.35; transform: scale(0.82); }
 }
 
 .composer .composer-send-button:hover:not(:disabled) {
@@ -1851,15 +1909,125 @@ html[data-native-shell="macos"] .topbar {
   line-height: 1;
 }
 
-.composer-state {
-  min-height: 0;
-  margin: 0;
-  color: var(--danger-text);
-  font-size: 9px;
+.app-statusbar {
+  min-height: 25px;
+  padding: 0 12px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  border-top: 1px solid var(--border);
+  color: var(--text-faint);
+  background: var(--surface-subtle);
+  font-size: 10px;
+  line-height: 1.2;
 }
 
-.composer-state:not(:empty) {
-  margin-top: 5px;
+.app-status-message,
+.app-status-runtime {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.app-status-message:empty::before {
+  color: var(--text-faint);
+  content: "就绪";
+}
+
+.app-status-message:not(:empty) {
+  color: var(--text-soft);
+}
+
+.app-status-runtime {
+  margin-left: auto;
+  text-align: right;
+}
+
+.app-statusbar[data-runtime-state="working"] .app-status-runtime::before {
+  width: 5px;
+  height: 5px;
+  margin-right: 5px;
+  display: inline-block;
+  border-radius: 50%;
+  background: var(--text-soft);
+  content: "";
+  animation: app-status-pulse 1.2s ease-in-out infinite;
+  vertical-align: 1px;
+}
+
+.app-statusbar[data-runtime-state="error"] .app-status-runtime,
+.app-statusbar[data-runtime-state="limited"] .app-status-runtime {
+  color: var(--danger-text);
+}
+
+@keyframes app-status-pulse {
+  50% { opacity: 0.35; }
+}
+
+.voice-recording-status {
+  min-width: 0;
+  height: 30px;
+  flex: 1;
+  padding: 0 2px 0 5px;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  color: var(--text-soft);
+  font-size: 10px;
+  font-weight: 600;
+}
+
+.voice-recording-status[hidden] {
+  display: none;
+}
+
+.voice-recording-indicator {
+  width: 7px;
+  height: 7px;
+  flex: 0 0 auto;
+  border-radius: 50%;
+  background: var(--danger-text);
+}
+
+.voice-recording-status[data-state="recording"] .voice-recording-indicator {
+  animation: voice-recording-pulse 1s ease-in-out infinite;
+}
+
+.voice-recording-status[data-state="recording"] .voice-recording-label {
+  display: none;
+}
+
+.voice-recording-status[data-state="transcribing"] .voice-recording-indicator {
+  background: var(--text-faint);
+}
+
+.voice-waveform {
+  width: 100%;
+  height: 22px;
+  min-width: 0;
+  flex: 1;
+  display: block;
+}
+
+.voice-recording-elapsed {
+  min-width: 30px;
+  color: var(--text-soft);
+  font-variant-numeric: tabular-nums;
+  text-align: right;
+}
+
+.voice-recording-status[data-state="transcribing"] .voice-waveform {
+  opacity: 0.32;
+}
+
+.voice-recording-label {
+  white-space: nowrap;
+}
+
+@keyframes voice-recording-pulse {
+  50% { opacity: 0.35; }
 }
 
 .composer.response-active {

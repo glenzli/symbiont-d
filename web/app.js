@@ -7,6 +7,7 @@ import { initExplorationUi } from "/exploration-ui.js";
 import { initIdentityUi } from "/identity-ui.js";
 import { initComputeModeUi } from "/compute-mode-ui.js";
 import { initComposerContextUi } from "/composer-context-ui.js";
+import { initVoiceInput } from "/voice-input.js";
 import { initMessageActions } from "/message-actions.js";
 import { initMessageSync } from "/message-sync.js";
 import { initPermissionUi } from "/permission-ui.js";
@@ -24,6 +25,7 @@ const appState = {
   compute: null,
   ambient: null,
   mailInput: null,
+  audioTranscription: null,
   computePolicies: [],
   identity: { avatar: null },
   profile: { status: "unconfigured", mode: null, orientation: "" },
@@ -53,10 +55,17 @@ const composer = document.querySelector("#composer");
 const input = document.querySelector("#message");
 const computeMode = document.querySelector("#compute-mode");
 const sendButton = document.querySelector("#send");
+const voiceInputButton = document.querySelector("#voice-input");
+const voiceRecordingStatus = document.querySelector("#voice-recording-status");
+const voiceRecordingLabel = document.querySelector("#voice-recording-label");
+const voiceWaveform = document.querySelector("#voice-waveform");
+const voiceRecordingElapsed = document.querySelector("#voice-recording-elapsed");
 const stopResponseButton = document.querySelector("#stop-response");
 const imageInput = document.querySelector("#image-input");
 const attachmentTray = document.querySelector("#attachment-tray");
-const composerState = document.querySelector("#composer-state");
+const appStatusBar = document.querySelector("#app-statusbar");
+const composerState = document.querySelector("#app-status-message");
+const appStatusRuntime = document.querySelector("#app-status-runtime");
 const connectionStatus = document.querySelector("#connection-status");
 const memorySize = document.querySelector("#memory-size");
 const tokenTotal = document.querySelector("#token-total");
@@ -149,6 +158,18 @@ const topicUi = initTopicUi({
   },
 });
 const computeModeUi = initComputeModeUi();
+const voiceInput = initVoiceInput({
+  state: appState,
+  input,
+  button: voiceInputButton,
+  status: voiceRecordingStatus,
+  statusLabel: voiceRecordingLabel,
+  waveform: voiceWaveform,
+  elapsed: voiceRecordingElapsed,
+  notify: notifyComposer,
+  setPersistentStatus,
+  resize: resizeComposer,
+});
 initTopbarUi();
 renderIcons();
 
@@ -496,7 +517,8 @@ function setActivity(message, event) {
   message.classList.remove("response-placeholder");
   message.classList.add("pending");
   body.textContent = event.label;
-  connectionStatus.textContent = event.label;
+  connectionStatus.textContent = "在线";
+  setRuntimeStatus(event.label, "working");
   foot.hidden = false;
 
   const refresh = () => {
@@ -559,36 +581,44 @@ function renderUsage() {
 function renderRuntimeStatus() {
   if (busy) return;
   if (appState.profile.status === "calibrating") {
-    connectionStatus.textContent = "初始化对话中";
+    connectionStatus.textContent = "初始化中";
+    setRuntimeStatus("正在初始化对话", "working");
     return;
   }
+  connectionStatus.textContent = "在线";
   const exploration = appState.exploration;
   const phase = exploration?.phase;
   if (phase === "exploring") {
-    connectionStatus.textContent =
-      exploration.currentActivity?.label || "正在主动探索";
+    setRuntimeStatus(exploration.currentActivity?.label || "正在主动探索", "working");
   } else if (phase === "quiet_hours") {
-    connectionStatus.textContent = "在线 · 安静时段";
+    setRuntimeStatus("主动探索处于安静时段");
   } else if (phase === "token_limit") {
-    connectionStatus.textContent = "在线 · 今日主动探索预算已用尽";
+    setRuntimeStatus("今日主动探索预算已用尽", "limited");
   } else if (phase === "message_limit") {
-    connectionStatus.textContent = "在线 · 今日主动消息额度已用尽";
+    setRuntimeStatus("今日主动消息额度已用尽", "limited");
   } else if (phase === "error") {
-    connectionStatus.textContent = "在线 · 探索运行异常";
+    setRuntimeStatus("最近一次探索运行异常", "error");
   } else if (phase === "waiting" && exploration.nextRunAt) {
     const candidates = exploration.pendingCandidateCount
       ? ` · 最近候选 ${exploration.pendingCandidateCount} 条`
       : "";
-    connectionStatus.textContent = `在线 · 下次感知 ${new Date(
+    setRuntimeStatus(`下次探索 ${new Date(
       exploration.nextRunAt,
-    ).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}${candidates}`;
+    ).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}${candidates}`);
   } else {
     const reflection = appState.reflection?.runtime || appState.reflection;
-    connectionStatus.textContent =
+    setRuntimeStatus(
       reflection?.phase === "reflecting"
         ? reflection.currentActivity || "正在整理近期对话"
-        : "在线";
+        : "准备就绪",
+      reflection?.phase === "reflecting" ? "working" : "idle",
+    );
   }
+}
+
+function setRuntimeStatus(message, state = "idle") {
+  appStatusRuntime.textContent = message;
+  appStatusBar.dataset.runtimeState = state;
 }
 
 function applyRuntime(payload) {
@@ -596,6 +626,8 @@ function applyRuntime(payload) {
   appState.usage = payload.usage || appState.usage;
   appState.ambient = payload.ambient || appState.ambient;
   appState.mailInput = payload.mailInput || appState.mailInput;
+  appState.audioTranscription =
+    payload.audioTranscription || appState.audioTranscription;
   appState.exploration = payload.exploration || appState.exploration;
   if (payload.reflection) {
     appState.reflection = appState.reflection?.config
@@ -625,6 +657,7 @@ function applyRuntime(payload) {
   explorationUi.runtimeUpdated();
   composerContextUi.configUpdated();
   permissionUi.render();
+  voiceInput.configUpdated();
   turnDispositionUi.applyAll(payload.turnDispositions);
 }
 
@@ -662,6 +695,7 @@ async function bootstrap() {
     renderRuntimeStatus();
     identityUi.render();
     settingsUi.render();
+    voiceInput.configUpdated();
     explorationUi.runtimeUpdated();
     composerContextUi.configUpdated();
     composerContextUi.warm();
@@ -981,9 +1015,17 @@ function signalTyping(typing) {
 function notifyComposer(message) {
   clearTimeout(composerNoticeTimer);
   composerState.textContent = message;
+  appStatusBar.dataset.notice = message ? "active" : "idle";
   composerNoticeTimer = window.setTimeout(() => {
     if (composerState.textContent === message) composerState.textContent = "";
+    if (!composerState.textContent) appStatusBar.dataset.notice = "idle";
   }, 2200);
+}
+
+function setPersistentStatus(message) {
+  clearTimeout(composerNoticeTimer);
+  composerState.textContent = message;
+  appStatusBar.dataset.notice = message ? "active" : "idle";
 }
 
 async function performMessageAction(action, message, entry) {

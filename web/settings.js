@@ -37,6 +37,15 @@ export function initSettings(state) {
   const mailInputCredentialNote = document.querySelector("#mail-input-credential-note");
   const mailInputRuntimeNote = document.querySelector("#mail-input-runtime-note");
   const mailInputSaveState = document.querySelector("#mail-input-save-state");
+  const audioTranscriptionForm = document.querySelector("#audio-transcription-form");
+  const audioTranscriptionBaseUrl = document.querySelector("#audio-transcription-base-url");
+  const audioTranscriptionLanguage = document.querySelector("#audio-transcription-language");
+  const audioTranscriptionCredentialStore = document.querySelector("#audio-transcription-credential-store");
+  const audioTranscriptionCredentialValue = document.querySelector("#audio-transcription-credential-value");
+  const audioTranscriptionEnabled = document.querySelector("#audio-transcription-enabled");
+  const audioTranscriptionAvailability = document.querySelector("#audio-transcription-availability");
+  const audioTranscriptionCredentialNote = document.querySelector("#audio-transcription-credential-note");
+  const audioTranscriptionSaveState = document.querySelector("#audio-transcription-save-state");
   const computePolicyList = document.querySelector("#compute-policy-list");
   const computePolicyTemplate = document.querySelector(
     "#compute-policy-template",
@@ -149,6 +158,18 @@ export function initSettings(state) {
       ? `上次接收 ${inbox.lastReceivedCount || 0} 封：${new Date(inbox.lastReceivedAt).toLocaleString()}`
       : "尚未接收到新的白名单邮件。";
     mailInputRuntimeNote.textContent = inbox.lastError ? `上次连接失败：${inbox.lastError}` : received;
+  }
+
+  function renderAudioTranscription() {
+    if (!state.audioTranscription) return;
+    const transcription = state.audioTranscription;
+    audioTranscriptionBaseUrl.value = transcription.baseUrl || "http://127.0.0.1:8787";
+    audioTranscriptionLanguage.value = transcription.language || "zh";
+    audioTranscriptionCredentialStore.value = transcription.credentialStore || "config_file";
+    audioTranscriptionCredentialValue.value = "";
+    audioTranscriptionEnabled.checked = transcription.enabled === true;
+    audioTranscriptionAvailability.textContent = availabilityText(transcription.availability);
+    audioTranscriptionCredentialNote.textContent = credentialNote(transcription);
   }
 
   function availabilityText(availability, runtime = {}) {
@@ -411,6 +432,35 @@ export function initSettings(state) {
     }
   }
 
+  function audioTranscriptionFormValue() {
+    return {
+      enabled: audioTranscriptionEnabled.checked,
+      baseUrl: audioTranscriptionBaseUrl.value.trim(),
+      language: audioTranscriptionLanguage.value.trim(),
+      credentialStore: audioTranscriptionCredentialStore.value,
+      credentialValue: audioTranscriptionCredentialValue.value || null,
+    };
+  }
+
+  async function saveAudioTranscription(event) {
+    event.preventDefault();
+    audioTranscriptionSaveState.textContent = "保存中";
+    try {
+      state.audioTranscription = await responseJson(
+        await fetch("/api/audio-transcription", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(audioTranscriptionFormValue()),
+        }),
+        "本地语音转写保存失败",
+      );
+      renderAudioTranscription();
+      audioTranscriptionSaveState.textContent = "已保存";
+    } catch (error) {
+      audioTranscriptionSaveState.textContent = error.message;
+    }
+  }
+
   async function saveAutonomy(event) {
     event.preventDefault();
     autonomySaveState.textContent = "保存中";
@@ -483,6 +533,7 @@ export function initSettings(state) {
     renderCompute();
     renderAmbient();
     renderMailInput();
+    renderAudioTranscription();
     renderAutonomy();
     renderBridge();
     computeSaveState.textContent = "";
@@ -501,6 +552,7 @@ export function initSettings(state) {
   computeForm.addEventListener("submit", saveCompute);
   ambientForm.addEventListener("submit", saveAmbient);
   mailInputForm.addEventListener("submit", saveMailInput);
+  audioTranscriptionForm.addEventListener("submit", saveAudioTranscription);
   lunaEnabled.addEventListener("change", saveAmbient);
   addComputePolicy.addEventListener("click", () => appendComputePolicy({}, true));
   computePolicyList.addEventListener("click", (event) => {
@@ -567,6 +619,7 @@ export function initSettings(state) {
       renderCompute();
       renderAmbient();
       renderMailInput();
+      renderAudioTranscription();
       renderAutonomy();
       renderBridge();
     },
