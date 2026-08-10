@@ -73,6 +73,7 @@ struct EnrollmentState {
     request_id: Option<String>,
     registration_id: Option<String>,
     service_instance_id: Option<String>,
+    generation_registration_id: Option<String>,
     approved_generation: Option<String>,
     reopened_after_generation_change: bool,
     rejected: bool,
@@ -251,15 +252,24 @@ impl EnrollmentManager {
                     validate_active_session(&self.runtime_root, &selected, &session).await?;
                 let mut state = self.state.lock().await;
                 state.request_id = None;
-                state.registration_id = Some(session.registration_id);
+                let registration_id = session.registration_id;
+                state.registration_id = Some(registration_id.clone());
                 state.service_instance_id = Some(session.service.instance_id.clone());
                 state.rejected = false;
-                match state.approved_generation.as_deref() {
-                    Some(generation) if generation != session.service.generation => {
-                        state.reopened_after_generation_change = true;
+                if state.generation_registration_id.as_deref() != Some(&registration_id) {
+                    state.generation_registration_id = Some(registration_id);
+                    state.approved_generation = Some(session.service.generation.clone());
+                    state.reopened_after_generation_change = false;
+                } else {
+                    match state.approved_generation.as_deref() {
+                        Some(generation) if generation != session.service.generation => {
+                            state.reopened_after_generation_change = true;
+                        }
+                        None => {
+                            state.approved_generation = Some(session.service.generation.clone())
+                        }
+                        _ => {}
                     }
-                    None => state.approved_generation = Some(session.service.generation.clone()),
-                    _ => {}
                 }
                 let snapshot = state.clone();
                 drop(state);
@@ -313,6 +323,7 @@ impl EnrollmentManager {
         let mut state = self.state.lock().await;
         state.registration_id = None;
         state.request_id = None;
+        state.generation_registration_id = None;
         state.approved_generation = None;
         state.reopened_after_generation_change = false;
         state.rejected = false;
@@ -1014,8 +1025,17 @@ mod tests {
                 .expect("open PCP store"),
         );
         let owner_id = store.owner_id().to_owned();
-        let mut access_one = ContinuityHost::access_session(&owner_id);
-        access_one.session_id = "enrolled:reg-test:proc-one".to_owned();
+        let principal = ContinuityHost::access_session(&owner_id).principal;
+        let access_one = AccessMode::Admin.session(
+            principal,
+            "enrolled:reg-test:proc-one",
+            vec![
+                format!("user:{owner_id}"),
+                PROJECT_NAMESPACE.to_owned(),
+                CONVERSATION_NAMESPACE.to_owned(),
+            ],
+            true,
+        );
         let store_api: Arc<dyn PcpStore> = store.clone();
         let rpc_one = RunningRuntimeEndpoint::start(
             root.join("sockets/rpc-one.sock"),
@@ -1125,6 +1145,7 @@ mod tests {
             serde_json::from_slice(&std::fs::read(&state_path).expect("read persisted state"))
                 .expect("decode persisted state");
         assert_eq!(persisted["registration_id"], "reg-test");
+        assert_eq!(persisted["generation_registration_id"], "reg-test");
         assert_eq!(persisted["approved_generation"], "proc-one");
         assert_eq!(persisted["reopened_after_generation_change"], true);
         assert!(persisted.get("endpoint").is_none());
@@ -1205,6 +1226,7 @@ mod tests {
             let mut state = manager.state.lock().await;
             state.registration_id = Some("reg-stale".to_owned());
             state.request_id = Some("req-stale".to_owned());
+            state.generation_registration_id = Some("reg-stale".to_owned());
             state.approved_generation = Some("proc-old".to_owned());
             state.reopened_after_generation_change = true;
             state.rejected = true;
@@ -1220,6 +1242,7 @@ mod tests {
                 .expect("decode persisted state");
         assert_eq!(persisted.registration_id, None);
         assert_eq!(persisted.request_id, None);
+        assert_eq!(persisted.generation_registration_id, None);
         assert_eq!(persisted.approved_generation, None);
         assert!(!persisted.reopened_after_generation_change);
         assert!(!persisted.rejected);
