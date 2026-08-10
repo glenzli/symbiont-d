@@ -631,7 +631,8 @@ async fn mailbox_review_reports_the_external_input_instead_of_internal_reasoning
                         "candidate_id": "mail-1",
                         "disposition": "input",
                         "reason": "Interesting but attributed",
-                        "input_text": "A research digest reports a new solar observation."
+                        "presentation": "condensed",
+                        "display_text": "A research digest reports a new solar observation."
                     }]
                 }),
                 result: json!({

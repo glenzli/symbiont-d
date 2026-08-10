@@ -50,7 +50,7 @@ export function manualRunLabel(run) {
 export function manualCompletionNotice(receipt) {
   const notExecuted =
     receipt?.outcome === "failed" ||
-    ["no_input_channel", "input_cooldown", "mailbox_empty", "channel_failed"].includes(
+    ["no_input_channel", "input_cooldown", "drive_empty", "mailbox_empty", "channel_failed"].includes(
       receipt?.outcome,
     );
   const message =
@@ -58,6 +58,7 @@ export function manualCompletionNotice(receipt) {
       no_input_channel: "没有已配置的广域输入通道，因此没有开始实际探索。",
       input_cooldown: "广域输入通道已启用，正在等待其下一次观察时间。",
       mailbox_empty: "已查收私有研究收件箱，但没有新的白名单输入。",
+      drive_empty: "已检查 Google Drive Inbox，但没有新的匹配文件。",
       channel_failed: "广域输入通道未能完成，本次没有产生可查看的探索内容。",
       failed: "运行中出现异常，可以稍后重新探索。",
       input_signals_broadcast:

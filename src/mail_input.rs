@@ -941,7 +941,7 @@ mod tests {
 
     #[test]
     fn parses_html_only_mail_through_the_preview_fallback() {
-        let raw = b"From: Gemini <glenzli92@gmail.com>\r\nSubject: Daily exploration\r\nMessage-ID: <gemini-1@example.com>\r\nMIME-Version: 1.0\r\nContent-Type: text/html; charset=utf-8\r\n\r\n<html><body><h1>Useful signal</h1><p>A concrete research result.</p></body></html>\r\n".to_vec();
+        let raw = b"From: Gemini <gemini@example.com>\r\nSubject: Daily exploration\r\nMessage-ID: <gemini-1@example.com>\r\nMIME-Version: 1.0\r\nContent-Type: text/html; charset=utf-8\r\n\r\n<html><body><h1>Useful signal</h1><p>A concrete research result.</p></body></html>\r\n".to_vec();
         let message = parse_message(raw, "mailbox|1|8".to_owned()).unwrap();
         assert!(message.document.body.contains("Useful signal"));
         assert!(message.document.body.contains("concrete research result"));

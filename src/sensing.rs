@@ -1,4 +1,4 @@
-use std::path::PathBuf;
+use std::{collections::HashSet, path::PathBuf};
 
 use anyhow::{Context, Result};
 use chrono::{DateTime, Duration, SecondsFormat, Utc};
@@ -15,20 +15,23 @@ pub struct SensingSource {
     pub detail: String,
 }
 
-/// Immutable presentation identity for a model that can only contribute input.
+/// Stable source identity for a model that can only contribute input.
 ///
-/// It is captured with each candidate so later compute-setting changes never
-/// relabel a signal that has already appeared in the conversation timeline.
+/// The source id, provider and model are captured with each candidate. Name and
+/// avatar are presentation fields and may be overlaid by the user's role
+/// appearance settings when the timeline is rendered.
 #[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct InputRoleSnapshot {
     pub id: String,
     pub name: String,
     pub model: String,
     pub effort: String,
+    #[serde(alias = "avatar_seed")]
     pub avatar_seed: String,
-    #[serde(default)]
+    #[serde(default, alias = "provider_id")]
     pub provider_id: Option<String>,
-    #[serde(default)]
+    #[serde(default, alias = "channel_id")]
     pub channel_id: Option<String>,
 }
 
@@ -60,6 +63,20 @@ impl InputRoleSnapshot {
             channel_id: Some("research-inbox".to_owned()),
         }
     }
+
+    /// Presentation identity for documents delivered through one private,
+    /// user-configured Google Drive folder.
+    pub fn drive(name: &str) -> Self {
+        Self {
+            id: "drive_digests".to_owned(),
+            name: name.to_owned(),
+            model: "Google Drive".to_owned(),
+            effort: "input-only".to_owned(),
+            avatar_seed: "drive-digests".to_owned(),
+            provider_id: Some("google-drive".to_owned()),
+            channel_id: Some("gemini-daily-digests".to_owned()),
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
@@ -89,11 +106,24 @@ impl SensingSourceClass {
     }
 }
 
+#[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SensingPresentation {
+    #[default]
+    Original,
+    Condensed,
+}
+
 #[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct SensingCandidateDraft {
     pub title: String,
     pub summary: String,
     pub proposed_input: String,
+    /// The normalized text actually received from the input channel. Mail keeps
+    /// the complete bounded section here; model channels fall back to their
+    /// proposed input without pretending a fetched article body was supplied.
+    #[serde(default)]
+    pub received_text: Option<String>,
     #[serde(default)]
     pub event_at: Option<String>,
     #[serde(default)]
@@ -121,6 +151,13 @@ pub fn validate_candidate_drafts(drafts: &[SensingCandidateDraft]) -> Result<()>
                     "ambient sensing candidate {label} must contain at most {limit} characters"
                 );
             }
+        }
+        if candidate
+            .received_text
+            .as_deref()
+            .is_some_and(|value| value.trim().is_empty() || value.chars().count() > 24_000)
+        {
+            anyhow::bail!("ambient sensing candidate received_text exceeds 24000 characters");
         }
         if candidate
             .event_at
@@ -158,6 +195,7 @@ pub struct SensingCandidate {
     pub title: String,
     pub summary: String,
     pub proposed_input: String,
+    pub received_text: String,
     #[serde(default)]
     pub event_at: Option<String>,
     #[serde(default)]
@@ -286,32 +324,70 @@ impl SensingStore {
                     continue;
                 }
                 let sequence = pool.candidates.len();
-                pool.candidates.push(SensingCandidate {
-                    id: format!("sense_{}_{}", now.timestamp_millis(), sequence),
-                    title: draft.title.trim().to_owned(),
-                    summary: draft.summary.trim().to_owned(),
-                    proposed_input: draft.proposed_input.trim().to_owned(),
-                    event_at: draft
-                        .event_at
-                        .map(|event_at| event_at.trim().to_owned())
-                        .filter(|event_at| !event_at.is_empty()),
-                    source_class: draft.source_class,
-                    possible_connection: draft
-                        .possible_connection
-                        .map(|connection| connection.trim().to_owned())
-                        .filter(|connection| !connection.is_empty()),
-                    sources: draft.sources,
-                    actor: actor.clone(),
-                    observed_at: timestamp(now),
-                    expires_at: timestamp(now + Duration::hours(CANDIDATE_TTL_HOURS)),
+                pool.candidates.push(build_candidate(
+                    draft,
+                    actor.clone(),
                     fingerprint,
-                });
+                    now,
+                    sequence,
+                ));
                 appended += 1;
             }
         }
         drop(pool);
         self.persist().await?;
         Ok(appended)
+    }
+
+    /// Atomically represents every candidate from one immutable transport
+    /// document in the transient queue. Existing fingerprints count as
+    /// represented; when the missing remainder cannot fit, nothing is added so
+    /// the transport owner can leave its remote cursor uncommitted.
+    pub async fn enqueue_complete_batch(
+        &self,
+        drafts: Vec<SensingCandidateDraft>,
+        actor: InputRoleSnapshot,
+    ) -> Result<bool> {
+        let now = Utc::now();
+        let mut pool = self.pool.write().await;
+        prune_expired(&mut pool, now);
+        let existing = pool
+            .candidates
+            .iter()
+            .map(|candidate| candidate.fingerprint.clone())
+            .collect::<HashSet<_>>();
+        let mut missing = HashSet::new();
+        for draft in &drafts {
+            let fingerprint = candidate_fingerprint(draft);
+            if !existing.contains(&fingerprint) {
+                missing.insert(fingerprint);
+            }
+        }
+        if pool.candidates.len() + missing.len() > MAX_PENDING_CANDIDATES {
+            return Ok(false);
+        }
+        let mut appended = 0;
+        let mut represented = existing;
+        for draft in drafts {
+            let fingerprint = candidate_fingerprint(&draft);
+            if !represented.insert(fingerprint.clone()) {
+                continue;
+            }
+            let sequence = pool.candidates.len();
+            pool.candidates.push(build_candidate(
+                draft,
+                actor.clone(),
+                fingerprint,
+                now,
+                sequence,
+            ));
+            appended += 1;
+        }
+        drop(pool);
+        if appended > 0 {
+            self.persist().await?;
+        }
+        Ok(true)
     }
 
     /// Removes candidates after the stronger review produced a terminal
@@ -502,6 +578,41 @@ fn candidate_fingerprint(draft: &SensingCandidateDraft) -> String {
     format!("{}|{}", normalize(&draft.title), sources.join("|"))
 }
 
+fn build_candidate(
+    draft: SensingCandidateDraft,
+    actor: InputRoleSnapshot,
+    fingerprint: String,
+    now: DateTime<Utc>,
+    sequence: usize,
+) -> SensingCandidate {
+    SensingCandidate {
+        id: format!("sense_{}_{}", now.timestamp_millis(), sequence),
+        title: draft.title.trim().to_owned(),
+        summary: draft.summary.trim().to_owned(),
+        proposed_input: draft.proposed_input.trim().to_owned(),
+        received_text: draft
+            .received_text
+            .as_deref()
+            .unwrap_or(&draft.proposed_input)
+            .trim()
+            .to_owned(),
+        event_at: draft
+            .event_at
+            .map(|event_at| event_at.trim().to_owned())
+            .filter(|event_at| !event_at.is_empty()),
+        source_class: draft.source_class,
+        possible_connection: draft
+            .possible_connection
+            .map(|connection| connection.trim().to_owned())
+            .filter(|connection| !connection.is_empty()),
+        sources: draft.sources,
+        actor,
+        observed_at: timestamp(now),
+        expires_at: timestamp(now + Duration::hours(CANDIDATE_TTL_HOURS)),
+        fingerprint,
+    }
+}
+
 fn normalize(value: &str) -> String {
     value
         .trim()
@@ -529,6 +640,7 @@ mod tests {
             title: title.to_owned(),
             summary: "A short factual change.".to_owned(),
             proposed_input: "A short model input.".to_owned(),
+            received_text: None,
             event_at: None,
             source_class: SensingSourceClass::Research,
             possible_connection: None,
@@ -634,6 +746,49 @@ mod tests {
             MAX_PENDING_CANDIDATES - 1
         );
 
+        std::fs::remove_file(path).unwrap();
+    }
+
+    #[tokio::test]
+    async fn complete_document_batch_is_all_or_nothing_when_capacity_is_tight() {
+        let nonce = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let path = std::env::temp_dir().join(format!("symbiont-sensing-atomic-{nonce}.json"));
+        let store = SensingStore::open(path.clone()).await.unwrap();
+        let actor = InputRoleSnapshot::ambient("test", "Test observer", "test", "test-provider");
+        let existing = (0..MAX_PENDING_CANDIDATES - 1)
+            .map(|index| {
+                candidate(
+                    &format!("Existing {index}"),
+                    &format!("https://example.test/existing/{index}"),
+                )
+            })
+            .collect();
+        store.replace(existing, actor.clone()).await.unwrap();
+
+        let accepted = store
+            .enqueue_complete_batch(
+                vec![
+                    candidate("Document first", "https://example.test/document/first"),
+                    candidate("Document second", "https://example.test/document/second"),
+                ],
+                actor,
+            )
+            .await
+            .unwrap();
+
+        assert!(!accepted);
+        assert_eq!(store.count().await.unwrap(), MAX_PENDING_CANDIDATES - 1);
+        assert!(
+            store
+                .candidates()
+                .await
+                .unwrap()
+                .iter()
+                .all(|entry| !entry.title.starts_with("Document "))
+        );
         std::fs::remove_file(path).unwrap();
     }
 

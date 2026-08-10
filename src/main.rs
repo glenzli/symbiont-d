@@ -15,8 +15,12 @@ mod conversation;
 mod conversation_projection;
 mod curiosity;
 mod diagnostics;
+mod drive_input;
 mod exploration;
+mod external_digest;
+mod external_markdown;
 mod identity;
+mod input_roles;
 mod luna_input;
 mod mail_input;
 mod maintenance;
@@ -61,10 +65,12 @@ use continuation::ContinuationQueue;
 use continuity::ContinuityHost;
 use conversation::ConversationCoordinator;
 use curiosity::CuriosityStore;
+use drive_input::DriveInputStore;
 use exploration::{
     ExplorationAttemptStore, ExplorationHandle, ExplorationIntentQueue, ManualExplorationStore,
 };
 use identity::IdentityStore;
+use input_roles::InputRoleStore;
 use luna_input::LunaInput;
 use mail_input::MailInputStore;
 use memory::MemoryStore;
@@ -312,6 +318,14 @@ async fn main() -> Result<()> {
         ))
         .await?,
     );
+    let drive_input = Arc::new(
+        DriveInputStore::open(resolve_data_path(
+            &workspace,
+            "SYMBIONT_DRIVE_INPUT_PATH",
+            "drive-input.toml",
+        ))
+        .await?,
+    );
     let audio_transcription = Arc::new(
         AudioTranscriptionStore::open(resolve_data_path(
             &workspace,
@@ -325,6 +339,14 @@ async fn main() -> Result<()> {
             &workspace,
             "SYMBIONT_INPUT_SIGNALS_PATH",
             "input-signals.json",
+        ))
+        .await?,
+    );
+    let input_roles = Arc::new(
+        InputRoleStore::open(resolve_data_path(
+            &workspace,
+            "SYMBIONT_INPUT_ROLES_PATH",
+            "input-roles.toml",
         ))
         .await?,
     );
@@ -369,6 +391,7 @@ async fn main() -> Result<()> {
         Arc::clone(&usage),
         Arc::clone(&ambient_scout),
         Arc::clone(&luna_input),
+        Arc::clone(&drive_input),
         Arc::clone(&mail_input),
         Arc::clone(&sensing),
         Arc::clone(&signals),
@@ -453,6 +476,7 @@ async fn main() -> Result<()> {
         codex,
         compute,
         ambient_provider,
+        drive_input,
         mail_input,
         audio_transcription,
         compute_policies,
@@ -460,6 +484,7 @@ async fn main() -> Result<()> {
         rate_limits,
         exploration,
         signals,
+        input_roles,
         reflection,
         reconciliation,
         pcp_index,

@@ -36,6 +36,7 @@ use crate::{
     continuity::{ContinuityHost, MessageLinks},
     conversation::ConversationCoordinator,
     curiosity::CuriosityStore,
+    drive_input::DriveInputStore,
     luna_input::LunaInput,
     mail_input::MailInputStore,
     memory::{MemoryEntry, MemoryRole},
@@ -216,6 +217,7 @@ impl ExplorationHandle {
         usage: Arc<UsageStore>,
         ambient_scout: Arc<AmbientScout>,
         luna_input: Arc<LunaInput>,
+        drive_input: Arc<DriveInputStore>,
         mail_input: Arc<MailInputStore>,
         sensing: Arc<SensingStore>,
         signals: Arc<SignalStore>,
@@ -226,7 +228,10 @@ impl ExplorationHandle {
         mut intent_receiver: ExplorationIntentReceiver,
     ) -> Self {
         let projection = manual_runs.projection().await;
-        if ambient_scout.has_configured_input().await || mail_input.has_configured_input().await {
+        if ambient_scout.has_configured_input().await
+            || drive_input.has_configured_input().await
+            || mail_input.has_configured_input().await
+        {
             if let Err(error) = attempts.remove_reason("no_input_channel").await {
                 tracing::warn!(%error, "could not clear stale input-configuration skips");
             }
@@ -280,6 +285,7 @@ impl ExplorationHandle {
             usage,
             ambient_scout,
             luna_input,
+            drive_input,
             mail_input,
             Arc::clone(&sensing),
             Arc::clone(&signals),
@@ -399,6 +405,7 @@ async fn run_scheduler(
     usage: Arc<UsageStore>,
     ambient_scout: Arc<AmbientScout>,
     luna_input: Arc<LunaInput>,
+    drive_input: Arc<DriveInputStore>,
     mail_input: Arc<MailInputStore>,
     sensing: Arc<SensingStore>,
     signals: Arc<SignalStore>,
@@ -503,6 +510,7 @@ async fn run_scheduler(
                     Arc::clone(&usage),
                     Arc::clone(&ambient_scout),
                     Arc::clone(&luna_input),
+                    Arc::clone(&drive_input),
                     Arc::clone(&mail_input),
                     Arc::clone(&sensing),
                     Arc::clone(&signals),
@@ -747,6 +755,7 @@ async fn run_once(
     usage: Arc<UsageStore>,
     ambient_scout: Arc<AmbientScout>,
     luna_input: Arc<LunaInput>,
+    drive_input: Arc<DriveInputStore>,
     mail_input: Arc<MailInputStore>,
     sensing: Arc<SensingStore>,
     signals: Arc<SignalStore>,
@@ -864,6 +873,7 @@ async fn run_once(
     let mut deep_candidate_ids = Vec::new();
     let mut published_input_count = 0usize;
     let mut sensing_trace_id = None;
+    let drive_configured = drive_input.has_configured_input().await;
     let mailbox_configured = mail_input.has_configured_input().await;
     let runs_intake = trigger_runs_intake(trigger.as_ref());
     if runs_intake {
@@ -879,13 +889,20 @@ async fn run_once(
         } else {
             String::new()
         };
-        let has_configured_input =
-            ambient_scout.has_configured_input().await || mail_input.has_configured_input().await;
-        let mailbox_capacity = sensing.available_capacity().await?;
+        let has_configured_input = ambient_scout.has_configured_input().await
+            || drive_input.has_configured_input().await
+            || mail_input.has_configured_input().await;
+        let document_capacity = sensing.available_capacity().await?;
+        let drive = Arc::clone(&drive_input);
+        let drive_input_events = input_events.clone();
+        let drive_task =
+            tokio::spawn(async move { drive.poll(drive_input_events, document_capacity).await });
         let mailbox = Arc::clone(&mail_input);
         let mailbox_input_events = input_events.clone();
         let mailbox_task =
-            tokio::spawn(async move { mailbox.poll(mailbox_input_events, mailbox_capacity).await });
+            tokio::spawn(
+                async move { mailbox.poll(mailbox_input_events, document_capacity).await },
+            );
         let selected_inputs = if scheduled {
             ambient_scout
                 .select_inputs(autonomy_config.max_input_parallelism as usize)
@@ -959,6 +976,9 @@ async fn run_once(
                 }
             }
         }
+        let drive_outcome = drive_task
+            .await
+            .context("join Google Drive Inbox polling")??;
         let mailbox_outcome = mailbox_task
             .await
             .context("join research inbox polling")??;
@@ -972,18 +992,16 @@ async fn run_once(
             stop_activity_relay(runtime_tx, activity_task).await?;
             return Err(error);
         }
-        let interrupted = mailbox_outcome.interrupted
+        let interrupted = drive_outcome.interrupted
+            || mailbox_outcome.interrupted
             || sensing_outcomes.iter().any(|outcome| outcome.interrupted);
         let channel_failed = invocations.is_empty()
-            && (mailbox_outcome.inbox_failure.is_some()
+            && (drive_outcome.channel_failure.is_some()
+                || mailbox_outcome.inbox_failure.is_some()
                 || sensing_outcomes
                     .iter()
                     .any(|outcome| outcome.channel_failure.is_some()));
         if !interrupted {
-            // Mailbox topics go first because their IMAP cursor has already
-            // advanced, but all successful channels enter the same bounded
-            // queue. Do not throw away model-provider results merely because
-            // the inbox also delivered something in this cycle.
             let ambient_batches = sensing_outcomes
                 .into_iter()
                 .filter_map(|outcome| outcome.actor.map(|actor| (outcome.candidates, actor)))
@@ -1024,6 +1042,23 @@ async fn run_once(
                 stop_activity_relay(runtime_tx, activity_task).await?;
                 return Err(error);
             }
+            // Keep the existing mailbox-first admission contract intact.
+            // Drive files are immutable, so they can safely wait: represent
+            // each complete file atomically in whatever capacity remains,
+            // and only then commit its local remote-file cursor.
+            if let Some(actor) = drive_outcome.actor {
+                let mut acknowledged_file_ids = Vec::new();
+                for batch in drive_outcome.batches {
+                    if !sensing
+                        .enqueue_complete_batch(batch.candidates, actor.clone())
+                        .await?
+                    {
+                        break;
+                    }
+                    acknowledged_file_ids.push(batch.file_id);
+                }
+                drive_input.acknowledge_files(acknowledged_file_ids).await?;
+            }
         }
         let pending_candidate_count = match sensing.count().await {
             Ok(count) => count,
@@ -1059,6 +1094,8 @@ async fn run_once(
             stop_activity_relay(runtime_tx, activity_task).await?;
             let outcome = if channel_failed {
                 "channel_failed"
+            } else if drive_configured {
+                "drive_empty"
             } else if mailbox_configured {
                 "mailbox_empty"
             } else if sensing_trace_id.is_none() {
@@ -1073,7 +1110,7 @@ async fn run_once(
             // A successful mailbox poll is a real observation attempt even
             // when there was no new delivery. Otherwise the activity log
             // would falsely imply that the configured inbox was never run.
-            let was_recorded = !invocations.is_empty() || mailbox_configured;
+            let was_recorded = !invocations.is_empty() || drive_configured || mailbox_configured;
             settle_sensing_only(
                 &state,
                 &manual_runs,
@@ -1157,7 +1194,13 @@ async fn run_once(
             let mut suppressed_input_count = 0usize;
             for input in route_plan.inputs {
                 match signals
-                    .publish_with_content(&input.candidate, input.content, input.reason)
+                    .publish_with_presentation(
+                        &input.candidate,
+                        input.content,
+                        input.presentation,
+                        input.qualification_note,
+                        input.reason,
+                    )
                     .await?
                 {
                     SignalPublishOutcome::Published => published_input_count += 1,

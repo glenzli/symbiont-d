@@ -2,7 +2,9 @@ use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 
 use crate::{
-    sensing::{SensingCandidate, SensingCandidateDraft, validate_candidate_drafts},
+    sensing::{
+        SensingCandidate, SensingCandidateDraft, SensingPresentation, validate_candidate_drafts,
+    },
     usage::InvocationRecord,
 };
 
@@ -38,7 +40,11 @@ pub struct SensingReviewDecision {
     pub disposition: SensingReviewDisposition,
     pub reason: String,
     #[serde(default)]
-    pub input_text: Option<String>,
+    pub presentation: Option<SensingPresentation>,
+    #[serde(default)]
+    pub display_text: Option<String>,
+    #[serde(default)]
+    pub qualification_note: Option<String>,
 }
 
 impl ExplorationScoutFinding {
@@ -90,11 +96,14 @@ stage, so assess only the supplied packet and never pretend that you opened or v
 message with a source trail and a reply affordance, not a symbiont-d endorsement or durable claim.
 Its admission bar is therefore lower than the bar for an assistant-authored note or intervention.
 Weak or secondary sourcing alone is not a reason to discard a plausible, interesting input and is
-never by itself a reason to choose `deep`. When the supplied wording is already appropriately
-qualified, choose `input` and omit `input_text`. When it makes specific claims more confidently than
-the packet supports, still choose `input` if the subject is interesting, but provide a concise,
-self-contained `input_text` that attributes the claim to the external report and names the material
-uncertainty. This is qualification, not verification: do not add facts or say you checked a link.
+never by itself a reason to choose `deep`. Preserve the received text by default: choose
+`presentation: original` and omit `display_text`. Choose `presentation: condensed` only when the
+received text is repetitive, excessively long, poorly structured, or contains substantial low-value
+framing. In that case provide a self-contained `display_text` and state the concrete compression
+reason in `reason`; never condense merely to make the prose sound more polished. If the packet needs
+a sourcing or confidence caveat, put that short caveat in `qualification_note` rather than replacing
+the received message. This is qualification, not verification: do not add facts or say you checked a
+link.
 Reserve `deep` for value, not for ordinary source cleanup. Do not infer that the user is unaware of
 an event.
 
@@ -103,7 +112,7 @@ may be worthwhile without a current-project connection or immediate decision. Re
 current project is not an admission requirement. A recent or still-developing discussion can be
 timely even when the original event was not today, provided the supplied packet names the accumulated
 evidence or reaction that makes it live now. Judge atomic candidates separately; weakness in a
-neighboring digest item must not poison another candidate. `input_text`, when used, must remain in
+neighboring digest item must not poison another candidate. `display_text`, when used, must remain in
 the external input role rather than symbiont-d's voice. The candidate pool is not memory
 and this review must not write PCP, Hunches, profile, or other state.
 

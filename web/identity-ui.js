@@ -1,6 +1,9 @@
 import { responseJson } from "/presentation.js";
 
-const DEFAULT_SYMBIONT_AVATAR_URL = "/symbiont-avatar.png?v=icon-20260808";
+const DEFAULT_SYMBIONT_AVATAR_URL =
+  "/symbiont-avatar.png?v=clay-transparent-20260810-v1";
+const DEFAULT_SMALL_SYMBIONT_AVATAR_URL =
+  "/symbiont-avatar-small.png?v=clay-transparent-20260810-v1";
 
 export function initIdentityUi(state) {
   const symbiontPreview = document.querySelector("#avatar-preview");
@@ -30,7 +33,11 @@ export function initIdentityUi(state) {
 
     image.hidden = false;
     if (fallback) fallback.hidden = true;
-    const defaultUrl = slot === "symbiont" ? DEFAULT_SYMBIONT_AVATAR_URL : null;
+    const defaultUrl = slot === "symbiont"
+      ? image.closest(".message-avatar")
+        ? DEFAULT_SMALL_SYMBIONT_AVATAR_URL
+        : DEFAULT_SYMBIONT_AVATAR_URL
+      : null;
     image.onerror = () => {
       if (defaultUrl && !image.src.endsWith(defaultUrl)) {
         image.src = defaultUrl;

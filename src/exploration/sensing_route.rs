@@ -7,7 +7,7 @@ use serde_json::json;
 
 use crate::{
     codex::{SensingReviewDecision, SensingReviewDisposition},
-    sensing::{InputRoleSnapshot, SensingCandidate, SensingCandidateDraft},
+    sensing::{InputRoleSnapshot, SensingCandidate, SensingCandidateDraft, SensingPresentation},
     usage::InvocationRecord,
 };
 
@@ -74,6 +74,8 @@ pub(super) fn prioritize_candidate_batches(
 pub(super) struct RoutedInput {
     pub candidate: SensingCandidate,
     pub content: String,
+    pub presentation: SensingPresentation,
+    pub qualification_note: Option<String>,
     pub reason: String,
 }
 
@@ -106,13 +108,19 @@ pub(super) fn plan_sensing_routes(
         match decision.disposition {
             SensingReviewDisposition::Input => {
                 plan.terminal_ids.push(candidate.id.clone());
-                let content = decision
-                    .input_text
-                    .filter(|text| !text.trim().is_empty())
-                    .unwrap_or_else(|| candidate.proposed_input.clone());
+                let presentation = decision.presentation.unwrap_or_default();
+                let content = match presentation {
+                    SensingPresentation::Original => candidate.received_text.clone(),
+                    SensingPresentation::Condensed => decision
+                        .display_text
+                        .filter(|text| !text.trim().is_empty())
+                        .unwrap_or_else(|| candidate.proposed_input.clone()),
+                };
                 plan.inputs.push(RoutedInput {
                     candidate: (*candidate).clone(),
                     content,
+                    presentation,
+                    qualification_note: decision.qualification_note,
                     reason: decision.reason,
                 });
             }
@@ -147,6 +155,7 @@ mod tests {
             title: format!("Candidate {id}"),
             summary: "Summary".to_owned(),
             proposed_input: proposed_input.to_owned(),
+            received_text: proposed_input.to_owned(),
             event_at: None,
             source_class: SensingSourceClass::OpenDiscovery,
             possible_connection: None,
@@ -166,6 +175,7 @@ mod tests {
             title: title.to_owned(),
             summary: "Summary".to_owned(),
             proposed_input: "Input".to_owned(),
+            received_text: None,
             event_at: None,
             source_class: SensingSourceClass::OpenDiscovery,
             possible_connection: None,
@@ -201,7 +211,9 @@ mod tests {
                 candidate_id: "one".to_owned(),
                 disposition: SensingReviewDisposition::Input,
                 reason: "Interesting external input".to_owned(),
-                input_text: None,
+                presentation: Some(SensingPresentation::Original),
+                display_text: None,
+                qualification_note: None,
             }],
         );
 
@@ -219,7 +231,9 @@ mod tests {
                 candidate_id: "one".to_owned(),
                 disposition: SensingReviewDisposition::Input,
                 reason: "Interesting but not independently verified".to_owned(),
-                input_text: Some("The configured research digest reports this development; the linked claim has not been independently checked here.".to_owned()),
+                presentation: Some(SensingPresentation::Condensed),
+                display_text: Some("The configured research digest reports this development; the linked claim has not been independently checked here.".to_owned()),
+                qualification_note: Some("The linked claim was not independently checked here.".to_owned()),
             }],
         );
 
@@ -236,7 +250,9 @@ mod tests {
                 candidate_id: "one".to_owned(),
                 disposition: SensingReviewDisposition::Deep,
                 reason: "Changes a durable shared question".to_owned(),
-                input_text: None,
+                presentation: None,
+                display_text: None,
+                qualification_note: None,
             }],
         );
 
@@ -253,7 +269,9 @@ mod tests {
                 candidate_id: "one".to_owned(),
                 disposition: SensingReviewDisposition::Discard,
                 reason: "Noise".to_owned(),
-                input_text: None,
+                presentation: None,
+                display_text: None,
+                qualification_note: None,
             }],
         );
 

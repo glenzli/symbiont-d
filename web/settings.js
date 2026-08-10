@@ -4,7 +4,7 @@ import {
   tokensToMillions,
 } from "/presentation.js";
 
-export function initSettings(state) {
+export function initSettings(state, actions = {}) {
   const dialog = document.querySelector("#settings-dialog");
   const settingsSaveState = document.querySelector("#settings-save-state");
   const settingsSave = document.querySelector("#settings-save");
@@ -23,6 +23,23 @@ export function initSettings(state) {
   const ambientChannelList = document.querySelector("#ambient-channel-list");
   const ambientChannelTemplate = document.querySelector("#ambient-channel-template");
   const addAmbientChannel = document.querySelector("#add-ambient-channel");
+  const driveInputForm = document.querySelector("#drive-input-form");
+  const driveInputName = document.querySelector("#drive-input-name");
+  const driveInputNameLabel = document.querySelector("#drive-input-name-label");
+  const driveInputFolderId = document.querySelector("#drive-input-folder-id");
+  const driveInputFileSelection = document.querySelector("#drive-input-file-selection");
+  const driveInputFileNamePattern = document.querySelector("#drive-input-file-name-pattern");
+  const driveInputMaxFiles = document.querySelector("#drive-input-max-files");
+  const driveInputCredentialStore = document.querySelector("#drive-input-credential-store");
+  const driveInputCredentialValue = document.querySelector("#drive-input-credential-value");
+  const driveInputEnabled = document.querySelector("#drive-input-enabled");
+  const driveInputAvailability = document.querySelector("#drive-input-availability");
+  const driveInputCredentialNote = document.querySelector("#drive-input-credential-note");
+  const driveInputRuntimeNote = document.querySelector("#drive-input-runtime-note");
+  const driveInputSaveState = document.querySelector("#drive-input-save-state");
+  const driveInputConnectOAuth = document.querySelector("#drive-input-connect-oauth");
+  const driveInputDisconnectOAuth = document.querySelector("#drive-input-disconnect-oauth");
+  const driveInputTestConnection = document.querySelector("#drive-input-test-connection");
   const mailInputForm = document.querySelector("#mail-input-form");
   const mailInputName = document.querySelector("#mail-input-name");
   const mailInputNameLabel = document.querySelector("#mail-input-name-label");
@@ -72,7 +89,16 @@ export function initSettings(state) {
   const bridgeSaveState = settingsSaveState;
   const tabButtons = [...dialog.querySelectorAll("[data-settings-tab]")];
   const tabPanels = [...dialog.querySelectorAll("[data-settings-panel]")];
+  const sourceTabButtons = [
+    ...dialog.querySelectorAll("[data-source-settings-tab]"),
+  ];
+  const sourceTabPanels = [
+    ...dialog.querySelectorAll("[data-source-settings-panel]"),
+  ];
   let activeSettingsTab = "exploration";
+  let activeSourceSettingsTab = "ambient";
+  let driveInputTestController = null;
+  let driveInputOAuthPollTimer = null;
   let mailInputTestController = null;
 
   function modelBySlug(slug) {
@@ -141,6 +167,56 @@ export function initSettings(state) {
         state.ambient.providers?.length ||
         state.ambient.channels?.length,
     );
+  }
+
+  function renderDriveInput() {
+    if (!state.driveInput) return;
+    const drive = state.driveInput;
+    driveInputName.value = drive.name || "Google Drive Inbox";
+    driveInputNameLabel.textContent = drive.name || "Google Drive Inbox";
+    driveInputFolderId.value = drive.folderId || "";
+    driveInputFileSelection.value = drive.fileSelection || "pattern";
+    driveInputFileNamePattern.value = drive.fileNamePattern || "Digest_*.md";
+    driveInputFileNamePattern.disabled = driveInputFileSelection.value === "all";
+    driveInputMaxFiles.value = String(drive.maxFiles || 12);
+    driveInputCredentialStore.value = drive.credentialStore || "config_file";
+    driveInputCredentialValue.value = "";
+    driveInputEnabled.checked = drive.enabled === true;
+    driveInputAvailability.textContent = availabilityText(drive.availability, drive);
+    renderDriveInputOAuth(drive);
+    const received = drive.lastReceivedAt
+      ? `上次接收 ${drive.lastReceivedCount || 0} 个文件：${new Date(drive.lastReceivedAt).toLocaleString()}`
+      : "尚未接收到新的 Drive 文件。";
+    const intake = drive.lastSucceededAt
+      ? `上次读取：列出 ${drive.lastListedFileCount || 0}，匹配 ${drive.lastMatchingFileCount || 0}，选择 ${drive.lastSelectedFileCount || 0}，读取 ${drive.lastFetchedFileCount || 0}。`
+      : "";
+    driveInputRuntimeNote.textContent = drive.lastError
+      ? `上次连接失败：${drive.lastError}`
+      : `${received}${intake ? ` ${intake}` : ""}`;
+  }
+
+  function renderDriveInputOAuth(drive) {
+    const oauth = drive.oauth || {};
+    const waiting = oauth.status === "waiting";
+    const connected = oauth.status === "connected";
+    driveInputConnectOAuth.textContent = waiting
+      ? "取消连接"
+      : connected
+        ? "重新连接"
+        : "连接 Google Drive";
+    driveInputDisconnectOAuth.hidden = !connected;
+    driveInputTestConnection.disabled = waiting;
+    if (waiting) {
+      driveInputCredentialNote.textContent = "正在等待你在浏览器中完成 Google 授权。";
+    } else if (connected) {
+      driveInputCredentialNote.textContent = oauth.account
+        ? `已连接个人账号：${oauth.account}`
+        : "个人 Google Drive 已连接。";
+    } else if (oauth.status === "failed" || oauth.status === "invalid") {
+      driveInputCredentialNote.textContent = `授权失败：${oauth.error || "请重新连接 Google Drive"}`;
+    } else {
+      driveInputCredentialNote.textContent = "尚未连接个人 Google Drive。";
+    }
   }
 
   function renderMailInput() {
@@ -424,6 +500,182 @@ export function initSettings(state) {
     }
   }
 
+  function driveInputFormValue() {
+    return {
+      enabled: driveInputEnabled.checked,
+      name: driveInputName.value.trim(),
+      folderId: driveInputFolderId.value.trim(),
+      fileSelection: driveInputFileSelection.value,
+      fileNamePattern: driveInputFileNamePattern.value.trim(),
+      credentialStore: driveInputCredentialStore.value,
+      credentialValue: driveInputCredentialValue.value || null,
+      maxFiles: Number(driveInputMaxFiles.value),
+    };
+  }
+
+  async function persistDriveInput() {
+    return responseJson(
+      await fetch("/api/drive-input", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(driveInputFormValue()),
+      }),
+      "Google Drive Inbox 保存失败",
+    );
+  }
+
+  async function saveDriveInput(event) {
+    event?.preventDefault();
+    driveInputSaveState.textContent = "保存中";
+    try {
+      state.driveInput = await persistDriveInput();
+      renderDriveInput();
+      driveInputSaveState.textContent = "已保存";
+      return true;
+    } catch (error) {
+      driveInputSaveState.textContent = error.message;
+      return false;
+    }
+  }
+
+  async function testDriveInputConnection() {
+    if (driveInputTestController) {
+      driveInputTestConnection.disabled = true;
+      driveInputSaveState.textContent = "正在停止连接测试…";
+      try {
+        await fetch("/api/drive-input/test/cancel", { method: "POST" });
+      } finally {
+        driveInputTestController.abort();
+      }
+      return;
+    }
+    const controller = new AbortController();
+    driveInputTestController = controller;
+    driveInputTestConnection.textContent = "停止测试";
+    driveInputSaveState.textContent = "正在验证认证、文件筛选、下载与解析…";
+    try {
+      const result = await responseJson(
+        await fetch("/api/drive-input/test", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(driveInputFormValue()),
+          signal: controller.signal,
+        }),
+        "Google Drive Inbox 连接测试失败",
+      );
+      driveInputSaveState.textContent = `读取正常：列出 ${result.listedFileCount || 0}，匹配 ${result.matchingFileCount || 0}，选择 ${result.selectedFileCount || 0}，读取 ${result.fetchedFileCount || 0}，拆分候选 ${result.candidateCount || 0}；尚未保存`;
+    } catch (error) {
+      driveInputSaveState.textContent = controller.signal.aborted
+        ? "连接测试已取消"
+        : `连接失败：${error.message}`;
+    } finally {
+      if (driveInputTestController === controller) {
+        driveInputTestController = null;
+        driveInputTestConnection.disabled = false;
+        driveInputTestConnection.textContent = "测试";
+      }
+    }
+  }
+
+  function stopDriveInputOAuthPolling() {
+    if (driveInputOAuthPollTimer) window.clearTimeout(driveInputOAuthPollTimer);
+    driveInputOAuthPollTimer = null;
+  }
+
+  async function pollDriveInputOAuth() {
+    stopDriveInputOAuthPolling();
+    try {
+      const store = encodeURIComponent(driveInputCredentialStore.value);
+      state.driveInput = await responseJson(
+        await fetch(`/api/drive-input/oauth/status?credentialStore=${store}`),
+        "读取 Google Drive 授权状态失败",
+      );
+      renderDriveInputOAuth(state.driveInput);
+      const status = state.driveInput.oauth?.status;
+      if (status === "connected") {
+        driveInputCredentialValue.value = "";
+        driveInputSaveState.textContent = "Google Drive 已连接；可以先测试，再保存当前页";
+        return;
+      }
+      if (status === "failed" || status === "invalid" || status === "disconnected") {
+        driveInputSaveState.textContent = state.driveInput.oauth?.error
+          ? `连接失败：${state.driveInput.oauth.error}`
+          : "Google Drive 尚未连接";
+        return;
+      }
+      driveInputOAuthPollTimer = window.setTimeout(pollDriveInputOAuth, 1000);
+    } catch (error) {
+      driveInputSaveState.textContent = error.message;
+      driveInputOAuthPollTimer = window.setTimeout(pollDriveInputOAuth, 2000);
+    }
+  }
+
+  async function connectDriveInputOAuth() {
+    if (state.driveInput?.oauth?.status === "waiting") {
+      await fetch("/api/drive-input/oauth/cancel", { method: "POST" });
+      stopDriveInputOAuthPolling();
+      const store = encodeURIComponent(driveInputCredentialStore.value);
+      state.driveInput = await responseJson(
+        await fetch(`/api/drive-input/oauth/status?credentialStore=${store}`),
+        "取消 Google Drive 授权失败",
+      );
+      renderDriveInputOAuth(state.driveInput);
+      driveInputSaveState.textContent = "已取消 Google Drive 连接";
+      return;
+    }
+    driveInputConnectOAuth.disabled = true;
+    driveInputSaveState.textContent = "正在准备 Google 授权…";
+    try {
+      const result = await responseJson(
+        await fetch("/api/drive-input/oauth/start", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            credentialStore: driveInputCredentialStore.value,
+            credentialValue: driveInputCredentialValue.value || null,
+          }),
+        }),
+        "启动 Google Drive 授权失败",
+      );
+      window.open(result.authorizationUrl, "_blank", "noopener,noreferrer");
+      state.driveInput.oauth = {
+        status: "waiting",
+        account: null,
+        expiresAt: result.expiresAt,
+        error: null,
+      };
+      renderDriveInputOAuth(state.driveInput);
+      driveInputSaveState.textContent = "请在浏览器中选择个人 Google 账号并授权";
+      void pollDriveInputOAuth();
+    } catch (error) {
+      driveInputSaveState.textContent = error.message;
+    } finally {
+      driveInputConnectOAuth.disabled = false;
+    }
+  }
+
+  async function disconnectDriveInputOAuth() {
+    driveInputDisconnectOAuth.disabled = true;
+    try {
+      state.driveInput = await responseJson(
+        await fetch("/api/drive-input/oauth/disconnect", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            credentialStore: driveInputCredentialStore.value,
+          }),
+        }),
+        "断开 Google Drive 失败",
+      );
+      renderDriveInputOAuth(state.driveInput);
+      driveInputSaveState.textContent = "已移除本机 Google Drive 授权";
+    } catch (error) {
+      driveInputSaveState.textContent = error.message;
+    } finally {
+      driveInputDisconnectOAuth.disabled = false;
+    }
+  }
+
   function mailInputFormValue() {
     return {
       enabled: mailInputEnabled.checked,
@@ -599,7 +851,10 @@ export function initSettings(state) {
 
   async function saveCurrentSettings() {
     if (activeSettingsTab === "general") {
-      settingsSaveState.textContent = "头像会在选择或还原时立即保存";
+      settingsSave.disabled = true;
+      const saved = await actions.saveInputRoles?.();
+      settingsSave.disabled = false;
+      settingsSaveState.textContent = saved === false ? "保存失败" : "已保存";
       return;
     }
     if (activeSettingsTab === "exploration") {
@@ -607,7 +862,9 @@ export function initSettings(state) {
       return;
     }
     if (activeSettingsTab === "sources") {
-      if (await saveAmbient()) await saveMailInput();
+      if (activeSourceSettingsTab === "ambient") await saveAmbient();
+      if (activeSourceSettingsTab === "drive") await saveDriveInput();
+      if (activeSourceSettingsTab === "mail") await saveMailInput();
       return;
     }
     if (activeSettingsTab === "reflection") {
@@ -625,9 +882,8 @@ export function initSettings(state) {
 
   function activateTab(name) {
     activeSettingsTab = name;
-    const hasPageSave = name !== "general";
-    settingsSave.disabled = !hasPageSave;
-    settingsSave.textContent = hasPageSave ? "保存当前页" : "无需保存";
+    settingsSave.disabled = false;
+    settingsSave.textContent = "保存当前页";
     for (const button of tabButtons) {
       button.setAttribute(
         "aria-selected",
@@ -637,17 +893,38 @@ export function initSettings(state) {
     for (const panel of tabPanels) {
       panel.hidden = panel.dataset.settingsPanel !== name;
     }
+    if (name === "general") {
+      void actions.refreshInputRoles?.();
+    }
+  }
+
+  function activateSourceTab(name) {
+    activeSourceSettingsTab = sourceTabPanels.some(
+      (panel) => panel.dataset.sourceSettingsPanel === name,
+    )
+      ? name
+      : "ambient";
+    for (const button of sourceTabButtons) {
+      const selected = button.dataset.sourceSettingsTab === activeSourceSettingsTab;
+      button.setAttribute("aria-selected", String(selected));
+      button.tabIndex = selected ? 0 : -1;
+    }
+    for (const panel of sourceTabPanels) {
+      panel.hidden = panel.dataset.sourceSettingsPanel !== activeSourceSettingsTab;
+    }
   }
 
   function openSettings(tab = "exploration") {
     renderCompute();
     renderAmbient();
+    renderDriveInput();
     renderMailInput();
     renderAudioTranscription();
     renderAutonomy();
     renderBridge();
     settingsSaveState.textContent = "";
     activateTab(normalizeSettingsTab(tab));
+    activateSourceTab(activeSourceSettingsTab);
     dialog.showModal();
   }
 
@@ -659,6 +936,13 @@ export function initSettings(state) {
   });
   computeForm.addEventListener("submit", saveCompute);
   ambientForm.addEventListener("submit", saveAmbient);
+  driveInputForm.addEventListener("submit", saveDriveInput);
+  driveInputConnectOAuth.addEventListener("click", connectDriveInputOAuth);
+  driveInputDisconnectOAuth.addEventListener("click", disconnectDriveInputOAuth);
+  driveInputTestConnection.addEventListener("click", testDriveInputConnection);
+  driveInputFileSelection.addEventListener("change", () => {
+    driveInputFileNamePattern.disabled = driveInputFileSelection.value === "all";
+  });
   mailInputForm.addEventListener("submit", saveMailInput);
   mailInputTestConnection.addEventListener("click", testMailInputConnection);
   settingsSave.addEventListener("click", saveCurrentSettings);
@@ -727,6 +1011,26 @@ export function initSettings(state) {
       activateTab(button.dataset.settingsTab),
     );
   }
+  for (const button of sourceTabButtons) {
+    button.addEventListener("click", () =>
+      activateSourceTab(button.dataset.sourceSettingsTab),
+    );
+    button.addEventListener("keydown", (event) => {
+      if (!["ArrowUp", "ArrowDown", "ArrowLeft", "ArrowRight", "Home", "End"].includes(event.key)) {
+        return;
+      }
+      event.preventDefault();
+      const current = sourceTabButtons.indexOf(button);
+      const next = event.key === "Home"
+        ? 0
+        : event.key === "End"
+          ? sourceTabButtons.length - 1
+          : (current + (event.key === "ArrowUp" || event.key === "ArrowLeft" ? -1 : 1) + sourceTabButtons.length) % sourceTabButtons.length;
+      const target = sourceTabButtons[next];
+      activateSourceTab(target.dataset.sourceSettingsTab);
+      target.focus();
+    });
+  }
   document.querySelector("#open-settings").addEventListener("click", () => {
     openSettings("exploration");
   });
@@ -735,6 +1039,7 @@ export function initSettings(state) {
     render() {
       renderCompute();
       renderAmbient();
+      renderDriveInput();
       renderMailInput();
       renderAudioTranscription();
       renderAutonomy();
@@ -742,6 +1047,7 @@ export function initSettings(state) {
     },
     renderAutonomy,
     renderAmbient,
+    renderDriveInput,
     open: openSettings,
   };
 }

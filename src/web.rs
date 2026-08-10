@@ -45,8 +45,13 @@ use crate::{
     },
     curiosity::{CuriositySnapshot, CuriosityStore},
     diagnostics::TraceEventKind,
+    drive_input::{
+        DriveInputConfig, DriveInputConnectionTest, DriveInputSnapshot, DriveInputStore,
+        DriveOAuthStart, DriveOAuthStartResponse, DriveOAuthStoreSelection,
+    },
     exploration::{ExplorationHandle, ExplorationSnapshot, ManualExplorationRun, today_started_at},
     identity::{AvatarSlot, IdentitySnapshot, IdentityStore},
+    input_roles::{InputRoleSettingsSnapshot, InputRoleSettingsUpdate, InputRoleStore},
     mail_input::{MailInputConfig, MailInputConnectionTest, MailInputSnapshot, MailInputStore},
     memory::{
         MemoryEntry, MemoryRole, MessageDeliveryState, MessageMetadata, MessageQuote,
@@ -80,6 +85,8 @@ const PRESENTATION_JS: &str = include_str!("../web/presentation.js");
 const PROFILE_UI_JS: &str = include_str!("../web/profile-ui.js");
 const CURIOSITY_UI_JS: &str = include_str!("../web/curiosity-ui.js");
 const IDENTITY_UI_JS: &str = include_str!("../web/identity-ui.js");
+const INPUT_ROLES_JS: &str = include_str!("../web/input-roles.js");
+const INPUT_SIGNAL_GROUPS_JS: &str = include_str!("../web/input-signal-groups.js");
 const SETTINGS_JS: &str = include_str!("../web/settings.js");
 const USAGE_UI_JS: &str = include_str!("../web/usage-ui.js");
 const COMPOSER_CONTEXT_UI_JS: &str = include_str!("../web/composer-context-ui.js");
@@ -98,7 +105,21 @@ const TRACE_UI_JS: &str = include_str!("../web/trace-ui.js");
 const TOPBAR_UI_JS: &str = include_str!("../web/topbar-ui.js");
 const STYLES_CSS: &str = include_str!("../web/styles.css");
 const DEFAULT_AVATAR_PNG: &[u8] =
-    include_bytes!("../macos/SymbiontMenu/Resources/AppIconSource.png");
+    include_bytes!("../web/assets/symbiont-avatar-transparent-v3.png");
+const DEFAULT_SMALL_AVATAR_PNG: &[u8] =
+    include_bytes!("../web/assets/symbiont-avatar-transparent-small-v3.png");
+const INPUT_ROLE_AVATAR_MOON_WINDOW: &[u8] =
+    include_bytes!("../web/assets/input-role-avatars/moon-window.png");
+const INPUT_ROLE_AVATAR_COURIER: &[u8] =
+    include_bytes!("../web/assets/input-role-avatars/courier.png");
+const INPUT_ROLE_AVATAR_PRISM: &[u8] = include_bytes!("../web/assets/input-role-avatars/prism.png");
+const INPUT_ROLE_AVATAR_FIREFLY: &[u8] =
+    include_bytes!("../web/assets/input-role-avatars/firefly.png");
+const INPUT_ROLE_AVATAR_TIDE: &[u8] = include_bytes!("../web/assets/input-role-avatars/tide.png");
+const INPUT_ROLE_AVATAR_SEED: &[u8] = include_bytes!("../web/assets/input-role-avatars/seed.png");
+const INPUT_ROLE_AVATAR_STAR_MAP: &[u8] =
+    include_bytes!("../web/assets/input-role-avatars/star-map.png");
+const INPUT_ROLE_AVATAR_ECHO: &[u8] = include_bytes!("../web/assets/input-role-avatars/echo.png");
 const MAX_USER_MESSAGE_CHARS: usize = 12_000;
 const MAX_CODEX_TASK_CONTEXTS: usize = 2;
 const MAX_CHAT_BODY_BYTES: usize =
@@ -116,6 +137,7 @@ pub struct AppState {
     codex: Arc<Mutex<CodexClient>>,
     compute: Arc<ComputeStore>,
     ambient: Arc<AmbientTopologyStore>,
+    drive_input: Arc<DriveInputStore>,
     mail_input: Arc<MailInputStore>,
     audio_transcription: Arc<AudioTranscriptionStore>,
     compute_policies: Arc<ComputePolicyStore>,
@@ -123,6 +145,7 @@ pub struct AppState {
     rate_limits: Arc<RwLock<Option<RateLimitInfo>>>,
     exploration: ExplorationHandle,
     signals: Arc<SignalStore>,
+    input_roles: Arc<InputRoleStore>,
     reflection: ReflectionHandle,
     reconciliation: ReconciliationHandle,
     pcp_index: Arc<PcpIndex>,
@@ -145,6 +168,7 @@ impl AppState {
         codex: Arc<Mutex<CodexClient>>,
         compute: Arc<ComputeStore>,
         ambient: Arc<AmbientTopologyStore>,
+        drive_input: Arc<DriveInputStore>,
         mail_input: Arc<MailInputStore>,
         audio_transcription: Arc<AudioTranscriptionStore>,
         compute_policies: Arc<ComputePolicyStore>,
@@ -152,6 +176,7 @@ impl AppState {
         rate_limits: Arc<RwLock<Option<RateLimitInfo>>>,
         exploration: ExplorationHandle,
         signals: Arc<SignalStore>,
+        input_roles: Arc<InputRoleStore>,
         reflection: ReflectionHandle,
         reconciliation: ReconciliationHandle,
         pcp_index: Arc<PcpIndex>,
@@ -175,6 +200,7 @@ impl AppState {
             codex,
             compute,
             ambient,
+            drive_input,
             mail_input,
             audio_transcription,
             compute_policies,
@@ -182,6 +208,7 @@ impl AppState {
             rate_limits,
             exploration,
             signals,
+            input_roles,
             reflection,
             reconciliation,
             pcp_index,
@@ -226,6 +253,7 @@ struct CodexTasksQuery {
 struct BootstrapResponse {
     messages: Vec<MemoryEntry>,
     signals: Vec<SignalEvent>,
+    input_roles: InputRoleSettingsSnapshot,
     turn_dispositions: Vec<TurnDisposition>,
     memory_chars: usize,
     status: &'static str,
@@ -236,6 +264,7 @@ struct BootstrapResponse {
     models: Vec<ModelInfo>,
     compute: ComputeConfig,
     ambient: AmbientSnapshot,
+    drive_input: DriveInputSnapshot,
     mail_input: MailInputSnapshot,
     audio_transcription: AudioTranscriptionSnapshot,
     compute_policies: Vec<ComputeTopicPolicy>,
@@ -264,6 +293,7 @@ struct RuntimeResponse {
     identity: IdentitySnapshot,
     usage: UsageHeadline,
     ambient: AmbientSnapshot,
+    drive_input: DriveInputSnapshot,
     mail_input: MailInputSnapshot,
     audio_transcription: AudioTranscriptionSnapshot,
     exploration: ExplorationSnapshot,
@@ -274,6 +304,7 @@ struct RuntimeResponse {
     compute_policies: Vec<ComputeTopicPolicy>,
     messages: Vec<MemoryEntry>,
     signals: Vec<SignalEvent>,
+    input_roles: InputRoleSettingsSnapshot,
     turn_dispositions: Vec<TurnDisposition>,
     permissions: Vec<PermissionRequestView>,
     bridge: BridgeSnapshot,
@@ -508,6 +539,8 @@ pub fn router(state: AppState) -> Router {
         .route("/profile-ui.js", get(profile_ui_js))
         .route("/curiosity-ui.js", get(curiosity_ui_js))
         .route("/identity-ui.js", get(identity_ui_js))
+        .route("/input-roles.js", get(input_roles_js))
+        .route("/input-signal-groups.js", get(input_signal_groups_js))
         .route("/settings.js", get(settings_js))
         .route("/usage-ui.js", get(usage_ui_js))
         .route("/composer-context-ui.js", get(composer_context_ui_js))
@@ -526,12 +559,18 @@ pub fn router(state: AppState) -> Router {
         .route("/topbar-ui.js", get(topbar_ui_js))
         .route("/styles.css", get(styles_css))
         .route("/symbiont-avatar.png", get(default_avatar))
+        .route("/symbiont-avatar-small.png", get(default_small_avatar))
+        .route(
+            "/assets/input-role-avatars/{avatar}",
+            get(input_role_avatar),
+        )
         .route("/api/health", get(health))
         .route("/api/bootstrap", get(bootstrap))
         .route("/api/chat", post(chat))
         .route("/api/chat/append", post(append_chat))
         .route("/api/chat/interrupt", post(interrupt_chat))
         .route("/api/messages/{revision_id}", delete(retract_message))
+        .route("/api/signals/{signal_id}", delete(dismiss_signal))
         .route("/api/interaction/seen", post(record_seen))
         .route("/api/interaction/typing", post(record_typing))
         .route("/api/permissions/{permission_id}", post(resolve_permission))
@@ -561,6 +600,32 @@ pub fn router(state: AppState) -> Router {
         )
         .route("/api/compute", post(update_compute))
         .route("/api/ambient", post(update_ambient))
+        .route(
+            "/api/input-roles",
+            get(input_roles_snapshot).post(update_input_roles),
+        )
+        .route("/api/drive-input", post(update_drive_input))
+        .route(
+            "/api/drive-input/oauth/start",
+            post(start_drive_input_oauth),
+        )
+        .route(
+            "/api/drive-input/oauth/status",
+            get(drive_input_oauth_status),
+        )
+        .route(
+            "/api/drive-input/oauth/cancel",
+            post(cancel_drive_input_oauth),
+        )
+        .route(
+            "/api/drive-input/oauth/disconnect",
+            post(disconnect_drive_input_oauth),
+        )
+        .route("/api/drive-input/test", post(test_drive_input_connection))
+        .route(
+            "/api/drive-input/test/cancel",
+            post(cancel_drive_input_connection_test),
+        )
         .route("/api/mail-input", post(update_mail_input))
         .route("/api/mail-input/test", post(test_mail_input_connection))
         .route(
@@ -608,6 +673,29 @@ async fn index() -> impl IntoResponse {
         [(header::CONTENT_TYPE, "text/html; charset=utf-8")],
         INDEX_HTML,
     )
+}
+
+async fn input_role_avatar(
+    AxumPath(avatar): AxumPath<String>,
+) -> Result<impl IntoResponse, ApiError> {
+    let bytes = match avatar.as_str() {
+        "moon-window.png" => INPUT_ROLE_AVATAR_MOON_WINDOW,
+        "courier.png" => INPUT_ROLE_AVATAR_COURIER,
+        "prism.png" => INPUT_ROLE_AVATAR_PRISM,
+        "firefly.png" => INPUT_ROLE_AVATAR_FIREFLY,
+        "tide.png" => INPUT_ROLE_AVATAR_TIDE,
+        "seed.png" => INPUT_ROLE_AVATAR_SEED,
+        "star-map.png" => INPUT_ROLE_AVATAR_STAR_MAP,
+        "echo.png" => INPUT_ROLE_AVATAR_ECHO,
+        _ => return Err(ApiError::not_found("input role avatar not found")),
+    };
+    Ok((
+        [
+            (header::CONTENT_TYPE, "image/png"),
+            (header::CACHE_CONTROL, "public, max-age=86400"),
+        ],
+        bytes,
+    ))
 }
 
 async fn app_js() -> impl IntoResponse {
@@ -670,6 +758,20 @@ async fn identity_ui_js() -> impl IntoResponse {
     (
         [(header::CONTENT_TYPE, "text/javascript; charset=utf-8")],
         IDENTITY_UI_JS,
+    )
+}
+
+async fn input_roles_js() -> impl IntoResponse {
+    (
+        [(header::CONTENT_TYPE, "text/javascript; charset=utf-8")],
+        INPUT_ROLES_JS,
+    )
+}
+
+async fn input_signal_groups_js() -> impl IntoResponse {
+    (
+        [(header::CONTENT_TYPE, "text/javascript; charset=utf-8")],
+        INPUT_SIGNAL_GROUPS_JS,
     )
 }
 
@@ -793,11 +895,19 @@ async fn styles_css() -> impl IntoResponse {
 }
 
 async fn default_avatar() -> Response {
+    avatar_response(DEFAULT_AVATAR_PNG)
+}
+
+async fn default_small_avatar() -> Response {
+    avatar_response(DEFAULT_SMALL_AVATAR_PNG)
+}
+
+fn avatar_response(bytes: &'static [u8]) -> Response {
     Response::builder()
         .header(header::CONTENT_TYPE, "image/png")
         .header(header::CACHE_CONTROL, "no-store")
         .header("x-content-type-options", "nosniff")
-        .body(Body::from(DEFAULT_AVATAR_PNG))
+        .body(Body::from(bytes))
         .expect("valid default avatar response")
 }
 
@@ -810,11 +920,12 @@ async fn bootstrap(State(state): State<AppState>) -> Result<Json<BootstrapRespon
         .into_iter()
         .filter(|entry| matches!(entry.role, MemoryRole::User | MemoryRole::Assistant))
         .collect();
-    let signals = state
+    let mut signals = state
         .signals
         .visible(100)
         .await
         .map_err(ApiError::internal)?;
+    apply_input_role_appearances(&state, &mut signals).await;
     let turn_dispositions = state
         .reflection
         .store()
@@ -838,10 +949,18 @@ async fn bootstrap(State(state): State<AppState>) -> Result<Json<BootstrapRespon
         .await
         .map_err(ApiError::internal)?;
     let exploration = state.exploration.snapshot().await;
+    let ambient = state.ambient.snapshot().await;
+    let drive_input = state.drive_input.snapshot().await;
+    let mail_input = state.mail_input.snapshot().await;
+    let input_roles = state
+        .input_roles
+        .snapshot(&ambient, &drive_input, &mail_input)
+        .await;
 
     Ok(Json(BootstrapResponse {
         messages,
         signals,
+        input_roles,
         turn_dispositions,
         memory_chars,
         status: "connected",
@@ -851,8 +970,9 @@ async fn bootstrap(State(state): State<AppState>) -> Result<Json<BootstrapRespon
         autonomy_permitted,
         models: state.compute.catalog().to_vec(),
         compute: state.compute.snapshot().await,
-        ambient: state.ambient.snapshot().await,
-        mail_input: state.mail_input.snapshot().await,
+        ambient,
+        drive_input,
+        mail_input,
         audio_transcription: state.audio_transcription.snapshot().await,
         compute_policies: state.compute_policies.snapshot().await,
         rate_limits: state.rate_limits.read().await.clone(),
@@ -1065,6 +1185,121 @@ async fn update_ambient(
     Ok(Json(snapshot))
 }
 
+async fn update_input_roles(
+    State(state): State<AppState>,
+    Json(update): Json<InputRoleSettingsUpdate>,
+) -> Result<Json<InputRoleSettingsSnapshot>, ApiError> {
+    state
+        .input_roles
+        .update(update)
+        .await
+        .map_err(ApiError::bad_request)?;
+    let ambient = state.ambient.snapshot().await;
+    let drive_input = state.drive_input.snapshot().await;
+    let mail_input = state.mail_input.snapshot().await;
+    Ok(Json(
+        state
+            .input_roles
+            .snapshot(&ambient, &drive_input, &mail_input)
+            .await,
+    ))
+}
+
+async fn input_roles_snapshot(State(state): State<AppState>) -> Json<InputRoleSettingsSnapshot> {
+    let ambient = state.ambient.snapshot().await;
+    let drive_input = state.drive_input.snapshot().await;
+    let mail_input = state.mail_input.snapshot().await;
+    Json(
+        state
+            .input_roles
+            .snapshot(&ambient, &drive_input, &mail_input)
+            .await,
+    )
+}
+
+async fn update_drive_input(
+    State(state): State<AppState>,
+    Json(config): Json<DriveInputConfig>,
+) -> Result<Json<DriveInputSnapshot>, ApiError> {
+    let snapshot = state
+        .drive_input
+        .update(config)
+        .await
+        .map_err(ApiError::bad_request)?;
+    if state.drive_input.has_configured_input().await
+        || state.mail_input.has_configured_input().await
+        || state.ambient.has_configured_input().await
+    {
+        state
+            .exploration
+            .clear_stale_input_configuration_skips()
+            .await
+            .map_err(ApiError::internal)?;
+    }
+    Ok(Json(snapshot))
+}
+
+async fn start_drive_input_oauth(
+    State(state): State<AppState>,
+    Json(request): Json<DriveOAuthStart>,
+) -> Result<Json<DriveOAuthStartResponse>, ApiError> {
+    state
+        .drive_input
+        .start_oauth(request)
+        .await
+        .map(Json)
+        .map_err(|error| ApiError::bad_request(connection_test_error(&error)))
+}
+
+async fn drive_input_oauth_status(
+    State(state): State<AppState>,
+    Query(selection): Query<DriveOAuthStoreSelection>,
+) -> Json<DriveInputSnapshot> {
+    Json(state.drive_input.oauth_status(selection).await)
+}
+
+async fn cancel_drive_input_oauth(State(state): State<AppState>) -> StatusCode {
+    state.drive_input.cancel_oauth().await;
+    StatusCode::NO_CONTENT
+}
+
+async fn disconnect_drive_input_oauth(
+    State(state): State<AppState>,
+    Json(selection): Json<DriveOAuthStoreSelection>,
+) -> Result<Json<DriveInputSnapshot>, ApiError> {
+    let store = selection.credential_store;
+    state
+        .drive_input
+        .disconnect_oauth(selection)
+        .await
+        .map_err(ApiError::bad_request)?;
+    Ok(Json(
+        state
+            .drive_input
+            .oauth_status(DriveOAuthStoreSelection {
+                credential_store: store,
+            })
+            .await,
+    ))
+}
+
+async fn test_drive_input_connection(
+    State(state): State<AppState>,
+    Json(config): Json<DriveInputConfig>,
+) -> Result<Json<DriveInputConnectionTest>, ApiError> {
+    state
+        .drive_input
+        .test_connection(config)
+        .await
+        .map(Json)
+        .map_err(|error| ApiError::bad_request(connection_test_error(&error)))
+}
+
+async fn cancel_drive_input_connection_test(State(state): State<AppState>) -> StatusCode {
+    state.drive_input.cancel_connection_test().await;
+    StatusCode::NO_CONTENT
+}
+
 async fn update_mail_input(
     State(state): State<AppState>,
     Json(config): Json<MailInputConfig>,
@@ -1074,7 +1309,10 @@ async fn update_mail_input(
         .update(config)
         .await
         .map_err(ApiError::bad_request)?;
-    if state.mail_input.has_configured_input().await || state.ambient.has_configured_input().await {
+    if state.drive_input.has_configured_input().await
+        || state.mail_input.has_configured_input().await
+        || state.ambient.has_configured_input().await
+    {
         state
             .exploration
             .clear_stale_input_configuration_skips()
@@ -1093,14 +1331,14 @@ async fn test_mail_input_connection(
         .test_connection(config)
         .await
         .map(Json)
-        .map_err(|error| ApiError::bad_request(mail_input_test_error(&error)))
+        .map_err(|error| ApiError::bad_request(connection_test_error(&error)))
 }
 
 /// A connection test is an explicit, local diagnostic action. Preserve the
 /// server's bounded error chain here so people can distinguish an
 /// authentication failure from a mailbox/folder failure without exposing any
 /// credential material.
-fn mail_input_test_error(error: &anyhow::Error) -> String {
+fn connection_test_error(error: &anyhow::Error) -> String {
     let message = format!("{error:#}");
     let normalized = message.split_whitespace().collect::<Vec<_>>().join(" ");
     normalized.chars().take(800).collect()
@@ -1286,22 +1524,31 @@ async fn runtime(
         .live_messages_after(query.after_revision_id.as_deref(), 20)
         .await
         .map_err(ApiError::internal)?;
-    let signals = state
+    let mut signals = state
         .signals
         .visible(100)
         .await
         .map_err(ApiError::internal)?;
+    apply_input_role_appearances(&state, &mut signals).await;
     let turn_dispositions = state
         .reflection
         .store()
         .recent_turn_dispositions(200)
         .await
         .map_err(ApiError::internal)?;
+    let ambient = state.ambient.snapshot().await;
+    let drive_input = state.drive_input.snapshot().await;
+    let mail_input = state.mail_input.snapshot().await;
+    let input_roles = state
+        .input_roles
+        .snapshot(&ambient, &drive_input, &mail_input)
+        .await;
     Ok(Json(RuntimeResponse {
         identity: state.identity.snapshot().await,
         usage,
-        ambient: state.ambient.snapshot().await,
-        mail_input: state.mail_input.snapshot().await,
+        ambient,
+        drive_input,
+        mail_input,
         audio_transcription: state.audio_transcription.snapshot().await,
         exploration: state.exploration.snapshot().await,
         reflection: state.reflection.runtime().await,
@@ -1311,6 +1558,7 @@ async fn runtime(
         compute_policies: state.compute_policies.snapshot().await,
         messages,
         signals,
+        input_roles,
         turn_dispositions,
         permissions: state.permissions.snapshot().await,
         bridge: state.bridge.snapshot().await,
@@ -1917,6 +2165,21 @@ async fn retract_message(
     }))
 }
 
+async fn dismiss_signal(
+    State(state): State<AppState>,
+    AxumPath(signal_id): AxumPath<String>,
+) -> Result<StatusCode, ApiError> {
+    if !state
+        .signals
+        .dismiss(&signal_id)
+        .await
+        .map_err(ApiError::internal)?
+    {
+        return Err(ApiError::not_found("Input signal is no longer available."));
+    }
+    Ok(StatusCode::NO_CONTENT)
+}
+
 async fn interrupt_chat(
     State(state): State<AppState>,
 ) -> Result<Json<ChatInterruptResponse>, ApiError> {
@@ -2194,7 +2457,7 @@ async fn prepare_chat_request(
     }
     let signal_revision_id = match incoming.signal_id {
         Some(signal_id) => {
-            let signal = state
+            let mut signal = state
                 .signals
                 .get(&signal_id)
                 .await
@@ -2202,6 +2465,7 @@ async fn prepare_chat_request(
                 .ok_or_else(|| {
                     ApiError::bad_request("This input signal is no longer available.")
                 })?;
+            state.input_roles.apply(&mut signal.actor).await;
             let revision_id = match signal.promoted_revision_id.as_deref() {
                 Some(revision_id) => revision_id.to_owned(),
                 None => {
@@ -2730,15 +2994,16 @@ fn signal_context(signal: &SignalEvent) -> ExternalContext {
         source: "symbiont_input_signal".to_owned(),
         title: format!("{} · {}", signal.actor.name, signal.title),
         content: format!(
-            "Input-only model role: {} ({}, {}). This is an external signal the user chose to reply to; respond as symbiont-d, do not impersonate the input role. Treat the following as a self-contained source packet: restate the relevant factual context before interpreting it, and never assume the user saw an earlier card.\n\nTitle: {}\nUnderlying event date: {}\nObserved by Symbiont: {}\n\nInput:\n{}\n\nSummary:\n{}\n\nSources:\n{}",
+            "Input-only model role: {} ({}, {}). This is an external signal the user chose to reply to; respond as symbiont-d, do not impersonate the input role. Treat the following as a self-contained source packet: restate the relevant factual context before interpreting it, and never assume the user saw an earlier card.\n\nTitle: {}\nUnderlying event date: {}\nObserved by Symbiont: {}\n\nReceived text:\n{}\n\nDisplayed text:\n{}\n\nQualification:\n{}\n\nSources:\n{}",
             signal.actor.name,
             signal.actor.model,
             signal.actor.effort,
             signal.title,
             signal.event_at.as_deref().unwrap_or("not supplied"),
             signal.observed_at,
+            signal.received_text,
             signal.content,
-            signal.summary,
+            signal.qualification_note.as_deref().unwrap_or("none"),
             signal
                 .sources
                 .iter()
@@ -2746,6 +3011,12 @@ fn signal_context(signal: &SignalEvent) -> ExternalContext {
                 .collect::<Vec<_>>()
                 .join("\n")
         ),
+    }
+}
+
+async fn apply_input_role_appearances(state: &AppState, signals: &mut [SignalEvent]) {
+    for signal in signals {
+        state.input_roles.apply(&mut signal.actor).await;
     }
 }
 
@@ -2977,11 +3248,11 @@ mod tests {
     }
 
     #[test]
-    fn mail_input_test_error_keeps_the_imap_server_cause() {
+    fn connection_test_error_keeps_the_imap_server_cause() {
         let error = anyhow::anyhow!("server replied: NO [NONEXISTENT] Unknown Mailbox: INBOX")
             .context("open IMAP folder read-only");
         assert_eq!(
-            mail_input_test_error(&error),
+            connection_test_error(&error),
             "open IMAP folder read-only: server replied: NO [NONEXISTENT] Unknown Mailbox: INBOX"
         );
     }

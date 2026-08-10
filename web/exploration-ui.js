@@ -573,6 +573,7 @@ function skippedAttemptLabel(reason) {
       no_input_channel: "没有可用的广域输入通道",
       input_cooldown: "广域输入通道已启用，等待下次观察时间",
       mailbox_empty: "私有研究收件箱已查收，没有新的白名单输入",
+      drive_empty: "Google Drive Inbox 已检查，没有新的匹配文件",
       channel_failed: "广域输入通道未能完成",
     }[reason] || "本轮未形成可查看的探索"
   );

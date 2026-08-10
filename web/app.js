@@ -6,6 +6,8 @@ import { renderMessageContent, renderRichText } from "/rich-text.js";
 import { initExplorationUi } from "/exploration-ui.js";
 import { manualCompletionNotice } from "/exploration-receipt.js";
 import { initIdentityUi } from "/identity-ui.js";
+import { applyInputRoleAvatar, initInputRoleUi } from "/input-roles.js";
+import { regroupInputSignals } from "/input-signal-groups.js";
 import { initComputeModeUi } from "/compute-mode-ui.js";
 import { initComposerContextUi } from "/composer-context-ui.js";
 import { initVoiceInput } from "/voice-input.js";
@@ -25,7 +27,9 @@ const appState = {
   models: [],
   compute: null,
   ambient: null,
+  driveInput: null,
   mailInput: null,
+  inputRoles: { roles: [], avatarOptions: [] },
   audioTranscription: null,
   computePolicies: [],
   identity: { avatar: null },
@@ -95,9 +99,13 @@ const SCROLL_TO_LATEST_THRESHOLD = 120;
 const explorationUi = initExplorationUi(appState, {
   announceManualCompletion: appendManualExplorationReceipt,
 });
-const settingsUi = initSettings(appState);
 const usageUi = initUsageUi(appState);
 const identityUi = initIdentityUi(appState);
+const inputRoleUi = initInputRoleUi(appState);
+const settingsUi = initSettings(appState, {
+  saveInputRoles: inputRoleUi.save,
+  refreshInputRoles: inputRoleUi.refresh,
+});
 const permissionUi = initPermissionUi(appState);
 const composerContextUi = initComposerContextUi({
   state: appState,
@@ -283,12 +291,15 @@ function appendInputSignal(signal, options = {}) {
   const article = document.createElement("article");
   article.className = "message input-signal";
   article.dataset.signalId = signal.id;
+  article.dataset.inputRoleId = signal.actor?.id || "";
+  article.dataset.signalObservedAt =
+    signal.observedAt || signal.observed_at || new Date().toISOString();
   const layout = document.createElement("div");
   layout.className = "message-layout";
   const avatar = document.createElement("div");
   avatar.className = "message-avatar input-role-avatar";
   avatar.setAttribute("aria-hidden", "true");
-  avatar.textContent = signal.actor?.avatarSeed?.slice(0, 1).toUpperCase() || "◌";
+  applyInputRoleAvatar(avatar, signal.actor?.avatarSeed || signal.actor?.avatar_seed);
   const content = document.createElement("div");
   content.className = "message-content";
   const meta = document.createElement("div");
@@ -297,16 +308,16 @@ function appendInputSignal(signal, options = {}) {
   speaker.className = "speaker";
   speaker.textContent = signal.actor?.name || "广域输入";
   const time = document.createElement("time");
-  time.dateTime = signal.observedAt || new Date().toISOString();
+  time.dateTime = signal.observedAt || signal.observed_at || new Date().toISOString();
   time.textContent = new Date(time.dateTime).toLocaleTimeString([], {
     hour: "2-digit",
     minute: "2-digit",
   });
-  meta.append(speaker, time);
-  const label = document.createElement("p");
+  const label = document.createElement("span");
   label.className = "input-signal-label";
-  const observedAt = new Date(signal.observedAt || Date.now());
-  const eventAt = signal.eventAt ? new Date(signal.eventAt) : null;
+  const observedAt = new Date(signal.observedAt || signal.observed_at || Date.now());
+  const rawEventAt = signal.eventAt || signal.event_at;
+  const eventAt = rawEventAt ? new Date(rawEventAt) : null;
   const eventLabel = eventAt && !Number.isNaN(eventAt.getTime())
     ? `发生于 ${eventAt.toLocaleDateString([], { month: "numeric", day: "numeric" })}`
     : null;
@@ -314,26 +325,91 @@ function appendInputSignal(signal, options = {}) {
     ? `采集于 ${observedAt.toLocaleDateString([], { month: "numeric", day: "numeric" })}`
     : null;
   label.textContent = ["外部输入", eventLabel, observedLabel].filter(Boolean).join(" · ");
+  meta.append(speaker, label, time);
+  const receivedText = signal.receivedText || signal.received_text || signal.summary || "";
+  const displayText = signal.content || receivedText || signal.title;
   const body = document.createElement("div");
   body.className = "message-body";
   renderMessageContent(body, {
-    content: signal.content || signal.summary || signal.title,
-    parts: [{ type: "markdown", text: signal.content || signal.summary || signal.title }],
+    content: displayText,
+    parts: [{ type: "markdown", text: displayText }],
   });
   const foot = document.createElement("div");
-  foot.className = "input-signal-foot";
+  foot.className = "message-foot input-signal-foot";
   const title = document.createElement("span");
+  title.className = "message-runtime";
   title.textContent = signal.title || "外部信号";
+  const actions = document.createElement("span");
+  actions.className = "message-actions";
   const reply = document.createElement("button");
   reply.type = "button";
-  reply.className = "input-signal-reply";
-  reply.textContent = signal.promotedRevisionId ? "继续讨论" : "回应";
+  reply.className = "message-action input-signal-reply";
+  reply.textContent = "↩";
+  reply.title = signal.promotedRevisionId ? "继续讨论" : "回应这条输入";
+  reply.setAttribute("aria-label", reply.title);
   reply.addEventListener("click", () => {
     selectedSignalId = signal.id;
     input.focus();
     composerState.textContent = "已附上这条观察、发生时间和来源";
   });
-  foot.append(title, reply);
+  const dismiss = document.createElement("button");
+  dismiss.type = "button";
+  dismiss.className = "message-action input-signal-dismiss";
+  dismiss.title = "从聊天中移除（不影响后续筛选）";
+  dismiss.setAttribute("aria-label", dismiss.title);
+  const dismissIcon = document.createElement("i");
+  dismissIcon.dataset.lucide = "trash-2";
+  dismissIcon.setAttribute("aria-hidden", "true");
+  dismiss.append(dismissIcon);
+  dismiss.addEventListener("click", async () => {
+    dismiss.disabled = true;
+    try {
+      const response = await fetch(`/api/signals/${encodeURIComponent(signal.id)}`, {
+        method: "DELETE",
+      });
+      if (!response.ok) {
+        const payload = await response.json().catch(() => ({}));
+        throw new Error(payload.error || "无法移除这条外部输入");
+      }
+      if (selectedSignalId === signal.id) {
+        selectedSignalId = null;
+        composerState.textContent = "";
+      }
+      appState.signals = appState.signals.filter((item) => item.id !== signal.id);
+      article.remove();
+      regroupInputSignals(conversation);
+      emptyState.hidden = Boolean(conversation.querySelector(".message"));
+    } catch (error) {
+      dismiss.disabled = false;
+      notifyComposer(error.message);
+    }
+  });
+  actions.append(reply, dismiss);
+  renderIcons(actions);
+  foot.append(title, actions);
+  content.append(meta, body);
+  const isCondensed = signal.presentation === "condensed";
+  if (isCondensed && receivedText && receivedText.trim() !== displayText.trim()) {
+    const original = document.createElement("details");
+    original.className = "input-signal-original";
+    const originalLabel = document.createElement("summary");
+    originalLabel.textContent = "展开收到的原文";
+    const originalBody = document.createElement("div");
+    originalBody.className = "input-signal-original-body";
+    renderMessageContent(originalBody, {
+      content: receivedText,
+      parts: [{ type: "markdown", text: receivedText }],
+    });
+    original.append(originalLabel, originalBody);
+    content.append(original);
+  }
+  const qualification = signal.qualificationNote || signal.qualification_note;
+  if (qualification) {
+    const note = document.createElement("p");
+    note.className = "input-signal-qualification";
+    note.textContent = qualification;
+    content.append(note);
+  }
   if (signal.sources?.length) {
     const sources = document.createElement("details");
     sources.className = "input-signal-sources";
@@ -351,16 +427,28 @@ function appendInputSignal(signal, options = {}) {
       list.append(item);
     }
     sources.append(summary, list);
-    content.append(meta, label, body, foot, sources);
-  } else {
-    content.append(meta, label, body, foot);
+    content.append(sources);
   }
+  content.append(foot);
   layout.append(avatar, content);
   article.append(layout);
   conversation.append(article);
+  regroupInputSignals(conversation);
   if (options.scroll !== false) conversation.scrollTop = conversation.scrollHeight;
   return article;
 }
+
+window.addEventListener("input-roles-updated", (event) => {
+  for (const role of event.detail?.roles || []) {
+    for (const message of conversation.querySelectorAll(
+      `.input-signal[data-input-role-id="${CSS.escape(role.id)}"]`,
+    )) {
+      message.querySelector(".speaker").textContent = role.name;
+      applyInputRoleAvatar(message.querySelector(".message-avatar"), role.avatar);
+    }
+  }
+  regroupInputSignals(conversation);
+});
 
 function appendManualExplorationReceipt(receipt) {
   if (!receipt?.id) return false;
@@ -610,7 +698,9 @@ function applyRuntime(payload) {
   appState.identity = payload.identity || appState.identity;
   appState.usage = payload.usage || appState.usage;
   appState.ambient = payload.ambient || appState.ambient;
+  appState.driveInput = payload.driveInput || appState.driveInput;
   appState.mailInput = payload.mailInput || appState.mailInput;
+  appState.inputRoles = payload.inputRoles || appState.inputRoles;
   appState.audioTranscription =
     payload.audioTranscription || appState.audioTranscription;
   appState.exploration = payload.exploration || appState.exploration;
@@ -637,6 +727,7 @@ function applyRuntime(payload) {
   renderUsage();
   renderRuntimeStatus();
   identityUi.render();
+  inputRoleUi.render();
   reflectionUi.renderRuntime();
   reconciliationUi.runtimeUpdated();
   explorationUi.runtimeUpdated();
@@ -679,6 +770,7 @@ async function bootstrap() {
     renderUsage();
     renderRuntimeStatus();
     identityUi.render();
+    inputRoleUi.render();
     settingsUi.render();
     voiceInput.configUpdated();
     explorationUi.runtimeUpdated();

@@ -25,6 +25,7 @@
   --recall-border: #d7bd66;
   --recall-text: #6e560d;
   --focus: #5d5d5d;
+  --symbiont-avatar-bg: #f1eadf;
 }
 
 * {
@@ -584,46 +585,141 @@ html[data-native-shell="macos"] .topbar {
 }
 
 .message.input-signal {
-  width: min(680px, 88%);
-  margin: 4px 0 20px 20px;
+  width: min(740px, 92%);
+  margin: 0 0 17px;
 }
 
 .input-signal .message-content {
-  padding: 11px 13px 10px;
-  border: 1px solid color-mix(in srgb, var(--border-strong) 76%, #6f8799);
-  border-radius: 11px;
-  background: color-mix(in srgb, var(--surface-subtle) 88%, #edf3f5);
+  padding: 0;
+  border: 0;
+  background: transparent;
 }
 
-.message-avatar.input-role-avatar {
-  display: grid;
-  place-items: center;
-  border: 1px solid color-mix(in srgb, var(--border-strong) 74%, #6f8799);
-  color: #547184;
-  background: #f4f8f9;
-  font-size: 12px;
-  font-weight: 700;
+.input-signal-group {
+  width: min(760px, 94%);
+  margin: 0 0 17px;
 }
 
-.input-signal-label {
-  margin: 3px 0 7px;
-  color: var(--text-faint);
-  font-size: 9px;
-  letter-spacing: .06em;
-}
-
-.input-signal .message-body {
-  font-size: 13px;
-}
-
-.input-signal-foot {
-  margin-top: 10px;
+.input-signal-group-header {
+  min-height: 28px;
+  padding: 0 2px 7px 50px;
   display: flex;
   align-items: center;
   justify-content: space-between;
-  gap: 10px;
+  gap: 12px;
+}
+
+.input-signal-group-header > div {
+  min-width: 0;
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+}
+
+.input-signal-group-header strong {
+  overflow: hidden;
   color: var(--text-soft);
   font-size: 10px;
+  font-weight: 550;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.input-signal-group-header small {
+  flex: 0 0 auto;
+  color: var(--text-faint);
+  font-size: 9px;
+}
+
+.input-signal-group-toggle {
+  flex: 0 0 auto;
+  min-height: 22px;
+  padding: 0 4px;
+  border: 0;
+  border-radius: 6px;
+  color: var(--text-soft);
+  background: transparent;
+  cursor: pointer;
+  font-size: 9px;
+}
+
+.input-signal-group-toggle:hover {
+  color: var(--text);
+}
+
+.input-signal-group-items {
+  padding: 0;
+}
+
+.input-signal-group-items > .input-signal {
+  width: 100%;
+}
+
+.input-signal-group.is-collapsed .input-signal-group-items > .input-signal:not(:first-child) {
+  display: none;
+}
+
+.input-role-avatar {
+  --input-role-backdrop: #fef5e9;
+  display: grid;
+  place-items: center;
+  overflow: hidden;
+  border: 0;
+  background-color: var(--input-role-backdrop);
+  background-position: center;
+  background-size: cover;
+}
+
+.input-role-avatar[data-input-avatar="moon-window"] {
+  --input-role-backdrop: #fef1e1;
+}
+
+.input-role-avatar[data-input-avatar="prism"] {
+  --input-role-backdrop: #faeee2;
+}
+
+.input-role-avatar[data-input-avatar="firefly"] {
+  --input-role-backdrop: #fef5ea;
+}
+
+.input-role-avatar[data-input-avatar="tide"] {
+  --input-role-backdrop: #fdf3e7;
+}
+
+.input-role-avatar[data-input-avatar="star-map"] {
+  --input-role-backdrop: #fae9db;
+}
+
+.input-role-avatar[data-input-avatar="echo"] {
+  --input-role-backdrop: #fef6eb;
+}
+
+.input-role-avatar > img {
+  grid-area: 1 / 1;
+  width: 100%;
+  height: 100%;
+  display: block;
+  object-fit: contain;
+}
+
+.input-role-avatar[data-avatar-load-failed="true"]::after {
+  grid-area: 1 / 1;
+  color: var(--text-faint);
+  content: "◌";
+  font-size: 14px;
+}
+
+.input-signal-label {
+  color: var(--text-faint);
+  font-size: 9px;
+}
+
+.input-signal .message-body {
+  font-size: inherit;
+}
+
+.input-signal-foot {
+  justify-content: space-between;
 }
 
 .input-signal-foot > span {
@@ -634,20 +730,11 @@ html[data-native-shell="macos"] .topbar {
 }
 
 .input-signal-reply {
-  flex: 0 0 auto;
-  padding: 4px 8px;
-  border: 1px solid var(--border-strong);
-  border-radius: 999px;
-  color: var(--text-soft);
-  background: transparent;
   cursor: pointer;
-  font: inherit;
 }
 
 .input-signal-reply:hover {
-  border-color: var(--text-soft);
   color: var(--text);
-  background: var(--surface);
 }
 
 .input-signal-sources {
@@ -667,6 +754,31 @@ html[data-native-shell="macos"] .topbar {
 
 .input-signal-sources a {
   color: inherit;
+}
+
+.input-signal-original,
+.input-signal-qualification {
+  margin: 8px 0 0;
+  color: var(--text-soft);
+  font-size: 10px;
+}
+
+.input-signal-original summary {
+  cursor: pointer;
+}
+
+.input-signal-original-body {
+  margin-top: 7px;
+  padding: 9px 10px;
+  border-left: 2px solid var(--border-strong);
+  background: var(--surface-subtle);
+  color: var(--text);
+  font-size: 12px;
+}
+
+.input-signal-qualification::before {
+  content: "说明 · ";
+  color: var(--text-faint);
 }
 
 .conversation-notice {
@@ -767,16 +879,16 @@ html[data-native-shell="macos"] .topbar {
 }
 
 .message-avatar {
-  width: 30px;
-  height: 30px;
+  width: 36px;
+  height: 36px;
   margin-top: 1px;
   display: grid;
   flex: 0 0 auto;
   place-items: center;
   overflow: hidden;
   flex: 0 0 auto;
-  border: 1px solid var(--border);
-  border-radius: 6px;
+  border: 0;
+  border-radius: 50%;
   background: var(--surface-raised);
   color: var(--text-soft);
   font-size: 11px;
@@ -787,6 +899,16 @@ html[data-native-shell="macos"] .topbar {
   width: 100%;
   height: 100%;
   object-fit: cover;
+}
+
+.message[data-role="assistant"] .message-avatar,
+.topic-chat-message[data-role="assistant"] .message-avatar {
+  background: var(--symbiont-avatar-bg);
+}
+
+.message[data-role="assistant"] .message-avatar-image,
+.topic-chat-message[data-role="assistant"] .message-avatar-image {
+  object-fit: contain;
 }
 
 .message-avatar-fallback {
@@ -1231,8 +1353,13 @@ html[data-native-shell="macos"] .topbar {
   place-items: center;
   overflow: hidden;
   border: 1px solid var(--border);
-  border-radius: 6px;
+  border-radius: 50%;
   background: var(--surface-raised);
+}
+
+#avatar-preview {
+  background: var(--symbiont-avatar-bg);
+  object-fit: contain;
 }
 
 .avatar-settings-preview > img {
@@ -1265,6 +1392,76 @@ html[data-native-shell="macos"] .topbar {
 
 .avatar-settings-actions [role="status"] {
   min-height: 16px;
+  color: var(--text-faint);
+  font-size: 10px;
+}
+
+.input-role-settings-section {
+  border-top: 1px solid var(--border);
+}
+
+.input-role-settings-list {
+  display: grid;
+}
+
+.input-role-settings-row {
+  min-height: 92px;
+  padding: 13px 16px;
+  display: grid;
+  grid-template-columns: 54px minmax(180px, 1fr) minmax(220px, auto);
+  align-items: center;
+  gap: 13px;
+  border-top: 1px solid var(--border);
+}
+
+.input-role-settings-avatar {
+  width: 52px;
+  height: 52px;
+  border-radius: 50%;
+}
+
+.input-role-settings-name span {
+  color: var(--text-faint);
+}
+
+.input-role-settings-name small,
+.input-role-avatar-picker > small {
+  color: var(--text-soft);
+  font-size: 10px;
+  font-weight: 600;
+}
+
+.input-role-avatar-picker {
+  display: grid;
+  justify-items: end;
+  gap: 6px;
+}
+
+.input-role-avatar-options {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  gap: 6px;
+}
+
+.input-role-avatar-option {
+  width: 38px;
+  height: 38px;
+  padding: 0;
+  border-radius: 50%;
+  cursor: pointer;
+}
+
+.input-role-avatar-option[aria-pressed="true"] {
+  border-color: var(--text);
+  box-shadow: 0 0 0 1px var(--text);
+}
+
+.input-role-settings-state {
+  min-height: 36px;
+  margin: 0;
+  padding: 10px 16px;
+  border-top: 1px solid var(--border);
   color: var(--text-faint);
   font-size: 10px;
 }
@@ -2084,10 +2281,88 @@ html[data-native-shell="macos"] .topbar {
   flex: 1 1 auto;
 }
 
+#settings-dialog > .source-settings-shell {
+  display: grid;
+  grid-template-columns: 132px minmax(0, 1fr);
+  overflow: hidden;
+}
+
+.source-settings-tabs {
+  min-width: 0;
+  padding: 10px 8px;
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  border-right: 1px solid var(--border);
+  background: var(--surface-raised);
+}
+
+.source-settings-tabs button {
+  min-height: 34px;
+  padding: 7px 9px;
+  border: 0;
+  border-radius: 5px;
+  color: var(--text-soft);
+  background: transparent;
+  cursor: pointer;
+  font: inherit;
+  font-size: 11px;
+  text-align: left;
+}
+
+.source-settings-tabs button:hover {
+  color: var(--text);
+  background: var(--surface);
+}
+
+.source-settings-tabs button[aria-selected="true"] {
+  color: var(--text);
+  background: var(--surface);
+  box-shadow: inset 2px 0 0 var(--text);
+  font-weight: 650;
+}
+
+.source-settings-pages {
+  min-width: 0;
+  overflow-y: auto;
+}
+
+.source-settings-pages > form[hidden] {
+  display: none;
+}
+
+.compute-policy-section > .source-channel-intro {
+  min-height: 0;
+  display: block;
+  padding: 14px;
+}
+
+.field-grid > .source-channel-toggle {
+  min-height: 54px;
+  height: auto;
+  align-self: stretch;
+  display: grid;
+  grid-template-rows: auto 32px;
+  align-items: start;
+  justify-content: stretch;
+  gap: 4px;
+}
+
+.field-grid > .source-channel-toggle input {
+  margin: 0;
+  align-self: center;
+  justify-self: start;
+}
+
+.source-settings-pages .field-grid > .field {
+  align-content: start;
+}
+
 #settings-dialog > .tab-panel .dialog-actions {
   display: none;
 }
 
+#settings-dialog > .tab-panel .drive-input-actions,
 #settings-dialog > .tab-panel .mail-input-actions {
   display: flex;
   padding-block: 10px;
@@ -2096,6 +2371,30 @@ html[data-native-shell="macos"] .topbar {
 
 .settings-dialog-actions {
   border-top: 1px solid var(--border);
+}
+
+@media (max-width: 620px) {
+  #settings-dialog > .source-settings-shell {
+    grid-template-columns: minmax(0, 1fr);
+    grid-template-rows: auto minmax(0, 1fr);
+  }
+
+  .source-settings-tabs {
+    padding: 6px 8px;
+    flex-direction: row;
+    overflow-x: auto;
+    border-right: 0;
+    border-bottom: 1px solid var(--border);
+  }
+
+  .source-settings-tabs button {
+    flex: 0 0 auto;
+    white-space: nowrap;
+  }
+
+  .source-settings-tabs button[aria-selected="true"] {
+    box-shadow: inset 0 -2px 0 var(--text);
+  }
 }
 
 .trace-dialog {
@@ -3051,8 +3350,8 @@ html[data-native-shell="macos"] .topbar {
 }
 
 .topic-chat-avatar.message-avatar {
-  width: 23px;
-  height: 23px;
+  width: 24px;
+  height: 24px;
   margin-top: 1px;
   border-radius: 999px;
   font-size: 9px;
@@ -4554,6 +4853,20 @@ button:disabled {
 }
 
 @media (max-width: 640px) {
+  .input-role-settings-row {
+    grid-template-columns: 46px minmax(0, 1fr);
+  }
+
+  .input-role-settings-avatar {
+    width: 44px;
+    height: 44px;
+  }
+
+  .input-role-avatar-options {
+    grid-column: 1 / -1;
+    justify-content: flex-start;
+  }
+
   .shell {
     border-inline: 0;
   }

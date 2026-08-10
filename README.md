@@ -41,6 +41,14 @@
 - **与 PCP：** Symbiont-d 是 Host，负责判断何时写入、复核、修订或撤回记忆；[Paged Context Protocol (PCP)](https://github.com/glenzli/paged-context-protocol) Runtime 提供持久的 Pages、不可变 Revision、来源、关系和检索能力。
 - **与本地数据：** 数据默认留在本机。PCP Console 是独立的只读观察界面；Symbiont-d 自身只呈现与当前协作有关的工作状态。
 
+### 输入渠道
+
+- **Luna 与广域输入：** 用于主动感知外部变化；候选内容会经过统一复核，只有值得打扰的信号才进入对话。
+- **Google Drive：** 可从用户指定的文件夹增量读取已经完整写入的文本或 Markdown 文件，并支持读取全部文件或按文件名模式筛选。文件夹、账号授权和读取游标只保存在本地配置中。
+- **邮箱 Inbox：** 保留为可选的只读备用渠道，适合只能通过邮件送达的来源；未启用时不会参与探索。
+
+外部输入不会直接写入长期记忆。账号凭据、文件夹标识、邮箱地址和本地运行记录都不属于仓库内容。
+
 ### 运行
 
 此仓库目前是早期原型，需要：
@@ -105,6 +113,14 @@ outside world / your conversation / selected Codex context
 - **With Codex:** Symbiont-d can attach a selected Codex conversation as bounded, read-only context for one turn, or recall the current understanding, user confirmations, and source evidence for a topic according to the work at hand. The original exchange is expanded only when verification needs it. It does not dispatch, take over, or impersonate Codex tasks.
 - **With PCP:** Symbiont-d is the Host. It decides when memory is written, reviewed, revised, or retracted. The [Paged Context Protocol (PCP)](https://github.com/glenzli/paged-context-protocol) Runtime provides durable Pages, immutable Revisions, provenance, relations, and retrieval.
 - **With local data:** Data stays local by default. PCP Console is a separate read-only observation surface; Symbiont-d presents only the working state relevant to the current collaboration.
+
+### Input channels
+
+- **Luna and broad input:** Attend to outside changes proactively. Candidates pass through a shared review step, and only signals worth interrupting the conversation are surfaced.
+- **Google Drive:** Incrementally read complete text or Markdown files from a user-selected folder, either all readable files or names matching a pattern. Folder selection, account authorization, and read cursors remain in local configuration.
+- **Mail Inbox:** Remains available as an optional read-only fallback for sources that can only arrive by email. It does not participate when disabled.
+
+External input does not enter durable memory directly. Account credentials, folder identifiers, email addresses, and local runtime records are not repository content.
 
 ### Run it
 

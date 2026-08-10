@@ -181,7 +181,7 @@ fn summarize(bundle: TraceBundle) -> ExplorationRunSummary {
                     sensing_candidate_count = sensing_candidate_count.max(decisions.len());
                     if sensing_focus.is_none()
                         && let Some(decision) = decisions.first()
-                        && let Some(title) = compact_argument(decision, "input_text", 180)
+                        && let Some(title) = compact_argument(decision, "display_text", 180)
                     {
                         sensing_focus = Some(ExplorationFocusSummary {
                             detail: compact_argument(decision, "reason", 360),

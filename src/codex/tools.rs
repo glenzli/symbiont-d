@@ -573,10 +573,20 @@ impl SymbiontTools {
                                             "candidate_id": {"type": "string", "maxLength": 160},
                                             "disposition": {"type": "string", "enum": ["discard", "input", "deep"]},
                                             "reason": {"type": "string", "maxLength": 800},
-                                            "input_text": {
+                                            "presentation": {
+                                                "type": "string",
+                                                "enum": ["original", "condensed"],
+                                                "description": "For input routes, preserve the received text by default. Use condensed only for a concrete structural or length reason."
+                                            },
+                                            "display_text": {
                                                 "type": "string",
                                                 "maxLength": 1800,
-                                                "description": "Optional safer attributed wording for an input-route candidate whose supplied prose overstates what its packet supports. Omit when proposed_input is already safe."
+                                                "description": "Required only for a condensed input presentation; it remains attributed to the external role."
+                                            },
+                                            "qualification_note": {
+                                                "type": "string",
+                                                "maxLength": 800,
+                                                "description": "Optional short sourcing or confidence caveat displayed separately from the received message."
                                             }
                                         },
                                         "required": ["candidate_id", "disposition", "reason"],
@@ -1773,10 +1783,29 @@ impl SymbiontTools {
                     if required_text(decision, "reason")?.chars().count() > 800 {
                         anyhow::bail!("ambient sensing review reason exceeds 800 characters");
                     }
-                    if optional_text(decision, "input_text")
+                    if optional_text(decision, "display_text")
                         .is_some_and(|value| value.chars().count() > 1_800)
                     {
-                        anyhow::bail!("ambient sensing review input_text exceeds 1800 characters");
+                        anyhow::bail!(
+                            "ambient sensing review display_text exceeds 1800 characters"
+                        );
+                    }
+                    if optional_text(decision, "qualification_note")
+                        .is_some_and(|value| value.chars().count() > 800)
+                    {
+                        anyhow::bail!(
+                            "ambient sensing review qualification_note exceeds 800 characters"
+                        );
+                    }
+                    if let Some(presentation) = optional_text(decision, "presentation")
+                        && !matches!(presentation, "original" | "condensed")
+                    {
+                        anyhow::bail!("ambient sensing review presentation is unknown");
+                    }
+                    if optional_text(decision, "presentation") == Some("condensed")
+                        && optional_text(decision, "display_text").is_none()
+                    {
+                        anyhow::bail!("condensed ambient input requires display_text");
                     }
                 }
                 Ok((
@@ -2266,7 +2295,7 @@ fn require_scout_origin(run_origin: &str, tool: &str) -> Result<()> {
 }
 
 fn require_sensing_origin(run_origin: &str, tool: &str) -> Result<()> {
-    if run_origin != "ambient_sense" {
+    if !matches!(run_origin, "ambient_sense" | "luna_sense") {
         anyhow::bail!("{tool} is available only to low-cost ambient sensing");
     }
     Ok(())
@@ -2385,4 +2414,18 @@ pub(super) fn tool_result(success: bool, text: String) -> Value {
             }
         ]
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::require_sensing_origin;
+
+    #[test]
+    fn sensing_candidate_submission_accepts_external_and_luna_origins() {
+        let tool = "submit_sensing_candidates";
+
+        assert!(require_sensing_origin("ambient_sense", tool).is_ok());
+        assert!(require_sensing_origin("luna_sense", tool).is_ok());
+        assert!(require_sensing_origin("interactive", tool).is_err());
+    }
 }

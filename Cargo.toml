@@ -10,6 +10,7 @@ async-imap = { version = "0.11.3", default-features = false, features = ["runtim
 axum = { version = "0.8", features = ["multipart"] }
 chrono = { version = "0.4", features = ["serde"] }
 futures = "0.3"
+getrandom = "0.4"
 imagesize = "0.14"
 infer = "0.19"
 mail-parser = "0.11"
@@ -19,7 +20,7 @@ pcp-rpc = { path = "../paged-context-protocol/crates/pcp-rpc" }
 pcp-runtime = { path = "../paged-context-protocol/crates/pcp-runtime" }
 pcp-sqlite = { path = "../paged-context-protocol/crates/pcp-sqlite" }
 pcp-store = { path = "../paged-context-protocol/crates/pcp-store" }
-reqwest = { version = "0.13", default-features = false, features = ["json", "multipart", "rustls"] }
+reqwest = { version = "0.13", default-features = false, features = ["json", "multipart", "query", "rustls"] }
 rusqlite = { version = "0.40", features = ["bundled"] }
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"

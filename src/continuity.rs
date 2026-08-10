@@ -151,6 +151,9 @@ impl ContinuityHost {
         let payload = serde_json::to_string_pretty(&json!({
             "title": signal.title,
             "content": signal.content,
+            "received_text": signal.received_text,
+            "presentation": signal.presentation,
+            "qualification_note": signal.qualification_note,
             "summary": signal.summary,
             "actor": signal.actor,
             "event_at": signal.event_at,

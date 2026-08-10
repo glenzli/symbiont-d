@@ -103,6 +103,7 @@ export function initMessageActions({ conversation, isBusy, perform }) {
     if (!foot) return;
     const stateLabel = foot.querySelector(".message-state");
     const actions = foot.querySelector(".message-actions");
+    if (!stateLabel || !actions) return;
     const state = states.get(message) || "delivered";
     const entry = entries.get(message);
     const actionBusy = message.dataset.actionBusy === "true";
