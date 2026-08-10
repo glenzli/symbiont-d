@@ -37,6 +37,7 @@ use crate::{
     conversation::ConversationCoordinator,
     curiosity::CuriosityStore,
     drive_input::DriveInputStore,
+    inference::{InferenceAttempt, InferenceExecutor},
     luna_input::LunaInput,
     mail_input::MailInputStore,
     memory::{MemoryEntry, MemoryRole},
@@ -209,6 +210,7 @@ impl ExplorationHandle {
         autonomy: Arc<AutonomyStore>,
         profile: Arc<ProfileStore>,
         codex: Arc<Mutex<CodexClient>>,
+        inference: Arc<InferenceExecutor>,
         compute: Arc<ComputeStore>,
         continuity: Arc<ContinuityHost>,
         context: Arc<SymbiontContextStore>,
@@ -277,6 +279,7 @@ impl ExplorationHandle {
             autonomy,
             profile,
             codex,
+            inference,
             compute,
             continuity,
             context,
@@ -397,6 +400,7 @@ async fn run_scheduler(
     autonomy: Arc<AutonomyStore>,
     profile: Arc<ProfileStore>,
     codex: Arc<Mutex<CodexClient>>,
+    inference: Arc<InferenceExecutor>,
     compute: Arc<ComputeStore>,
     continuity: Arc<ContinuityHost>,
     context: Arc<SymbiontContextStore>,
@@ -501,6 +505,7 @@ async fn run_scheduler(
                     Arc::clone(&manual_runs),
                     config.clone(),
                     Arc::clone(&codex),
+                    Arc::clone(&inference),
                     Arc::clone(&compute),
                     Arc::clone(&profile),
                     Arc::clone(&continuity),
@@ -746,6 +751,7 @@ async fn run_once(
     manual_runs: Arc<ManualExplorationStore>,
     autonomy_config: AutonomyConfig,
     codex: Arc<Mutex<CodexClient>>,
+    inference: Arc<InferenceExecutor>,
     compute: Arc<ComputeStore>,
     profile: Arc<ProfileStore>,
     continuity: Arc<ContinuityHost>,
@@ -1134,46 +1140,77 @@ async fn run_once(
         }
 
         if !reviewed_candidates.is_empty() {
-            let Ok(mut client) = codex.try_lock() else {
-                stop_activity_relay(runtime_tx, activity_task).await?;
-                settle_sensing_only(
-                    &state,
-                    &manual_runs,
-                    &attempts,
-                    trigger.as_ref(),
-                    ExplorationIntentStatus::Superseded,
-                    "superseded",
-                    pending_candidate_count,
-                    Some("codex_busy"),
-                    false,
-                )
-                .await?;
-                return Ok(ExplorationRunCompletion::superseded("codex_busy"));
-            };
-            let review = client
-                .review_sensing(
-                    &reviewed_candidates,
-                    &compute,
-                    &profile,
-                    input_events.clone(),
-                    runtime_tx.clone(),
-                )
-                .await;
-            drop(client);
-            let mut review = match review {
-                Ok(outcome) => outcome,
-                Err(error) => {
-                    stop_activity_relay(runtime_tx, activity_task).await?;
-                    return Err(error);
+            let (decisions, mut review_invocations, review_interrupted) = match inference
+                .review_sensing(&reviewed_candidates, input_events.clone())
+                .await
+            {
+                InferenceAttempt::Completed(outcome) => {
+                    (outcome.value, outcome.invocations, outcome.interrupted)
+                }
+                InferenceAttempt::Fallback {
+                    reason,
+                    mut invocations,
+                } => {
+                    tracing::warn!(
+                        target: crate::runtime_log::TARGET,
+                        event = "generic_inference_fallback",
+                        task = "ambient_review",
+                        reason,
+                        "ambient review fell back to the Codex-native executor"
+                    );
+                    if input_events.has_changed().unwrap_or(true) {
+                        (Vec::new(), invocations, true)
+                    } else {
+                        let Ok(mut client) = codex.try_lock() else {
+                            let _ = link_sensing_invocations(
+                                &mut invocations,
+                                sensing_trace_id.as_deref(),
+                            );
+                            usage.record_all(&invocations).await?;
+                            stop_activity_relay(runtime_tx, activity_task).await?;
+                            settle_sensing_only(
+                                &state,
+                                &manual_runs,
+                                &attempts,
+                                trigger.as_ref(),
+                                ExplorationIntentStatus::Superseded,
+                                "superseded",
+                                pending_candidate_count,
+                                Some("codex_busy"),
+                                !invocations.is_empty(),
+                            )
+                            .await?;
+                            return Ok(ExplorationRunCompletion::superseded("codex_busy"));
+                        };
+                        let review = client
+                            .review_sensing(
+                                &reviewed_candidates,
+                                &compute,
+                                &profile,
+                                input_events.clone(),
+                                runtime_tx.clone(),
+                            )
+                            .await;
+                        drop(client);
+                        let review = match review {
+                            Ok(outcome) => outcome,
+                            Err(error) => {
+                                stop_activity_relay(runtime_tx, activity_task).await?;
+                                return Err(error);
+                            }
+                        };
+                        invocations.extend(review.invocations);
+                        (review.decisions, invocations, review.interrupted)
+                    }
                 }
             };
             sensing_trace_id =
-                link_sensing_invocations(&mut review.invocations, sensing_trace_id.as_deref());
-            if let Err(error) = usage.record_all(&review.invocations).await {
+                link_sensing_invocations(&mut review_invocations, sensing_trace_id.as_deref());
+            if let Err(error) = usage.record_all(&review_invocations).await {
                 stop_activity_relay(runtime_tx, activity_task).await?;
                 return Err(error);
             }
-            if review.interrupted {
+            if review_interrupted {
                 stop_activity_relay(runtime_tx, activity_task).await?;
                 settle_sensing_only(
                     &state,
@@ -1190,7 +1227,7 @@ async fn run_once(
                 return Ok(ExplorationRunCompletion::superseded("newer_user_input"));
             }
 
-            let route_plan = plan_sensing_routes(&reviewed_candidates, review.decisions);
+            let route_plan = plan_sensing_routes(&reviewed_candidates, decisions);
             let mut suppressed_input_count = 0usize;
             for input in route_plan.inputs {
                 match signals
@@ -1210,12 +1247,12 @@ async fn run_once(
                 }
             }
             annotate_sensing_delivery(
-                &mut review.invocations,
+                &mut review_invocations,
                 published_input_count,
                 suppressed_input_count,
                 route_plan.deferred_ids.len(),
             );
-            usage.record_all(&review.invocations).await?;
+            usage.record_all(&review_invocations).await?;
             sensing
                 .settle_review(&route_plan.terminal_ids, &route_plan.deferred_ids)
                 .await?;

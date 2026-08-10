@@ -23,7 +23,6 @@ use super::{
     autonomous::{
         finding_from_invocations, luna_sensing_prompt, review_prompt, scout_prompt,
         sensing_candidates_from_invocations, sensing_review_from_invocations,
-        sensing_review_prompt,
     },
     interaction_output::{
         ChatDisposition, InteractiveDeltaGate, interaction_disposition_prompt,
@@ -32,9 +31,8 @@ use super::{
     prompts::{
         additional_context_value, ambient_review_developer_instructions, context_fragments,
         context_maintenance_prompt, developer_instructions, interaction_reflection_prompt,
-        luna_sensing_developer_instructions, memory_reconciliation_prompt,
-        pcp_maintenance_developer_instructions, pcp_maintenance_worker_prompt,
-        profile_review_prompt, summary_maintenance_prompt,
+        luna_sensing_developer_instructions, memory_reconciliation_prompt, profile_review_prompt,
+        summary_maintenance_prompt,
     },
     tool_dedup::{ToolCallPlan, TurnToolDeduplicator},
     tools::{EscalationRequest, SymbiontTools, tool_result},
@@ -51,6 +49,9 @@ use crate::{
         ContextFragment, ContextSnapshot, ExecutionTraceEvent, NativeThreadSnapshot, TraceEventKind,
     },
     exploration::ExplorationIntentQueue,
+    inference::{
+        PCP_CODEX_INSTRUCTIONS, SensingReviewDecision, pcp_codex_prompt, sensing_codex_prompt,
+    },
     memory::{MessageMetadata, MessageRunMetadata},
     outreach::{OutreachCandidate, PROPOSE_OUTREACH_TOOL},
     permission::PermissionBroker,
@@ -165,7 +166,7 @@ pub struct ExplorationOutcome {
 }
 
 pub struct SensingReviewOutcome {
-    pub decisions: Vec<super::autonomous::SensingReviewDecision>,
+    pub decisions: Vec<SensingReviewDecision>,
     pub invocations: Vec<InvocationRecord>,
     pub interrupted: bool,
 }
@@ -797,10 +798,7 @@ impl CodexClient {
         let outcome = self
             .run_request(
                 thread_id.clone(),
-                text_input_items(&sensing_review_prompt(
-                    candidates,
-                    AUTONOMOUS_SILENT_MARKER,
-                )?),
+                text_input_items(&sensing_codex_prompt(candidates, AUTONOMOUS_SILENT_MARKER)?),
                 ComputeLane::Conversation,
                 "ambient_review",
                 compute,
@@ -1227,8 +1225,7 @@ impl CodexClient {
         &mut self,
         request: PcpMaintenanceModelRequest<'_>,
     ) -> Result<PcpMaintenanceModelOutcome> {
-        let prompt =
-            pcp_maintenance_worker_prompt(request.request, PCP_MAINTENANCE_COMPLETE_MARKER)?;
+        let prompt = pcp_codex_prompt(request.request, PCP_MAINTENANCE_COMPLETE_MARKER)?;
         let thread_id = self.pcp_maintenance_thread_id.clone();
         let outcome = self
             .run_request(
@@ -1585,7 +1582,7 @@ impl CodexClient {
             fragments: fragments.clone(),
             working_context: working_context.cloned(),
             developer_instructions: match origin {
-                "pcp_maintenance" => pcp_maintenance_developer_instructions().to_owned(),
+                "pcp_maintenance" => PCP_CODEX_INSTRUCTIONS.to_owned(),
                 "ambient_review" => ambient_review_developer_instructions().to_owned(),
                 "luna_sense" => luna_sensing_developer_instructions().to_owned(),
                 _ => developer_instructions(),
@@ -2008,7 +2005,7 @@ impl CodexClient {
         let instructions = match tool_surface {
             ToolSurface::LunaSensing => luna_sensing_developer_instructions().to_owned(),
             ToolSurface::AmbientReview => ambient_review_developer_instructions().to_owned(),
-            ToolSurface::PcpMaintenance => pcp_maintenance_developer_instructions().to_owned(),
+            ToolSurface::PcpMaintenance => PCP_CODEX_INSTRUCTIONS.to_owned(),
             ToolSurface::Full | ToolSurface::AutonomousScout => developer_instructions(),
         };
         let dynamic_tools = match tool_surface {

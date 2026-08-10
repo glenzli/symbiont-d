@@ -2,9 +2,8 @@ use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 
 use crate::{
-    sensing::{
-        SensingCandidate, SensingCandidateDraft, SensingPresentation, validate_candidate_drafts,
-    },
+    inference::SensingReviewDecision,
+    sensing::{SensingCandidateDraft, validate_candidate_drafts},
     usage::InvocationRecord,
 };
 
@@ -24,27 +23,6 @@ pub struct ExplorationScoutFinding {
     pub source_revision_ids: Vec<String>,
     #[serde(default)]
     pub related_hunch_revision_ids: Vec<String>,
-}
-
-#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
-#[serde(rename_all = "snake_case")]
-pub enum SensingReviewDisposition {
-    Discard,
-    Input,
-    Deep,
-}
-
-#[derive(Clone, Debug, Deserialize, Serialize)]
-pub struct SensingReviewDecision {
-    pub candidate_id: String,
-    pub disposition: SensingReviewDisposition,
-    pub reason: String,
-    #[serde(default)]
-    pub presentation: Option<SensingPresentation>,
-    #[serde(default)]
-    pub display_text: Option<String>,
-    #[serde(default)]
-    pub qualification_note: Option<String>,
 }
 
 impl ExplorationScoutFinding {
@@ -72,57 +50,6 @@ Submit at most one `symbiont.submit_exploration_finding` when evidence may mater
 
 After the optional finding tool call, return exactly `{silent_marker}`. Never put user-visible prose in the final response."#
     )
-}
-
-pub fn sensing_review_prompt(
-    candidates: &[SensingCandidate],
-    silent_marker: &str,
-) -> Result<String> {
-    let candidates = serde_json::to_string_pretty(candidates)
-        .context("encode ambient sensing review candidates")?;
-    Ok(format!(
-        r#"Review the following short-lived external-signal candidates for symbiont-d. No user
-message is waiting. You are a gate, not a co-author: candidates come from input-only model roles
-and their wording must remain attributable to those roles if it enters the input stream.
-
-Evaluate every candidate independently and choose exactly one route. You cannot browse in this
-stage, so assess only the supplied packet and never pretend that you opened or verified its links:
-
-- `discard`: a clear duplicate, spam/noise, unsafe material, internal incoherence, or a claim contradicted by the supplied packet;
-- `input`: an attributed, independently interesting external input that should enter the temporary input stream without symbiont-d taking over its voice;
-- `deep`: an unusually consequential or generative candidate that merits expensive investigation and a separate decision about whether symbiont-d itself should speak.
-
-`input` is not an autonomous symbiont-d interruption: it is a temporary, attributed input-role
-message with a source trail and a reply affordance, not a symbiont-d endorsement or durable claim.
-Its admission bar is therefore lower than the bar for an assistant-authored note or intervention.
-Weak or secondary sourcing alone is not a reason to discard a plausible, interesting input and is
-never by itself a reason to choose `deep`. Preserve the received text by default: choose
-`presentation: original` and omit `display_text`. Choose `presentation: condensed` only when the
-received text is repetitive, excessively long, poorly structured, or contains substantial low-value
-framing. In that case provide a self-contained `display_text` and state the concrete compression
-reason in `reason`; never condense merely to make the prose sound more polished. If the packet needs
-a sourcing or confidence caveat, put that short caveat in `qualification_note` rather than replacing
-the received message. This is qualification, not verification: do not add facts or say you checked a
-link.
-Reserve `deep` for value, not for ordinary source cleanup. Do not infer that the user is unaware of
-an event.
-
-Standalone science, mathematics, culture, public events, products, and unusual real-world phenomena
-may be worthwhile without a current-project connection or immediate decision. Relevance to the
-current project is not an admission requirement. A recent or still-developing discussion can be
-timely even when the original event was not today, provided the supplied packet names the accumulated
-evidence or reaction that makes it live now. Judge atomic candidates separately; weakness in a
-neighboring digest item must not poison another candidate. `display_text`, when used, must remain in
-the external input role rather than symbiont-d's voice. The candidate pool is not memory
-and this review must not write PCP, Hunches, profile, or other state.
-
-Call `symbiont.review_sensing_candidates` exactly once. After the tool call, return exactly
-`{silent_marker}`.
-
-<ambient-candidates>
-{candidates}
-</ambient-candidates>"#
-    ))
 }
 
 pub fn luna_sensing_prompt(focus: &str, sensing_context: &str, silent_marker: &str) -> String {

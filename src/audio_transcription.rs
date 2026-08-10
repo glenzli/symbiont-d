@@ -5,23 +5,19 @@
 //! infer-runtime instance, and returns editable text to the browser.  The
 //! browser owns recording and discard; PCP only sees text the user sends.
 
-mod discovery;
-
-use std::{env, io::ErrorKind, path::PathBuf, time::Duration};
+use std::{io::ErrorKind, path::PathBuf, sync::Arc, time::Duration};
 
 use anyhow::{Context, Result};
-use chrono::Utc;
-use reqwest::{Client, StatusCode, Url, multipart, redirect::Policy};
+use reqwest::{StatusCode, Url, multipart};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use tokio::{fs, sync::RwLock};
 
-use crate::secrets::{CredentialStatus, CredentialStore, SecretStore};
-use discovery::{DiscoveredConsumer, canonical_loopback_origin, discover_consumer};
+use crate::{
+    infer_runtime::{InferRuntimeAccess, ResolvedConsumerEndpoint, endpoint_url},
+    secrets::{CredentialStatus, CredentialStore},
+};
 
-const TRANSCRIPTION_SECRET_ID: &str = "infer-runtime";
-const ENDPOINT_OVERRIDE_ENV: &str = "SYMBIONT_INFER_RUNTIME_BASE_URL";
-const COMPATIBILITY_FALLBACK: &str = "http://127.0.0.1:8787";
 pub const MAX_AUDIO_BYTES: usize = 25 * 1024 * 1024;
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(75);
 
@@ -30,7 +26,8 @@ const REQUEST_TIMEOUT: Duration = Duration::from_secs(75);
 pub struct AudioTranscriptionConfig {
     #[serde(default)]
     pub enabled: bool,
-    #[serde(default)]
+    /// Legacy settings override. Read for migration, but never persisted or selected.
+    #[serde(default, skip_serializing)]
     pub base_url: String,
     #[serde(default)]
     pub credential_store: CredentialStore,
@@ -87,53 +84,11 @@ pub struct TranscriptionResult {
 pub struct AudioTranscriptionStore {
     config_path: PathBuf,
     config: RwLock<AudioTranscriptionConfig>,
-    credentials: SecretStore,
-    client: Client,
-    resolved_endpoint: RwLock<Option<ResolvedConsumerEndpoint>>,
-}
-
-#[derive(Clone, Debug, Eq, PartialEq)]
-enum EndpointSource {
-    Environment,
-    Settings,
-    Discovery,
-    CompatibilityFallback,
-}
-
-impl EndpointSource {
-    fn as_str(&self) -> &'static str {
-        match self {
-            Self::Environment => "environment",
-            Self::Settings => "settings",
-            Self::Discovery => "discovery",
-            Self::CompatibilityFallback => "compatibility_fallback",
-        }
-    }
-}
-
-#[derive(Clone, Debug, Eq, PartialEq)]
-struct ResolvedConsumerEndpoint {
-    base_url: String,
-    source: EndpointSource,
-    instance_id: Option<String>,
-    generation: Option<String>,
-    lease_expires_at: Option<chrono::DateTime<Utc>>,
-}
-
-impl ResolvedConsumerEndpoint {
-    fn discovered(selection: DiscoveredConsumer) -> Self {
-        Self {
-            base_url: selection.base_url,
-            source: EndpointSource::Discovery,
-            instance_id: Some(selection.instance_id),
-            generation: Some(selection.generation),
-            lease_expires_at: Some(selection.expires_at),
-        }
-    }
+    runtime: Arc<InferRuntimeAccess>,
 }
 
 impl AudioTranscriptionStore {
-    pub async fn open(config_path: PathBuf) -> Result<Self> {
+    pub async fn open(config_path: PathBuf, runtime: Arc<InferRuntimeAccess>) -> Result<Self> {
         let mut config = match fs::read_to_string(&config_path).await {
             Ok(value) => match toml::from_str::<AudioTranscriptionConfig>(&value) {
                 Ok(config) if validate_config(&config).is_ok() => config,
@@ -154,31 +109,20 @@ impl AudioTranscriptionStore {
                 });
             }
         };
-        if config.base_url.trim() == COMPATIBILITY_FALLBACK {
-            config.base_url.clear();
-        }
+        retire_settings_endpoint_override(&mut config);
         persist_config(&config_path, &config).await?;
-        let credential_path = config_path.with_file_name("infer-runtime-secrets.toml");
+        runtime.set_credential_store(config.credential_store).await;
         Ok(Self {
             config_path,
             config: RwLock::new(config),
-            credentials: SecretStore::open(credential_path).await?,
-            client: Client::builder()
-                .timeout(REQUEST_TIMEOUT)
-                .no_proxy()
-                .redirect(Policy::none())
-                .build()?,
-            resolved_endpoint: RwLock::new(None),
+            runtime,
         })
     }
 
     pub async fn snapshot(&self) -> AudioTranscriptionSnapshot {
         let config = self.config.read().await.clone();
-        let credential_status = self
-            .credentials
-            .status(TRANSCRIPTION_SECRET_ID, config.credential_store)
-            .await;
-        let endpoint = self.resolve_endpoint(&config).await;
+        let credential_status = self.runtime.credential_status().await;
+        let endpoint = self.runtime.resolve_endpoint();
         if let Err(error) = &endpoint {
             tracing::warn!(error = %error, "infer-runtime endpoint resolution failed");
         }
@@ -206,9 +150,9 @@ impl AudioTranscriptionStore {
             .unwrap_or_else(|_| (String::new(), "unavailable".to_owned(), None, None, None));
         AudioTranscriptionSnapshot {
             availability: availability(&config, credential_status, endpoint_ready),
-            active_credential_store: self.credentials.active_store(config.credential_store),
+            active_credential_store: self.runtime.active_credential_store().await,
             credential_status: credential_status.as_str().to_owned(),
-            debug_credential_override: self.credentials.debug_override(config.credential_store),
+            debug_credential_override: self.runtime.debug_credential_override().await,
             resolved_base_url,
             endpoint_source,
             endpoint_instance_id,
@@ -222,14 +166,18 @@ impl AudioTranscriptionStore {
         &self,
         mut config: AudioTranscriptionConfig,
     ) -> Result<AudioTranscriptionSnapshot> {
+        retire_settings_endpoint_override(&mut config);
         validate_config(&config)?;
         if let Some(secret) = config.credential_value.as_deref() {
-            self.credentials
-                .write(TRANSCRIPTION_SECRET_ID, config.credential_store, secret)
+            self.runtime
+                .write_credential(config.credential_store, secret)
                 .await?;
         }
         config.credential_value = None;
         persist_config(&self.config_path, &config).await?;
+        self.runtime
+            .set_credential_store(config.credential_store)
+            .await;
         *self.config.write().await = config;
         Ok(self.snapshot().await)
     }
@@ -257,12 +205,13 @@ impl AudioTranscriptionStore {
             anyhow::bail!("本地语音转写尚未启用");
         }
         validate_config(&config)?;
-        let token = self
-            .credentials
-            .read(TRANSCRIPTION_SECRET_ID, config.credential_store)
-            .await?
-            .ok_or_else(|| anyhow::anyhow!("本地语音转写尚未配置访问令牌"))?;
-        let selected = self.resolve_endpoint(&config).await?;
+        let connection = self
+            .runtime
+            .connection()
+            .await
+            .map_err(|_| anyhow::anyhow!("本地语音转写尚未配置访问令牌或服务不可用"))?;
+        let selected = connection.endpoint;
+        let token = connection.token;
         let file_name = filename
             .filter(|value| !value.trim().is_empty())
             .unwrap_or("voice-input.webm");
@@ -279,7 +228,7 @@ impl AudioTranscriptionStore {
         {
             Ok(response) => response,
             Err(first_error) => {
-                let refreshed = self.resolve_endpoint(&config).await?;
+                let refreshed = self.runtime.resolve_endpoint()?;
                 if refreshed == selected {
                     return Err(first_error).context("contact local infer-runtime");
                 }
@@ -332,15 +281,6 @@ impl AudioTranscriptionStore {
         Ok(result)
     }
 
-    async fn resolve_endpoint(
-        &self,
-        config: &AudioTranscriptionConfig,
-    ) -> Result<ResolvedConsumerEndpoint> {
-        let selected = resolve_endpoint(config)?;
-        *self.resolved_endpoint.write().await = Some(selected.clone());
-        Ok(selected)
-    }
-
     async fn send_transcription(
         &self,
         selected: &ResolvedConsumerEndpoint,
@@ -369,10 +309,12 @@ impl AudioTranscriptionStore {
             .text("language", language.to_owned())
             .text("response_format", "verbose_json")
             .text("metadata", metadata.to_string());
-        self.client
+        self.runtime
+            .client()
             .post(transcription_endpoint(&selected.base_url)?)
             .bearer_auth(token)
             .multipart(form)
+            .timeout(REQUEST_TIMEOUT)
             .send()
             .await
             .context("send infer-runtime transcription request")
@@ -380,45 +322,8 @@ impl AudioTranscriptionStore {
 }
 
 fn transcription_endpoint(base_url: &str) -> Result<Url> {
-    let base_url = canonical_loopback_origin(base_url)?;
-    Url::parse(&format!("{base_url}/v1/audio/transcriptions"))
+    endpoint_url(base_url, "/v1/audio/transcriptions")
         .context("build infer-runtime transcription endpoint")
-}
-
-fn resolve_endpoint(config: &AudioTranscriptionConfig) -> Result<ResolvedConsumerEndpoint> {
-    if let Some(value) = env::var_os(ENDPOINT_OVERRIDE_ENV) {
-        let value = value
-            .into_string()
-            .map_err(|_| anyhow::anyhow!("{ENDPOINT_OVERRIDE_ENV} is not UTF-8"))?;
-        if !value.trim().is_empty() {
-            return Ok(ResolvedConsumerEndpoint {
-                base_url: canonical_loopback_origin(&value)?,
-                source: EndpointSource::Environment,
-                instance_id: None,
-                generation: None,
-                lease_expires_at: None,
-            });
-        }
-    }
-    if !config.base_url.trim().is_empty() {
-        return Ok(ResolvedConsumerEndpoint {
-            base_url: canonical_loopback_origin(&config.base_url)?,
-            source: EndpointSource::Settings,
-            instance_id: None,
-            generation: None,
-            lease_expires_at: None,
-        });
-    }
-    if let Some(discovered) = discover_consumer(Utc::now())? {
-        return Ok(ResolvedConsumerEndpoint::discovered(discovered));
-    }
-    Ok(ResolvedConsumerEndpoint {
-        base_url: COMPATIBILITY_FALLBACK.to_owned(),
-        source: EndpointSource::CompatibilityFallback,
-        instance_id: None,
-        generation: None,
-        lease_expires_at: None,
-    })
 }
 
 fn validate_config(config: &AudioTranscriptionConfig) -> Result<()> {
@@ -426,10 +331,18 @@ fn validate_config(config: &AudioTranscriptionConfig) -> Result<()> {
     if language.is_empty() || language.chars().count() > 16 {
         anyhow::bail!("语音识别语言必须是 1 到 16 个字符");
     }
-    if !config.base_url.trim().is_empty() {
-        canonical_loopback_origin(&config.base_url)?;
-    }
     Ok(())
+}
+
+fn retire_settings_endpoint_override(config: &mut AudioTranscriptionConfig) {
+    if !config.base_url.trim().is_empty() {
+        tracing::info!(
+            target: crate::runtime_log::TARGET,
+            event = "infer_runtime_settings_override_retired",
+            "retired the legacy infer-runtime settings override; endpoint selection is automatic"
+        );
+        config.base_url.clear();
+    }
 }
 
 fn availability(
@@ -520,5 +433,18 @@ mod tests {
             ),
             "本地转写令牌无效或已失效"
         );
+    }
+
+    #[test]
+    fn retires_the_legacy_settings_endpoint_override() {
+        let mut config = AudioTranscriptionConfig {
+            base_url: "http://127.0.0.1:9999".to_owned(),
+            ..AudioTranscriptionConfig::default()
+        };
+
+        retire_settings_endpoint_override(&mut config);
+
+        assert!(config.base_url.is_empty());
+        assert!(!toml::to_string(&config).unwrap().contains("baseUrl"));
     }
 }

@@ -6,7 +6,7 @@ use std::collections::HashMap;
 use serde_json::json;
 
 use crate::{
-    codex::{SensingReviewDecision, SensingReviewDisposition},
+    inference::{SensingReviewDecision, SensingReviewDisposition},
     sensing::{InputRoleSnapshot, SensingCandidate, SensingCandidateDraft, SensingPresentation},
     usage::InvocationRecord,
 };

@@ -5,10 +5,7 @@ use std::{
 };
 
 use super::{
-    autonomous::{
-        ExplorationEvidence, ExplorationScoutFinding, review_prompt, scout_prompt,
-        sensing_review_prompt,
-    },
+    autonomous::{ExplorationEvidence, ExplorationScoutFinding, review_prompt, scout_prompt},
     client::{
         autonomous_response_is_superseded, context_revision_ids, extract_completed_response_text,
         extract_final_agent_message, generated_image_output, remember_generated_image,
@@ -16,7 +13,7 @@ use super::{
     },
     prompts::{
         context_fragments, developer_instructions, interaction_reflection_prompt,
-        memory_reconciliation_prompt, pcp_maintenance_worker_prompt, summary_maintenance_prompt,
+        memory_reconciliation_prompt, summary_maintenance_prompt,
     },
     tools::SymbiontTools,
     trace::observable_item_event,
@@ -27,6 +24,7 @@ use crate::{
     continuity::{ContinuityHost, MessageLinks},
     curiosity::CuriosityStore,
     exploration::{ExplorationIntentQueue, ExplorationIntentReceiver},
+    inference::{pcp_codex_prompt, sensing_codex_prompt},
     memory::MemoryRole,
     profile::{CalibrationMode, ProfileSnapshot, ProfileStore, SetupStatus},
     reconciliation::ReconciliationMode,
@@ -154,7 +152,7 @@ fn pcp_maintenance_prompt_keeps_semantics_in_the_model_and_mutation_outside() {
         max_pages: 4,
         excluded_candidate_sets: Vec::new(),
     };
-    let prompt = pcp_maintenance_worker_prompt(&request, "<done/>").unwrap();
+    let prompt = pcp_codex_prompt(&request, "<done/>").unwrap();
     assert!(prompt.contains("Semantic quality"));
     assert!(prompt.contains("complete_pcp_maintenance"));
     assert!(prompt.contains("shared vocabulary alone"));
@@ -208,7 +206,7 @@ fn ambient_review_is_bounded_to_candidate_dispositions() {
     assert_eq!(schema["required"], json!(["decisions"]));
     assert!(schema["properties"]["decisions"].is_object());
 
-    let prompt = sensing_review_prompt(&[], "<silent/>").unwrap();
+    let prompt = sensing_codex_prompt(&[], "<silent/>").unwrap();
     assert!(prompt.contains("discard"));
     assert!(prompt.contains("`input`"));
     assert!(prompt.contains("`deep`"));

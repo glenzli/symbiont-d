@@ -21,6 +21,7 @@ import { initTopbarUi } from "/topbar-ui.js";
 import { initTopicUi } from "/topic-ui.js";
 import { initTraceUi } from "/trace-ui.js";
 import { initTurnDispositionUi } from "/turn-disposition-ui.js";
+import { initEphemeralDiscussionUi } from "/ephemeral-discussion-ui.js";
 import { renderIcons } from "/icons.js";
 
 const appState = {
@@ -179,6 +180,16 @@ const voiceInput = initVoiceInput({
   setPersistentStatus,
   resize: resizeComposer,
 });
+const ephemeralDiscussionUi = initEphemeralDiscussionUi({
+  input,
+  notify: notifyComposer,
+  renderSnapshot: renderTemporaryDiscussionSnapshot,
+  clearMessages: clearTemporaryDiscussionMessages,
+  appendPromoted(entry) {
+    appendMessage(entry);
+  },
+  canActivate: () => !busy,
+});
 initTopbarUi();
 renderIcons();
 
@@ -236,6 +247,7 @@ function appendMessage(entry, options = {}) {
   if (entry.revisionId) article.dataset.revisionId = entry.revisionId;
   if (options.pending) article.classList.add("pending");
   if (options.error) article.classList.add("error");
+  if (options.temporary) article.classList.add("temporary-discussion-message");
   speaker.textContent = role === "user" ? "你" : "symbiont-d";
   identityUi.applyAvatar(avatar, role === "user" ? "user" : "symbiont");
   time.dateTime = entry.at || new Date().toISOString();
@@ -245,13 +257,20 @@ function appendMessage(entry, options = {}) {
   });
   renderMessageContent(body, entry);
   renderMessageFoot(article, entry.metadata);
+  if (options.temporary) {
+    const foot = article.querySelector(".message-foot");
+    foot.querySelector(".message-runtime").textContent = "临时";
+    foot.hidden = false;
+  }
   conversation.append(fragment);
   const element = conversation.lastElementChild;
-  messageSync.track(element, entry, options);
-  messageActions.track(element, entry, {
-    deliveryState: options.deliveryState,
-    failureReason: options.failureReason,
-  });
+  if (!options.temporary) {
+    messageSync.track(element, entry, options);
+    messageActions.track(element, entry, {
+      deliveryState: options.deliveryState,
+      failureReason: options.failureReason,
+    });
+  }
   if (options.scroll !== false) {
     conversation.scrollTop = conversation.scrollHeight;
   }
@@ -757,6 +776,11 @@ async function bootstrap() {
     });
     turnDispositionUi.applyAll(state.turnDispositions);
     messageSync.completeBootstrap(state.messages);
+    try {
+      await ephemeralDiscussionUi.restore();
+    } catch (error) {
+      notifyComposer(`临时讨论状态不可用：${error.message}`);
+    }
     // Opening a refreshed conversation should resume at its current edge. The
     // scroll control still preserves a deliberate manual scroll during the
     // rest of the session.
@@ -873,6 +897,14 @@ async function sendMessage(
   signalId = selectedSignalId,
 ) {
   if (!text.trim() && !images.length && !quotes.length && !codexTaskIds.length) return;
+  if (ephemeralDiscussionUi.isActive()) {
+    if (images.length || quotes.length || topic || codexTaskIds.length || signalId) {
+      notifyComposer("临时讨论目前只接收文字；请先移除附加内容");
+      return;
+    }
+    await sendTemporaryDiscussionMessage(text);
+    return;
+  }
   if (busy) {
     await appendToActiveResponse(
       text,
@@ -964,6 +996,65 @@ async function sendMessage(
     setBusy(false);
     if (!composer.hidden) input.focus();
     if (selectedSignalId === signalId) selectedSignalId = null;
+  }
+}
+
+function clearTemporaryDiscussionMessages() {
+  for (const message of conversation.querySelectorAll(
+    ".temporary-discussion-message",
+  )) {
+    message.remove();
+  }
+  emptyState.hidden = Boolean(conversation.querySelector(".message"));
+}
+
+function renderTemporaryDiscussionSnapshot(snapshot) {
+  clearTemporaryDiscussionMessages();
+  for (const turn of snapshot?.turns || []) {
+    appendMessage(
+      {
+        role: turn.role,
+        at: turn.at,
+        content: turn.content,
+        parts: [{ type: "markdown", text: turn.content }],
+      },
+      { temporary: true, scroll: false },
+    );
+  }
+  if (snapshot?.turns?.length) {
+    conversation.scrollTop = conversation.scrollHeight;
+  }
+}
+
+async function sendTemporaryDiscussionMessage(text) {
+  const outgoing = appendMessage(localUserEntry(text, [], [], null), {
+    temporary: true,
+  });
+  const pending = appendMessage(
+    {
+      role: "assistant",
+      at: new Date().toISOString(),
+      content: "正在回应临时讨论…",
+    },
+    { temporary: true, pending: true },
+  );
+  activityStartedAt = Date.now();
+  setBusy(true);
+  connectionStatus.textContent = "临时讨论中";
+  setRuntimeStatus("临时讨论正在回应", "working");
+  try {
+    const reply = await ephemeralDiscussionUi.send(text);
+    if (reply.interrupted) notifyComposer("已停止回复");
+  } catch (error) {
+    pending.remove();
+    outgoing.classList.add("error");
+    const state = outgoing.querySelector(".message-state");
+    state.textContent = error.message;
+    outgoing.querySelector(".message-foot").hidden = false;
+    notifyComposer(error.message);
+  } finally {
+    setBusy(false);
+    if (!composer.hidden) input.focus();
   }
 }
 
@@ -1242,10 +1333,31 @@ composer.addEventListener("submit", (event) => {
   const text = input.value.trim();
   const images = selectedImages;
   const quotes = quoteUi.drafts();
-  const codexTaskIds = composerContextUi.consume();
   const minimumLane = computeMode.value;
+  const hasCodexContext = !document.querySelector("#codex-context-tray").hidden;
+  const hasTopicContext = !document.querySelector("#topic-target-tray").hidden;
+  if (
+    ephemeralDiscussionUi.isActive() &&
+    (images.length ||
+      quotes.length ||
+      hasCodexContext ||
+      hasTopicContext ||
+      selectedSignalId)
+  ) {
+    notifyComposer("临时讨论目前只接收文字；请先移除图片、引用或外部上下文");
+    return;
+  }
+  const codexTaskIds = composerContextUi.consume();
   if (codexTaskIds === null) return;
   if (!text && !images.length && !quotes.length && !codexTaskIds.length) return;
+  if (ephemeralDiscussionUi.isActive()) {
+    input.value = "";
+    computeModeUi.reset();
+    composerState.textContent = "";
+    resizeComposer();
+    sendTemporaryDiscussionMessage(text);
+    return;
+  }
   const topic = topicUi.consume();
   input.value = "";
   selectedImages = [];
@@ -1260,7 +1372,9 @@ composer.addEventListener("submit", (event) => {
 
 input.addEventListener("input", () => {
   resizeComposer();
-  if (busy) signalTyping(Boolean(input.value.trim()));
+  if (busy && !ephemeralDiscussionUi.isActive()) {
+    signalTyping(Boolean(input.value.trim()));
+  }
 });
 input.addEventListener("keydown", (event) => {
   if (event.key === "Enter" && !event.shiftKey) {
@@ -1283,9 +1397,13 @@ async function stopActiveResponse() {
   stopResponseButton.disabled = true;
   composerState.textContent = "正在停止回复";
   try {
-    const response = await fetch("/api/chat/interrupt", { method: "POST" });
-    const payload = await response.json();
-    if (!response.ok) throw new Error(payload.error || "无法停止回复");
+    const payload = ephemeralDiscussionUi.isActive()
+      ? await ephemeralDiscussionUi.interrupt()
+      : await fetch("/api/chat/interrupt", { method: "POST" }).then(async (response) => {
+          const result = await response.json();
+          if (!response.ok) throw new Error(result.error || "无法停止回复");
+          return result;
+        });
     if (!payload.accepted) {
       notifyComposer("回复已结束");
     }

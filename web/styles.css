@@ -1570,6 +1570,93 @@ html[data-native-shell="macos"] .topbar {
   position: relative;
 }
 
+.composer .temporary-discussion-toggle {
+  width: 30px;
+  height: 30px;
+  border-radius: 50%;
+}
+
+.composer .temporary-discussion-toggle.active {
+  color: var(--text);
+  background: var(--surface-subtle);
+}
+
+.temporary-discussion-mark {
+  font-size: 18px;
+  font-weight: 650;
+  line-height: 0.7;
+  transform: translateY(-2px);
+}
+
+.temporary-discussion-banner {
+  min-height: 28px;
+  padding: 6px 8px 0;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  color: var(--text-soft);
+  font-size: 10px;
+}
+
+.temporary-discussion-banner[hidden] {
+  display: none;
+}
+
+.temporary-discussion-banner strong {
+  color: var(--text);
+  font-weight: 650;
+}
+
+.composer .temporary-discussion-banner button {
+  width: auto;
+  height: 24px;
+  padding: 0 7px;
+  border: 0;
+  color: var(--text-soft);
+  background: transparent;
+  font-size: 10px;
+  font-weight: 550;
+}
+
+.temporary-discussion-message .message-content {
+  border-color: color-mix(in srgb, var(--border-strong) 74%, transparent);
+}
+
+.temporary-discussion-message .message-runtime {
+  color: var(--text-faint);
+}
+
+.temporary-discussion-dialog {
+  width: min(620px, calc(100vw - 32px));
+}
+
+.temporary-discussion-decision {
+  padding: 18px 20px;
+  display: grid;
+  gap: 14px;
+}
+
+.temporary-discussion-decision > p {
+  margin: 0;
+  color: var(--text-soft);
+  font-size: 11px;
+  line-height: 1.55;
+}
+
+.temporary-discussion-actions {
+  flex-wrap: wrap;
+  border-top: 1px solid var(--border);
+}
+
+.temporary-discussion-actions .dialog-actions-spacer {
+  flex: 1 1 auto;
+}
+
+.temporary-discussion-actions .danger-button {
+  color: var(--danger-text);
+}
+
 .composer-controls {
   min-height: 34px;
   display: flex;

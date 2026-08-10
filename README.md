@@ -52,7 +52,7 @@
 ### 外部运行依赖
 
 - **长期上下文：[Paged Context Protocol](https://github.com/glenzli/paged-context-protocol)。** 当前源码构建使用该仓库中的客户端与存储组件；常驻安装也可以从同级 checkout 构建并启动本地 Runtime 和只读 Console。
-- **语音输入：[infer-runtime](https://github.com/glenzli/infer-runtime)。** 这是可选依赖。启用语音输入后，Symbiont-d 将录音交给用户授权的本机 infer-runtime 转写，并把结果作为可编辑文本返回；未配置时不影响文字对话、探索、Drive 或邮箱输入。
+- **通用推理与语音输入：[infer-runtime](https://github.com/glenzli/infer-runtime)。** 这是可选的本机路由层。Symbiont-d 将无状态、无工具调用的后台语义判断逐步交给它路由，并用它完成用户授权的本地语音转写；对话线程、Codex 任务、搜索与工具执行仍由 Codex 原生边界负责。未配置时，已迁移的后台判断会安全回退到 Codex，语音输入保持不可用，其他输入渠道不受影响。
 
 两项集成都只在这里说明能力边界；具体连接信息和本机配置由运行环境管理。
 
@@ -63,7 +63,7 @@
 - Rust 1.88+；
 - 已登录的 Codex CLI；
 - [Paged Context Protocol](https://github.com/glenzli/paged-context-protocol) 仓库的同级 checkout，供当前源码依赖与本地 Runtime 使用；
-- 若要使用语音输入，需要另行运行并授权 [infer-runtime](https://github.com/glenzli/infer-runtime)。
+- 若要使用语音输入或通用推理路由，需要另行运行并授权 [infer-runtime](https://github.com/glenzli/infer-runtime)。
 
 本地开发：
 
@@ -133,7 +133,7 @@ External input does not enter durable memory directly. Account credentials, fold
 ### External runtime dependencies
 
 - **Durable context: [Paged Context Protocol](https://github.com/glenzli/paged-context-protocol).** The current source build uses client and storage components from that repository. The resident installer can also build and launch its local Runtime and read-only Console from a sibling checkout.
-- **Voice input: [infer-runtime](https://github.com/glenzli/infer-runtime).** This dependency is optional. When voice input is enabled, Symbiont-d sends recordings to a user-authorized local infer-runtime and returns editable transcript text. Without it, text conversations, exploration, Drive, and Mail input continue to work.
+- **Generic inference and voice input: [infer-runtime](https://github.com/glenzli/infer-runtime).** This is an optional local routing layer. Symbiont-d is moving stateless, tool-free background judgments behind its routing boundary and also uses it for user-authorized local speech transcription. Conversation threads, Codex tasks, search, and tool execution remain on the Codex-native boundary. When it is unavailable, migrated background judgments safely fall back to Codex, voice input stays unavailable, and the other input channels continue to work.
 
 These integrations are documented at the capability boundary; concrete connection details and machine-specific configuration remain with the local runtime environment.
 
@@ -144,7 +144,7 @@ This early prototype needs:
 - Rust 1.88+;
 - a logged-in Codex CLI;
 - a sibling checkout of the [Paged Context Protocol repository](https://github.com/glenzli/paged-context-protocol) for the current source dependencies and local Runtime;
-- a separately running and authorized [infer-runtime](https://github.com/glenzli/infer-runtime) only when voice input is needed.
+- a separately running and authorized [infer-runtime](https://github.com/glenzli/infer-runtime) when voice input or generic inference routing is needed.
 
 For local development:
 

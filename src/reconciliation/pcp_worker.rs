@@ -11,6 +11,7 @@ use super::{
 };
 use crate::{
     codex::{PcpMaintenanceModelRequest, RuntimeEvent},
+    inference::InferenceAttempt,
     profile::SetupStatus,
 };
 
@@ -56,12 +57,6 @@ impl PcpMaintenanceWorker {
                 reason: Some("a user conversation is active".to_owned()),
             });
         };
-        let Ok(mut client) = self.dependencies.codex.try_lock() else {
-            return Ok(MaintenanceWorkerResponse::Defer {
-                reason: Some("another model operation is active".to_owned()),
-            });
-        };
-
         let encoded = serde_json::to_vec(&request).context("encode PCP maintenance request")?;
         let digest = format!("{:x}", Sha256::digest(&encoded));
         let run_id = self
@@ -74,56 +69,86 @@ impl PcpMaintenanceWorker {
                 None,
             )
             .await?;
-        let compute = self.dependencies.compute.snapshot().await;
-        let (events_tx, mut events_rx) = mpsc::channel(16);
-        let event_drain = tokio::spawn(async move {
-            while let Some(event) = events_rx.recv().await {
-                if matches!(event, RuntimeEvent::Activity { .. }) {
-                    // The full activity and model identity remain in the invocation trace.
-                }
-            }
-        });
-        let outcome = client
-            .evaluate_pcp_maintenance(PcpMaintenanceModelRequest {
-                request: &request,
-                compute: &compute,
-                profile: &profile,
-                input_events,
-                events: events_tx,
-            })
-            .await;
-        drop(client);
-        event_drain
+        let (response, invocations, interrupted) = match self
+            .dependencies
+            .inference
+            .evaluate_pcp_maintenance(&request, input_events.clone())
             .await
-            .context("join PCP maintenance event drain")?;
-        let outcome = match outcome {
-            Ok(outcome) => outcome,
-            Err(error) => {
-                self.store.fail_run(&run_id, &error.to_string()).await?;
-                return Err(error);
+        {
+            InferenceAttempt::Completed(outcome) => {
+                (outcome.value, outcome.invocations, outcome.interrupted)
+            }
+            InferenceAttempt::Fallback {
+                reason,
+                mut invocations,
+            } => {
+                tracing::warn!(
+                    target: crate::runtime_log::TARGET,
+                    event = "generic_inference_fallback",
+                    task = "pcp_maintenance",
+                    reason,
+                    "PCP semantic maintenance fell back to the Codex-native executor"
+                );
+                if input_events.has_changed().unwrap_or(true) {
+                    self.dependencies.usage.record_all(&invocations).await?;
+                    self.store.interrupt_run(&run_id).await?;
+                    return Ok(MaintenanceWorkerResponse::Defer {
+                        reason: Some("superseded by newer user input".to_owned()),
+                    });
+                }
+                let Ok(mut client) = self.dependencies.codex.try_lock() else {
+                    self.dependencies.usage.record_all(&invocations).await?;
+                    self.store.interrupt_run(&run_id).await?;
+                    return Ok(MaintenanceWorkerResponse::Defer {
+                        reason: Some("another model operation is active".to_owned()),
+                    });
+                };
+                let compute = self.dependencies.compute.snapshot().await;
+                let (events_tx, mut events_rx) = mpsc::channel(16);
+                let event_drain = tokio::spawn(async move {
+                    while let Some(event) = events_rx.recv().await {
+                        if matches!(event, RuntimeEvent::Activity { .. }) {
+                            // The full activity and model identity remain in the invocation trace.
+                        }
+                    }
+                });
+                let outcome = client
+                    .evaluate_pcp_maintenance(PcpMaintenanceModelRequest {
+                        request: &request,
+                        compute: &compute,
+                        profile: &profile,
+                        input_events,
+                        events: events_tx,
+                    })
+                    .await;
+                drop(client);
+                event_drain
+                    .await
+                    .context("join PCP maintenance event drain")?;
+                let outcome = match outcome {
+                    Ok(outcome) => outcome,
+                    Err(error) => {
+                        self.store.fail_run(&run_id, &error.to_string()).await?;
+                        return Err(error);
+                    }
+                };
+                invocations.extend(outcome.invocations);
+                (outcome.response, invocations, outcome.interrupted)
             }
         };
-        self.dependencies
-            .usage
-            .record_all(&outcome.invocations)
-            .await?;
-        if outcome.interrupted {
+        self.dependencies.usage.record_all(&invocations).await?;
+        if interrupted {
             self.store.interrupt_run(&run_id).await?;
-            return Ok(outcome.response);
+            return Ok(response);
         }
 
-        let trace_id = outcome.invocations.first().map(|item| item.id.clone());
-        let model = outcome
-            .invocations
+        let trace_id = invocations.first().map(|item| item.id.clone());
+        let model = invocations
             .last()
             .map(|item| item.model_display_name.clone());
-        let total_tokens = outcome
-            .invocations
-            .iter()
-            .map(|item| item.total_tokens)
-            .sum();
-        let summary = response_summary(&request, &outcome.response);
-        let proposals = response_proposals(&request, &outcome.response);
+        let total_tokens = invocations.iter().map(|item| item.total_tokens).sum();
+        let summary = response_summary(&request, &response);
+        let proposals = response_proposals(&request, &response);
         self.store
             .complete_run(
                 &run_id,
@@ -137,7 +162,7 @@ impl PcpMaintenanceWorker {
                 },
             )
             .await?;
-        Ok(outcome.response)
+        Ok(response)
     }
 }
 

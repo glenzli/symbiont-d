@@ -57,14 +57,10 @@ export function initSettings(state, actions = {}) {
   const mailInputRuntimeNote = document.querySelector("#mail-input-runtime-note");
   const mailInputSaveState = settingsSaveState;
   const mailInputTestConnection = document.querySelector("#mail-input-test-connection");
-  const audioTranscriptionForm = document.querySelector("#audio-transcription-form");
-  const audioTranscriptionBaseUrl = document.querySelector("#audio-transcription-base-url");
   const audioTranscriptionLanguage = document.querySelector("#audio-transcription-language");
-  const audioTranscriptionCredentialStore = document.querySelector("#audio-transcription-credential-store");
-  const audioTranscriptionCredentialValue = document.querySelector("#audio-transcription-credential-value");
   const audioTranscriptionEnabled = document.querySelector("#audio-transcription-enabled");
   const audioTranscriptionAvailability = document.querySelector("#audio-transcription-availability");
-  const audioTranscriptionCredentialNote = document.querySelector("#audio-transcription-credential-note");
+  const audioTranscriptionRuntimeNote = document.querySelector("#audio-transcription-runtime-note");
   const audioTranscriptionSaveState = settingsSaveState;
   const computePolicyList = document.querySelector("#compute-policy-list");
   const computePolicyTemplate = document.querySelector(
@@ -249,27 +245,32 @@ export function initSettings(state, actions = {}) {
   function renderAudioTranscription() {
     if (!state.audioTranscription) return;
     const transcription = state.audioTranscription;
-    audioTranscriptionBaseUrl.value = transcription.baseUrl || "";
     audioTranscriptionLanguage.value = transcription.language || "zh";
-    audioTranscriptionCredentialStore.value = transcription.credentialStore || "config_file";
-    audioTranscriptionCredentialValue.value = "";
     audioTranscriptionEnabled.checked = transcription.enabled === true;
-    const endpoint = transcription.resolvedBaseUrl
-      ? `${endpointSourceText(transcription.endpointSource)} ${transcription.resolvedBaseUrl}`
-      : endpointSourceText(transcription.endpointSource);
-    audioTranscriptionAvailability.textContent = [availabilityText(transcription.availability), endpoint]
-      .filter(Boolean)
-      .join(" · ");
-    audioTranscriptionCredentialNote.textContent = credentialNote(transcription);
+    audioTranscriptionAvailability.textContent = transcriptionStatusText(transcription);
+    audioTranscriptionRuntimeNote.textContent = transcriptionRuntimeNote(transcription);
   }
 
-  function endpointSourceText(source) {
-    if (source === "environment") return "环境覆盖";
-    if (source === "settings") return "设置覆盖";
-    if (source === "discovery") return "自动发现";
-    if (source === "compatibility_fallback") return "兼容地址";
-    if (source === "unavailable") return "地址不可用";
-    return "";
+  function transcriptionStatusText(transcription) {
+    if (transcription.availability === "ready") return "已自动连接";
+    if (transcription.availability === "disabled") return "已关闭";
+    if (transcription.availability === "missing_credential") return "等待本机授权";
+    if (transcription.availability === "credential_unavailable") return "本机凭据暂不可用";
+    if (transcription.availability === "endpoint_unavailable") return "正在等待本地服务";
+    return "暂不可用";
+  }
+
+  function transcriptionRuntimeNote(transcription) {
+    if (transcription.availability === "missing_credential") {
+      return "尚未获得本机访问凭据；请在 Infer Console 的 Apps & Access 中连接 symbiont-d。";
+    }
+    if (transcription.availability === "credential_unavailable") {
+      return "本机访问凭据暂时不可读取，恢复后会自动重连。";
+    }
+    if (transcription.availability === "endpoint_unavailable") {
+      return "暂未发现本地转写服务，服务恢复后会自动重连。";
+    }
+    return "服务地址由本机自动发现，无需手动配置。";
   }
 
   function availabilityText(availability, runtime = {}) {
@@ -759,12 +760,13 @@ export function initSettings(state, actions = {}) {
   }
 
   function audioTranscriptionFormValue() {
+    const current = state.audioTranscription || {};
     return {
       enabled: audioTranscriptionEnabled.checked,
-      baseUrl: audioTranscriptionBaseUrl.value.trim(),
+      baseUrl: "",
       language: audioTranscriptionLanguage.value.trim(),
-      credentialStore: audioTranscriptionCredentialStore.value,
-      credentialValue: audioTranscriptionCredentialValue.value || null,
+      credentialStore: current.credentialStore || "config_file",
+      credentialValue: null,
     };
   }
 
@@ -951,7 +953,6 @@ export function initSettings(state, actions = {}) {
       settingsSaveState.textContent = "有未保存的更改";
     }
   });
-  audioTranscriptionForm.addEventListener("submit", saveAudioTranscription);
   lunaEnabled.addEventListener("change", () => {
     settingsSaveState.textContent = "有未保存的更改";
   });

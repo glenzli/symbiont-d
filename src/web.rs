@@ -19,6 +19,14 @@ use tokio::{
 };
 use tokio_stream::{StreamExt, wrappers::ReceiverStream};
 
+mod ephemeral_discussion;
+
+use ephemeral_discussion::{
+    discard_temporary_discussion, hold_temporary_discussion, interrupt_temporary_discussion,
+    promote_temporary_discussion, reply_in_temporary_discussion, resume_temporary_discussion,
+    temporary_discussion_snapshot,
+};
+
 use crate::{
     ambient_api::{AmbientConfig, AmbientSnapshot, AmbientTopologyStore},
     asset::{AssetStore, MAX_IMAGE_BYTES, MAX_IMAGES_PER_MESSAGE, SavedImage},
@@ -49,6 +57,7 @@ use crate::{
         DriveInputConfig, DriveInputConnectionTest, DriveInputSnapshot, DriveInputStore,
         DriveOAuthStart, DriveOAuthStartResponse, DriveOAuthStoreSelection,
     },
+    ephemeral_chat::EphemeralChatService,
     exploration::{ExplorationHandle, ExplorationSnapshot, ManualExplorationRun, today_started_at},
     identity::{AvatarSlot, IdentitySnapshot, IdentityStore},
     input_roles::{InputRoleSettingsSnapshot, InputRoleSettingsUpdate, InputRoleStore},
@@ -77,6 +86,7 @@ use crate::{
 
 const INDEX_HTML: &str = include_str!("../web/index.html");
 const APP_JS: &str = include_str!("../web/app.js");
+const EPHEMERAL_DISCUSSION_UI_JS: &str = include_str!("../web/ephemeral-discussion-ui.js");
 const COMPUTE_MODE_UI_JS: &str = include_str!("../web/compute-mode-ui.js");
 const ICONS_JS: &str = include_str!("../web/icons.js");
 const RICH_TEXT_JS: &str = include_str!("../web/rich-text.js");
@@ -152,6 +162,7 @@ pub struct AppState {
     topics: Arc<TopicService>,
     conversation: ConversationCoordinator,
     bridge: Arc<CodexBridge>,
+    ephemeral_chat: Arc<EphemeralChatService>,
     permissions: Arc<PermissionBroker>,
     continuations: Arc<ContinuationQueue>,
 }
@@ -182,6 +193,7 @@ impl AppState {
         pcp_index: Arc<PcpIndex>,
         conversation: ConversationCoordinator,
         bridge: Arc<CodexBridge>,
+        ephemeral_chat: Arc<EphemeralChatService>,
         permissions: Arc<PermissionBroker>,
         continuations: Arc<ContinuationQueue>,
     ) -> Self {
@@ -215,6 +227,7 @@ impl AppState {
             topics,
             conversation,
             bridge,
+            ephemeral_chat,
             permissions,
             continuations,
         }
@@ -531,6 +544,10 @@ pub fn router(state: AppState) -> Router {
     Router::new()
         .route("/", get(index))
         .route("/app.js", get(app_js))
+        .route(
+            "/ephemeral-discussion-ui.js",
+            get(ephemeral_discussion_ui_js),
+        )
         .route("/compute-mode-ui.js", get(compute_mode_ui_js))
         .route("/icons.js", get(icons_js))
         .route("/rich-text.js", get(rich_text_js))
@@ -569,6 +586,30 @@ pub fn router(state: AppState) -> Router {
         .route("/api/chat", post(chat))
         .route("/api/chat/append", post(append_chat))
         .route("/api/chat/interrupt", post(interrupt_chat))
+        .route(
+            "/api/temporary-discussion",
+            get(temporary_discussion_snapshot).delete(discard_temporary_discussion),
+        )
+        .route(
+            "/api/temporary-discussion/messages",
+            post(reply_in_temporary_discussion),
+        )
+        .route(
+            "/api/temporary-discussion/interrupt",
+            post(interrupt_temporary_discussion),
+        )
+        .route(
+            "/api/temporary-discussion/hold",
+            post(hold_temporary_discussion),
+        )
+        .route(
+            "/api/temporary-discussion/resume",
+            post(resume_temporary_discussion),
+        )
+        .route(
+            "/api/temporary-discussion/promote",
+            post(promote_temporary_discussion),
+        )
         .route("/api/messages/{revision_id}", delete(retract_message))
         .route("/api/signals/{signal_id}", delete(dismiss_signal))
         .route("/api/interaction/seen", post(record_seen))
@@ -702,6 +743,13 @@ async fn app_js() -> impl IntoResponse {
     (
         [(header::CONTENT_TYPE, "text/javascript; charset=utf-8")],
         APP_JS,
+    )
+}
+
+async fn ephemeral_discussion_ui_js() -> impl IntoResponse {
+    (
+        [(header::CONTENT_TYPE, "text/javascript; charset=utf-8")],
+        EPHEMERAL_DISCUSSION_UI_JS,
     )
 }
 
@@ -2200,6 +2248,11 @@ async fn chat(State(state): State<AppState>, multipart: Multipart) -> Result<Res
     if state.conversation.snapshot().await.active {
         return Err(ApiError::conflict(
             "A response is already active; append this message to it.",
+        ));
+    }
+    if state.ephemeral_chat.snapshot().await.active {
+        return Err(ApiError::conflict(
+            "End or preserve the temporary discussion before returning to normal chat.",
         ));
     }
     let request = prepare_chat_request(&state, parse_chat_request(multipart).await?).await?;

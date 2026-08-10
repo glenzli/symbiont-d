@@ -16,10 +16,14 @@ mod conversation_projection;
 mod curiosity;
 mod diagnostics;
 mod drive_input;
+mod ephemeral_chat;
+mod ephemeral_session;
 mod exploration;
 mod external_digest;
 mod external_markdown;
 mod identity;
+mod infer_runtime;
+mod inference;
 mod input_roles;
 mod luna_input;
 mod mail_input;
@@ -66,10 +70,13 @@ use continuity::ContinuityHost;
 use conversation::ConversationCoordinator;
 use curiosity::CuriosityStore;
 use drive_input::DriveInputStore;
+use ephemeral_chat::EphemeralChatService;
 use exploration::{
     ExplorationAttemptStore, ExplorationHandle, ExplorationIntentQueue, ManualExplorationStore,
 };
 use identity::IdentityStore;
+use infer_runtime::InferRuntimeAccess;
+use inference::InferenceExecutor;
 use input_roles::InputRoleStore;
 use luna_input::LunaInput;
 use mail_input::MailInputStore;
@@ -326,14 +333,26 @@ async fn main() -> Result<()> {
         ))
         .await?,
     );
-    let audio_transcription = Arc::new(
-        AudioTranscriptionStore::open(resolve_data_path(
+    let infer_runtime = Arc::new(
+        InferRuntimeAccess::open(resolve_data_path(
             &workspace,
-            "SYMBIONT_AUDIO_TRANSCRIPTION_PATH",
-            "infer-runtime.toml",
+            "SYMBIONT_INFER_RUNTIME_SECRETS_PATH",
+            "infer-runtime-secrets.toml",
         ))
         .await?,
     );
+    let audio_transcription = Arc::new(
+        AudioTranscriptionStore::open(
+            resolve_data_path(
+                &workspace,
+                "SYMBIONT_AUDIO_TRANSCRIPTION_PATH",
+                "infer-runtime.toml",
+            ),
+            Arc::clone(&infer_runtime),
+        )
+        .await?,
+    );
+    let inference = Arc::new(InferenceExecutor::new(infer_runtime));
     let signals = Arc::new(
         SignalStore::open(resolve_data_path(
             &workspace,
@@ -378,11 +397,17 @@ async fn main() -> Result<()> {
         )
         .await?,
     );
+    let ephemeral_chat = Arc::new(EphemeralChatService::new(
+        Arc::clone(&bridge),
+        Arc::clone(&inference),
+        Arc::clone(&usage),
+    )?);
     let conversation = ConversationCoordinator::new();
     let exploration = ExplorationHandle::start(
         Arc::clone(&autonomy),
         Arc::clone(&profile),
         Arc::clone(&codex),
+        Arc::clone(&inference),
         Arc::clone(&compute),
         Arc::clone(&continuity),
         Arc::clone(&context),
@@ -422,6 +447,7 @@ async fn main() -> Result<()> {
             autonomy: Arc::clone(&autonomy),
             profile: Arc::clone(&profile),
             codex: Arc::clone(&codex),
+            inference,
             compute: Arc::clone(&compute),
             continuity: Arc::clone(&continuity),
             reflection: Arc::clone(&reflection_store),
@@ -490,6 +516,7 @@ async fn main() -> Result<()> {
         pcp_index,
         conversation,
         bridge,
+        ephemeral_chat,
         permissions,
         continuations,
     );

@@ -235,6 +235,15 @@
                   <div id="codex-context-list" class="codex-context-list" role="listbox"></div>
                 </section>
               </div>
+              <button
+                id="temporary-discussion-toggle"
+                class="composer-tool-button temporary-discussion-toggle"
+                type="button"
+                title="临时讨论"
+                aria-label="临时讨论"
+                aria-pressed="false"
+                data-tooltip="临时讨论"
+              ><span class="temporary-discussion-mark" aria-hidden="true">…</span></button>
             </div>
               <div id="voice-recording-status" class="voice-recording-status" role="status" hidden>
                 <span class="voice-recording-indicator" aria-hidden="true"></span>
@@ -302,6 +311,10 @@
             </div>
           </div>
         </div>
+        <div id="temporary-discussion-banner" class="temporary-discussion-banner" hidden>
+          <span><strong>临时讨论</strong> · 读取已有记忆，不写入这段讨论</span>
+          <button id="temporary-discussion-finish" type="button">结束</button>
+        </div>
         <input
           id="image-input"
           type="file"
@@ -315,6 +328,35 @@
         <span id="app-status-runtime" class="app-status-runtime"></span>
       </footer>
     </main>
+
+    <dialog id="temporary-discussion-dialog" class="panel-dialog temporary-discussion-dialog">
+      <header class="dialog-header">
+        <div>
+          <h2>结束临时讨论</h2>
+          <p>这段内容仍只停留在当前进程中。</p>
+        </div>
+      </header>
+      <section class="temporary-discussion-decision">
+        <p>可以直接丢弃；也可以只整理一段结论，或明确保留完整讨论过程。</p>
+        <label class="field">
+          <span>希望进入记忆的结论</span>
+          <textarea
+            id="temporary-discussion-conclusion"
+            rows="5"
+            maxlength="12000"
+            placeholder="只写真正希望以后继续使用的结论…"
+          ></textarea>
+        </label>
+        <p id="temporary-discussion-decision-status" class="settings-state" role="status"></p>
+      </section>
+      <footer class="dialog-actions temporary-discussion-actions">
+        <button id="temporary-discussion-continue" class="secondary-button" type="button">继续讨论</button>
+        <button id="temporary-discussion-discard" class="secondary-button danger-button" type="button">丢弃</button>
+        <span class="dialog-actions-spacer"></span>
+        <button id="temporary-discussion-save-transcript" class="secondary-button" type="button">保留完整过程</button>
+        <button id="temporary-discussion-save-conclusion" class="primary-button" type="button">只保留结论</button>
+      </footer>
+    </dialog>
 
     <dialog id="settings-dialog" class="panel-dialog">
       <header class="dialog-header">
@@ -745,27 +787,20 @@
             <button class="primary-button" type="submit">保存</button>
           </footer>
         </form>
-        <form id="audio-transcription-form">
+        <section id="audio-transcription-form">
           <header class="settings-panel-intro compact-intro">
-            <h3>本地语音转写</h3>
-            <p>录音只在本机转写为可编辑文字；只有发送后的文字会进入对话与 PCP。</p>
+            <h3>语音输入</h3>
+            <p>本地转写服务会自动连接；录音先变为可编辑文字，只有发送后的文字会进入对话与 PCP。</p>
           </header>
           <div class="setting-section">
-            <div class="ambient-config-row-head"><strong>infer-runtime</strong><span id="audio-transcription-availability" class="ambient-row-status">正在读取</span></div>
+            <div class="ambient-config-row-head"><strong>本地转写</strong><span id="audio-transcription-availability" class="ambient-row-status">正在连接</span></div>
             <div class="field-grid">
-              <label class="field"><span>地址覆盖（可选）</span><input id="audio-transcription-base-url" type="url" maxlength="300" placeholder="留空以自动发现本地 infer-runtime"></label>
-              <label class="field"><span>语言</span><input id="audio-transcription-language" type="text" maxlength="16" placeholder="zh"></label>
-              <label class="field"><span>令牌存储</span><select id="audio-transcription-credential-store"><option value="config_file">本地配置文件</option><option value="keychain">系统凭据库</option></select></label>
-              <label class="field"><span>infer-runtime 令牌</span><input id="audio-transcription-credential-value" type="password" autocomplete="new-password" placeholder="留空以保持现有令牌"></label>
+              <label class="field"><span>识别语言</span><input id="audio-transcription-language" type="text" maxlength="16" placeholder="zh"></label>
               <label class="toggle-row compact-toggle"><span>启用</span><input id="audio-transcription-enabled" type="checkbox"></label>
             </div>
-            <small id="audio-transcription-credential-note" class="ambient-credential-note"></small>
+            <small id="audio-transcription-runtime-note" class="ambient-credential-note"></small>
           </div>
-          <footer class="dialog-actions">
-            <span id="audio-transcription-save-state" role="status"></span>
-            <button class="primary-button" type="submit">保存语音转写</button>
-          </footer>
-        </form>
+        </section>
       </section>
       <footer class="dialog-actions settings-dialog-actions">
         <span id="settings-save-state" role="status"></span>
