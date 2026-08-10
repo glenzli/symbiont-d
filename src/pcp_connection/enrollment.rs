@@ -313,6 +313,8 @@ impl EnrollmentManager {
         let mut state = self.state.lock().await;
         state.registration_id = None;
         state.request_id = None;
+        state.approved_generation = None;
+        state.reopened_after_generation_change = false;
         state.rejected = false;
         let snapshot = state.clone();
         drop(state);
@@ -1189,6 +1191,38 @@ mod tests {
             &service,
             &session(access("conversation:symbiont-d"))
         ));
+    }
+
+    #[tokio::test]
+    async fn replacing_a_registration_resets_its_generation_provenance() {
+        let root = test_root("registration-generation-reset");
+        private_dir(&root);
+        let state_path = root.join("client.json");
+        let manager = EnrollmentManager::open_at(root, state_path.clone())
+            .await
+            .expect("open enrollment manager");
+        {
+            let mut state = manager.state.lock().await;
+            state.registration_id = Some("reg-stale".to_owned());
+            state.request_id = Some("req-stale".to_owned());
+            state.approved_generation = Some("proc-old".to_owned());
+            state.reopened_after_generation_change = true;
+            state.rejected = true;
+        }
+
+        manager
+            .clear_registration()
+            .await
+            .expect("clear stale registration");
+
+        let persisted: EnrollmentState =
+            serde_json::from_slice(&std::fs::read(state_path).expect("read persisted state"))
+                .expect("decode persisted state");
+        assert_eq!(persisted.registration_id, None);
+        assert_eq!(persisted.request_id, None);
+        assert_eq!(persisted.approved_generation, None);
+        assert!(!persisted.reopened_after_generation_change);
+        assert!(!persisted.rejected);
     }
 
     #[test]
