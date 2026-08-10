@@ -15,6 +15,7 @@ export function initSettings(state, actions = {}) {
   const ambientSaveState = settingsSaveState;
   const ambientEmptyState = document.querySelector("#ambient-empty-state");
   const lunaEnabled = document.querySelector("#luna-enabled");
+  const lunaOutputLanguage = document.querySelector("#luna-output-language");
   const lunaFocus = document.querySelector("#luna-focus");
   const lunaAvailability = document.querySelector("#luna-availability");
   const ambientProviderList = document.querySelector("#ambient-provider-list");
@@ -152,6 +153,7 @@ export function initSettings(state, actions = {}) {
     if (!state.ambient) return;
     const luna = state.ambient.luna || {};
     lunaEnabled.checked = luna.enabled === true;
+    lunaOutputLanguage.value = luna.outputLanguage || "interface";
     lunaFocus.value = luna.focus || "";
     lunaAvailability.textContent = availabilityText(luna.availability, luna);
     ambientProviderList.replaceChildren();
@@ -429,6 +431,7 @@ export function initSettings(state, actions = {}) {
     return {
       luna: {
         enabled: lunaEnabled.checked,
+        outputLanguage: lunaOutputLanguage.value,
         focus: lunaFocus.value.trim(),
       },
       providers: [...ambientProviderList.querySelectorAll("[data-ambient-provider]")].map((row) => ({

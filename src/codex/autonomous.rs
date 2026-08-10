@@ -2,7 +2,6 @@ use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 
 use crate::{
-    inference::SensingReviewDecision,
     sensing::{SensingCandidateDraft, validate_candidate_drafts},
     usage::InvocationRecord,
 };
@@ -52,11 +51,18 @@ After the optional finding tool call, return exactly `{silent_marker}`. Never pu
     )
 }
 
-pub fn luna_sensing_prompt(focus: &str, sensing_context: &str, silent_marker: &str) -> String {
+pub fn luna_sensing_prompt(
+    focus: &str,
+    output_language_instruction: &str,
+    sensing_context: &str,
+    silent_marker: &str,
+) -> String {
     format!(
         r#"Privately run one low-cost, input-only wide-observation pass for symbiont-d. No user message is waiting. You are Luna, an independent intake role rather than the conversational assistant. Search broadly within the supplied remit; a development may be worth noticing because evidence, adoption, reaction, or a concrete tension has accumulated, even when it is not new today.
 
 Do not write PCP memory, alter any symbiont state, infer user preferences, plan work, or draft a reply. You may use live web search for grounded evidence. Standalone science, mathematics, culture, public events, products, and unusual real-world phenomena are valid candidates without a project connection. Do not spend this pass proving user relevance. When search yields at least one credible concrete development or an older event with genuinely accumulated recent evidence or reaction, default to submitting it for independent review rather than silently filtering it yourself. Submit nothing only when search or tooling produced no defensible signal. Call `symbiont.submit_sensing_candidates` at most once with one to three compact candidates and concrete sources. The proposed_input must be a self-contained, natural two-to-four sentence observation in Luna's own voice; it remains private intake for a stronger review stage.
+
+Language contract: {output_language_instruction} This contract applies to the structured candidate handoff even when search results or the surrounding system instructions are written in another language. Do not translate quoted titles when their original form is more useful.
 
 After the optional tool call, return exactly `{silent_marker}`.
 
@@ -105,23 +111,6 @@ pub fn finding_from_invocations(
         .transpose()
 }
 
-pub fn sensing_review_from_invocations(
-    invocations: &[InvocationRecord],
-) -> Result<Vec<SensingReviewDecision>> {
-    latest_succeeded_symbiont_step(invocations, "review_sensing_candidates")
-        .map(|step| {
-            step.arguments
-                .get("decisions")
-                .cloned()
-                .context("sensing review completion omitted decisions")
-                .and_then(|value| {
-                    serde_json::from_value(value).context("parse sensing review decisions")
-                })
-        })
-        .transpose()
-        .map(Option::unwrap_or_default)
-}
-
 pub fn sensing_candidates_from_invocations(
     invocations: &[InvocationRecord],
 ) -> Result<Vec<SensingCandidateDraft>> {
@@ -157,4 +146,23 @@ fn latest_succeeded_symbiont_step<'a>(
         }
     }
     None
+}
+
+#[cfg(test)]
+mod tests {
+    use super::luna_sensing_prompt;
+
+    #[test]
+    fn luna_prompt_makes_the_selected_output_language_authoritative() {
+        let prompt = luna_sensing_prompt(
+            "Observe broadly.",
+            "Write every candidate field in Simplified Chinese.",
+            "No recent context.",
+            "<silent/>",
+        );
+
+        assert!(prompt.contains("Language contract"));
+        assert!(prompt.contains("structured candidate handoff"));
+        assert!(prompt.contains("Simplified Chinese"));
+    }
 }

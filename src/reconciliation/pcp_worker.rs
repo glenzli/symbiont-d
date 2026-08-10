@@ -3,17 +3,12 @@ use std::sync::Arc;
 use anyhow::{Context, Result};
 use pcp_runtime::{MaintenanceWorkerRequest, MaintenanceWorkerResponse};
 use sha2::{Digest, Sha256};
-use tokio::sync::mpsc;
 
 use super::{
     ReconciliationDependencies, ReconciliationMode, ReconciliationProposal,
     ReconciliationProposalKind, ReconciliationStore, store::CompletedRun, worker::over_budget,
 };
-use crate::{
-    codex::{PcpMaintenanceModelRequest, RuntimeEvent},
-    inference::InferenceAttempt,
-    profile::SetupStatus,
-};
+use crate::{inference::InferenceAttempt, profile::SetupStatus};
 
 #[derive(Clone)]
 pub(super) struct PcpMaintenanceWorker {
@@ -78,62 +73,29 @@ impl PcpMaintenanceWorker {
             InferenceAttempt::Completed(outcome) => {
                 (outcome.value, outcome.invocations, outcome.interrupted)
             }
-            InferenceAttempt::Fallback {
+            InferenceAttempt::Deferred {
                 reason,
-                mut invocations,
+                invocations,
             } => {
                 tracing::warn!(
                     target: crate::runtime_log::TARGET,
-                    event = "generic_inference_fallback",
+                    event = "generic_inference_deferred",
                     task = "pcp_maintenance",
                     reason,
-                    "PCP semantic maintenance fell back to the Codex-native executor"
+                    "PCP semantic maintenance was deferred without invoking Codex"
                 );
-                if input_events.has_changed().unwrap_or(true) {
-                    self.dependencies.usage.record_all(&invocations).await?;
-                    self.store.interrupt_run(&run_id).await?;
-                    return Ok(MaintenanceWorkerResponse::Defer {
-                        reason: Some("superseded by newer user input".to_owned()),
-                    });
-                }
-                let Ok(mut client) = self.dependencies.codex.try_lock() else {
-                    self.dependencies.usage.record_all(&invocations).await?;
-                    self.store.interrupt_run(&run_id).await?;
-                    return Ok(MaintenanceWorkerResponse::Defer {
-                        reason: Some("another model operation is active".to_owned()),
-                    });
-                };
-                let compute = self.dependencies.compute.snapshot().await;
-                let (events_tx, mut events_rx) = mpsc::channel(16);
-                let event_drain = tokio::spawn(async move {
-                    while let Some(event) = events_rx.recv().await {
-                        if matches!(event, RuntimeEvent::Activity { .. }) {
-                            // The full activity and model identity remain in the invocation trace.
-                        }
-                    }
-                });
-                let outcome = client
-                    .evaluate_pcp_maintenance(PcpMaintenanceModelRequest {
-                        request: &request,
-                        compute: &compute,
-                        profile: &profile,
-                        input_events,
-                        events: events_tx,
-                    })
-                    .await;
-                drop(client);
-                event_drain
-                    .await
-                    .context("join PCP maintenance event drain")?;
-                let outcome = match outcome {
-                    Ok(outcome) => outcome,
-                    Err(error) => {
-                        self.store.fail_run(&run_id, &error.to_string()).await?;
-                        return Err(error);
-                    }
-                };
-                invocations.extend(outcome.invocations);
-                (outcome.response, invocations, outcome.interrupted)
+                let interrupted = input_events.has_changed().unwrap_or(true);
+                (
+                    MaintenanceWorkerResponse::Defer {
+                        reason: Some(if interrupted {
+                            "superseded by newer user input".to_owned()
+                        } else {
+                            "semantic worker temporarily unavailable".to_owned()
+                        }),
+                    },
+                    invocations,
+                    interrupted,
+                )
             }
         };
         self.dependencies.usage.record_all(&invocations).await?;

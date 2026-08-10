@@ -1573,50 +1573,181 @@ html[data-native-shell="macos"] .topbar {
 .composer .temporary-discussion-toggle {
   width: 30px;
   height: 30px;
+  padding: 0;
+  display: inline-grid;
+  place-items: center;
   border-radius: 50%;
+  color: var(--text-soft);
+  line-height: 0;
 }
 
+.composer .temporary-discussion-toggle:hover,
 .composer .temporary-discussion-toggle.active {
+  color: var(--text);
+  background: color-mix(in srgb, var(--surface-subtle) 76%, var(--surface));
+}
+
+.composer .temporary-discussion-toggle .temporary-discussion-icon {
+  width: 20px;
+  height: 20px;
+  overflow: visible;
+  fill: none;
+  stroke: currentColor;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+  stroke-width: 1.35;
+  transform: translateY(0.55px);
+}
+
+.temporary-discussion-icon-branch {
+  transition: fill 140ms ease, stroke-width 140ms ease;
+}
+
+.temporary-discussion-toggle.active .temporary-discussion-icon-branch {
+  fill: currentColor;
+  stroke-width: 1.15;
+}
+
+.temporary-discussion-layer {
+  position: fixed;
+  z-index: 28;
+  inset: 0;
+}
+
+.temporary-discussion-layer[hidden] {
+  display: none;
+}
+
+.temporary-discussion-backdrop {
+  position: absolute;
+  inset: 0;
+  border: 0;
+  border-radius: 0;
+  background: rgb(18 18 18 / 22%);
+  backdrop-filter: saturate(80%) blur(1.5px);
+  cursor: default;
+}
+
+.temporary-discussion-panel {
+  width: min(560px, calc(100vw - 24px));
+  height: 100dvh;
+  position: absolute;
+  top: 0;
+  right: max(0px, calc((100vw - 900px) / 2));
+  display: grid;
+  grid-template-rows: auto minmax(0, 1fr) auto;
+  overflow: hidden;
+  border-left: 1px solid var(--border-strong);
+  background: color-mix(in srgb, var(--surface) 96%, #eeeaf4);
+  box-shadow: -18px 0 48px rgb(0 0 0 / 15%);
+  animation: temporary-discussion-enter 180ms ease-out;
+}
+
+.temporary-discussion-header {
+  min-height: 92px;
+  padding: 17px 18px 15px 20px;
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 18px;
+  border-bottom: 1px solid var(--border);
+  background: color-mix(in srgb, var(--surface) 92%, transparent);
+}
+
+.temporary-discussion-header > div {
+  min-width: 0;
+}
+
+.temporary-discussion-header span {
+  display: block;
+  margin-bottom: 4px;
+  color: var(--text-faint);
+  font-size: 9px;
+  font-weight: 650;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
+.temporary-discussion-header h2 {
+  margin: 0;
+  color: var(--text);
+  font-size: 17px;
+  font-weight: 700;
+}
+
+.temporary-discussion-header p {
+  max-width: 420px;
+  margin: 5px 0 0;
+  color: var(--text-soft);
+  font-size: 10px;
+  line-height: 1.45;
+}
+
+.temporary-discussion-close {
+  width: 30px;
+  height: 30px;
+  padding: 0;
+  flex: 0 0 auto;
+  border: 0;
+  border-radius: 50%;
+  color: var(--text-soft);
+  background: transparent;
+  cursor: pointer;
+  font-size: 20px;
+  font-weight: 350;
+}
+
+.temporary-discussion-close:hover {
   color: var(--text);
   background: var(--surface-subtle);
 }
 
-.temporary-discussion-mark {
-  font-size: 18px;
-  font-weight: 650;
-  line-height: 0.7;
-  transform: translateY(-2px);
+.temporary-discussion-conversation {
+  min-height: 0;
+  overflow-y: auto;
+  padding: 22px 16px 28px;
+  scroll-behavior: smooth;
 }
 
-.temporary-discussion-banner {
-  min-height: 28px;
-  padding: 6px 8px 0;
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 12px;
+.temporary-discussion-empty {
+  min-height: 100%;
+  display: grid;
+  place-content: center;
+  gap: 7px;
+  padding: 28px;
   color: var(--text-soft);
-  font-size: 10px;
+  text-align: center;
 }
 
-.temporary-discussion-banner[hidden] {
+.temporary-discussion-empty[hidden] {
   display: none;
 }
 
-.temporary-discussion-banner strong {
+.temporary-discussion-empty strong {
   color: var(--text);
+  font-size: 13px;
   font-weight: 650;
 }
 
-.composer .temporary-discussion-banner button {
-  width: auto;
-  height: 24px;
-  padding: 0 7px;
-  border: 0;
-  color: var(--text-soft);
-  background: transparent;
+.temporary-discussion-empty p {
+  max-width: 330px;
+  margin: 0;
   font-size: 10px;
-  font-weight: 550;
+  line-height: 1.55;
+}
+
+.temporary-discussion-conversation .message {
+  width: 100%;
+  margin-bottom: 15px;
+}
+
+.temporary-discussion-conversation .message-avatar {
+  width: 32px;
+  height: 32px;
+}
+
+.temporary-discussion-conversation .message-body {
+  font-size: 12px;
 }
 
 .temporary-discussion-message .message-content {
@@ -1625,6 +1756,101 @@ html[data-native-shell="macos"] .topbar {
 
 .temporary-discussion-message .message-runtime {
   color: var(--text-faint);
+}
+
+.temporary-discussion-composer {
+  padding: 12px 14px calc(14px + env(safe-area-inset-bottom));
+  border-top: 1px solid var(--border);
+  background: color-mix(in srgb, var(--surface) 96%, transparent);
+}
+
+.temporary-discussion-composer-field {
+  padding: 10px 10px 7px 12px;
+  border: 1px solid var(--border-strong);
+  border-radius: 16px;
+  background: var(--surface-raised);
+  box-shadow: 0 4px 16px rgb(0 0 0 / 5%);
+}
+
+.temporary-discussion-composer textarea {
+  width: 100%;
+  min-height: 46px;
+  max-height: 180px;
+  padding: 0;
+  resize: none;
+  overflow-y: auto;
+  border: 0;
+  outline: 0;
+  color: var(--text);
+  background: transparent;
+  font: inherit;
+  font-size: 13px;
+  line-height: 1.5;
+}
+
+.temporary-discussion-composer footer {
+  min-height: 32px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+}
+
+.temporary-discussion-composer footer > span {
+  min-width: 0;
+  overflow: hidden;
+  color: var(--text-faint);
+  font-size: 9px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.temporary-discussion-composer footer > div {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.temporary-discussion-send,
+.temporary-discussion-stop {
+  width: 30px;
+  height: 30px;
+  padding: 0;
+  display: grid;
+  place-items: center;
+  border: 0;
+  border-radius: 50%;
+  cursor: pointer;
+  line-height: 1;
+}
+
+.temporary-discussion-send {
+  color: var(--button-text);
+  background: var(--button);
+  font-size: 18px;
+}
+
+.temporary-discussion-stop {
+  color: var(--text);
+  background: var(--surface-subtle);
+  font-size: 10px;
+}
+
+.temporary-discussion-send:disabled,
+.temporary-discussion-stop:disabled {
+  cursor: default;
+  opacity: 0.42;
+}
+
+@keyframes temporary-discussion-enter {
+  from {
+    opacity: 0;
+    transform: translateX(20px);
+  }
+  to {
+    opacity: 1;
+    transform: translateX(0);
+  }
 }
 
 .temporary-discussion-dialog {
@@ -4940,6 +5166,29 @@ button:disabled {
 }
 
 @media (max-width: 640px) {
+  .temporary-discussion-panel {
+    width: 100%;
+    right: 0;
+    border-left: 0;
+  }
+
+  .temporary-discussion-backdrop {
+    display: none;
+  }
+
+  .temporary-discussion-header {
+    min-height: 84px;
+    padding: 14px 14px 13px 16px;
+  }
+
+  .temporary-discussion-conversation {
+    padding: 18px 10px 24px;
+  }
+
+  .temporary-discussion-composer {
+    padding-inline: 10px;
+  }
+
   .input-role-settings-row {
     grid-template-columns: 46px minmax(0, 1fr);
   }
@@ -5166,6 +5415,10 @@ button:disabled {
 }
 
 @media (prefers-reduced-motion: reduce) {
+  .temporary-discussion-panel {
+    animation: none;
+  }
+
   .conversation {
     scroll-behavior: auto;
   }

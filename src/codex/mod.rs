@@ -13,8 +13,8 @@ mod trace;
 
 pub(crate) use client::is_recoverable_connection_error;
 pub use client::{
-    ChatInput, ChatOutcome, CodexClient, CodexConfig, GeneratedImageOutput,
-    PcpMaintenanceModelRequest, RateLimitInfo, ReconciliationModelRequest, RuntimeEvent,
+    ChatInput, ChatOutcome, CodexClient, CodexConfig, GeneratedImageOutput, RateLimitInfo,
+    ReconciliationModelRequest, RuntimeEvent,
 };
 pub use images::import_generated_images;
 pub use interaction_output::ChatDisposition;

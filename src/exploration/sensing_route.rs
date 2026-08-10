@@ -8,8 +8,21 @@ use serde_json::json;
 use crate::{
     inference::{SensingReviewDecision, SensingReviewDisposition},
     sensing::{InputRoleSnapshot, SensingCandidate, SensingCandidateDraft, SensingPresentation},
-    usage::InvocationRecord,
+    usage::{InvocationRecord, ToolTraceStep},
 };
+
+const ROUTE_SENSING_CANDIDATES_TRACE: &str = "route_sensing_candidates";
+
+#[derive(Clone, Copy, Debug, Default)]
+pub(super) struct SensingDeliveryMetrics {
+    pub reviewed_candidate_count: usize,
+    pub input_count: usize,
+    pub deep_count: usize,
+    pub discard_count: usize,
+    pub published_input_count: usize,
+    pub suppressed_input_count: usize,
+    pub deferred_candidate_count: usize,
+}
 
 pub(super) fn link_sensing_invocations(
     invocations: &mut [InvocationRecord],
@@ -28,9 +41,7 @@ pub(super) fn link_sensing_invocations(
 
 pub(super) fn annotate_sensing_delivery(
     invocations: &mut [InvocationRecord],
-    published_input_count: usize,
-    suppressed_input_count: usize,
-    deferred_candidate_count: usize,
+    metrics: SensingDeliveryMetrics,
 ) {
     for invocation in invocations.iter_mut().rev() {
         if let Some(step) = invocation.trace_steps.iter_mut().rev().find(|step| {
@@ -41,14 +52,46 @@ pub(super) fn annotate_sensing_delivery(
             step.result = json!({
                 "accepted": true,
                 "hostRouting": {
-                    "publishedInputCount": published_input_count,
-                    "suppressedInputCount": suppressed_input_count,
-                    "deferredCandidateCount": deferred_candidate_count,
+                    "publishedInputCount": metrics.published_input_count,
+                    "suppressedInputCount": metrics.suppressed_input_count,
+                    "deferredCandidateCount": metrics.deferred_candidate_count,
                 }
             });
-            break;
+            return;
         }
     }
+
+    let Some(invocation) = invocations.last_mut() else {
+        return;
+    };
+    let sequence = invocation
+        .trace_steps
+        .last()
+        .map(|step| step.sequence.saturating_add(1))
+        .unwrap_or_default();
+    invocation.trace_steps.push(ToolTraceStep {
+        sequence,
+        namespace: "symbiont".to_owned(),
+        tool: ROUTE_SENSING_CANDIDATES_TRACE.to_owned(),
+        started_at: invocation.completed_at.clone(),
+        completed_at: invocation.completed_at.clone(),
+        duration_ms: 0,
+        succeeded: true,
+        arguments: json!({
+            "reviewedCandidateCount": metrics.reviewed_candidate_count,
+            "inputCount": metrics.input_count,
+            "deepCount": metrics.deep_count,
+            "discardCount": metrics.discard_count,
+        }),
+        result: json!({
+            "accepted": true,
+            "hostRouting": {
+                "publishedInputCount": metrics.published_input_count,
+                "suppressedInputCount": metrics.suppressed_input_count,
+                "deferredCandidateCount": metrics.deferred_candidate_count,
+            }
+        }),
+    });
 }
 
 pub(super) fn prioritize_candidate_batches(
@@ -291,7 +334,18 @@ mod tests {
 
         let mut review = vec![sensing_invocation("review", None, true)];
         link_sensing_invocations(&mut review, Some(&root));
-        annotate_sensing_delivery(&mut review, 2, 1, 1);
+        annotate_sensing_delivery(
+            &mut review,
+            SensingDeliveryMetrics {
+                reviewed_candidate_count: 4,
+                input_count: 3,
+                deep_count: 0,
+                discard_count: 1,
+                published_input_count: 2,
+                suppressed_input_count: 1,
+                deferred_candidate_count: 1,
+            },
+        );
 
         assert_eq!(review[0].parent_id.as_deref(), Some("root"));
         assert_eq!(
@@ -301,6 +355,30 @@ mod tests {
                 .and_then(serde_json::Value::as_u64),
             Some(2)
         );
+    }
+
+    #[test]
+    fn infer_runtime_review_gets_a_host_routing_trace() {
+        let mut review = vec![sensing_invocation("review", None, false)];
+        review[0].origin = "ambient_review".to_owned();
+
+        annotate_sensing_delivery(
+            &mut review,
+            SensingDeliveryMetrics {
+                reviewed_candidate_count: 3,
+                input_count: 1,
+                deep_count: 1,
+                discard_count: 1,
+                published_input_count: 1,
+                ..SensingDeliveryMetrics::default()
+            },
+        );
+
+        let step = &review[0].trace_steps[0];
+        assert_eq!(step.tool, ROUTE_SENSING_CANDIDATES_TRACE);
+        assert_eq!(step.arguments["reviewedCandidateCount"], 3);
+        assert_eq!(step.arguments["deepCount"], 1);
+        assert_eq!(step.result["hostRouting"]["publishedInputCount"], 1);
     }
 
     fn sensing_invocation(id: &str, parent_id: Option<&str>, review: bool) -> InvocationRecord {

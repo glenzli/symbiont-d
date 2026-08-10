@@ -558,48 +558,6 @@ impl SymbiontTools {
                     },
                     {
                         "type": "function",
-                        "name": "review_sensing_candidates",
-                        "description": "During ambient sensing review only, route each supplied transient candidate to discard, attributed external input, or exceptional deep Symbiont investigation. This does not itself publish a message or write durable state.",
-                        "inputSchema": {
-                            "type": "object",
-                            "properties": {
-                                "decisions": {
-                                    "type": "array",
-                                    "minItems": 1,
-                                    "maxItems": 3,
-                                    "items": {
-                                        "type": "object",
-                                        "properties": {
-                                            "candidate_id": {"type": "string", "maxLength": 160},
-                                            "disposition": {"type": "string", "enum": ["discard", "input", "deep"]},
-                                            "reason": {"type": "string", "maxLength": 800},
-                                            "presentation": {
-                                                "type": "string",
-                                                "enum": ["original", "condensed"],
-                                                "description": "For input routes, preserve the received text by default. Use condensed only for a concrete structural or length reason."
-                                            },
-                                            "display_text": {
-                                                "type": "string",
-                                                "maxLength": 1800,
-                                                "description": "Required only for a condensed input presentation; it remains attributed to the external role."
-                                            },
-                                            "qualification_note": {
-                                                "type": "string",
-                                                "maxLength": 800,
-                                                "description": "Optional short sourcing or confidence caveat displayed separately from the received message."
-                                            }
-                                        },
-                                        "required": ["candidate_id", "disposition", "reason"],
-                                        "additionalProperties": false
-                                    }
-                                }
-                            },
-                            "required": ["decisions"],
-                            "additionalProperties": false
-                        }
-                    },
-                    {
-                        "type": "function",
                         "name": PROPOSE_OUTREACH_TOOL,
                         "description": "During background Reflection or autonomous exploration, propose at most one exact user-visible message. Use `intervention` only when the user should see it now because it changes a live decision, risk, timing, or shared question. Use `note` for a credible development that genuinely connects to the user's long-term work but does not require action. Use `discussion` for a recent external development worth thinking about together even if the user may already know it and no durable connection should be invented. This is a candidate, not guaranteed delivery. Never report internal work or pretend it continues an unrelated exchange.",
                         "inputSchema": {
@@ -1111,35 +1069,6 @@ impl SymbiontTools {
         specifications
     }
 
-    pub(super) fn sensing_review_specifications() -> Value {
-        let mut specifications = Self::specifications();
-        let Some(namespaces) = specifications.as_array_mut() else {
-            return specifications;
-        };
-        for namespace in namespaces {
-            let allowed = match namespace.get("name").and_then(Value::as_str) {
-                Some("symbiont") => &["review_sensing_candidates"][..],
-                _ => &[][..],
-            };
-            if let Some(tools) = namespace.get_mut("tools").and_then(Value::as_array_mut) {
-                tools.retain(|tool| {
-                    tool.get("name")
-                        .and_then(Value::as_str)
-                        .is_some_and(|name| allowed.contains(&name))
-                });
-            }
-        }
-        if let Some(namespaces) = specifications.as_array_mut() {
-            namespaces.retain(|namespace| {
-                namespace
-                    .get("tools")
-                    .and_then(Value::as_array)
-                    .is_some_and(|tools| !tools.is_empty())
-            });
-        }
-        specifications
-    }
-
     pub(super) fn sensing_specifications() -> Value {
         let mut specifications = Self::specifications();
         let Some(namespaces) = specifications.as_array_mut() else {
@@ -1167,52 +1096,6 @@ impl SymbiontTools {
             });
         }
         specifications
-    }
-
-    pub(super) fn pcp_maintenance_specifications() -> Value {
-        json!([{
-            "type": "namespace",
-            "name": "symbiont",
-            "description": "A narrow completion boundary for PCP Runtime semantic maintenance.",
-            "tools": [{
-                "type": "function",
-                "name": "complete_pcp_maintenance",
-                "description": "Return exactly one semantic maintenance decision. This tool records a proposal and cannot mutate PCP.",
-                "inputSchema": {
-                    "type": "object",
-                    "properties": {
-                        "decision": {
-                            "type": "string",
-                            "enum": ["write_summary", "candidate", "consolidate", "retain", "keep_separate", "no_candidate", "defer"]
-                        },
-                        "content": {"type": "string"},
-                        "page_ids": {
-                            "type": "array",
-                            "items": {"type": "string"},
-                            "maxItems": 64
-                        },
-                        "canonical_page_id": {"type": "string"},
-                        "milestones": {
-                            "type": "array",
-                            "items": {
-                                "type": "object",
-                                "properties": {
-                                    "revision_id": {"type": "string"},
-                                    "reason": {"type": "string"}
-                                },
-                                "required": ["revision_id", "reason"],
-                                "additionalProperties": false
-                            },
-                            "maxItems": 64
-                        },
-                        "rationale": {"type": "string"},
-                        "reason": {"type": "string"}
-                    },
-                    "required": ["decision"],
-                    "additionalProperties": false
-                }
-            }]
-        }])
     }
 
     #[cfg(test)]
@@ -1283,9 +1166,6 @@ impl SymbiontTools {
         arguments: &Value,
         run_origin: &str,
     ) -> Result<(String, Option<EscalationRequest>)> {
-        if run_origin == "pcp_maintenance" && tool != "complete_pcp_maintenance" {
-            anyhow::bail!("{tool} is outside the PCP semantic maintenance boundary");
-        }
         if run_origin.starts_with("reconciliation_") && tool != "complete_reconciliation" {
             anyhow::bail!("{tool} is outside the dedicated durable-memory reconciliation boundary");
         }
@@ -1296,9 +1176,6 @@ impl SymbiontTools {
             && tool != "submit_sensing_candidates"
         {
             anyhow::bail!("{tool} is outside the ambient sensing intake boundary");
-        }
-        if run_origin == "ambient_review" && tool != "review_sensing_candidates" {
-            anyhow::bail!("{tool} is outside the ambient sensing review boundary");
         }
         match tool {
             "complete_orientation" => {
@@ -1757,65 +1634,6 @@ impl SymbiontTools {
                     None,
                 ))
             }
-            "review_sensing_candidates" => {
-                if run_origin != "ambient_review" {
-                    anyhow::bail!("review_sensing_candidates is available only to ambient review");
-                }
-                let decisions = arguments
-                    .get("decisions")
-                    .and_then(Value::as_array)
-                    .context("review_sensing_candidates requires decisions")?;
-                if decisions.is_empty() || decisions.len() > 3 {
-                    anyhow::bail!("ambient sensing review accepts one to three decisions");
-                }
-                let mut ids = std::collections::HashSet::new();
-                for decision in decisions {
-                    let candidate_id = required_text(decision, "candidate_id")?;
-                    if candidate_id.chars().count() > 160 || !ids.insert(candidate_id) {
-                        anyhow::bail!("ambient sensing review contains an invalid candidate_id");
-                    }
-                    if !matches!(
-                        required_text(decision, "disposition")?,
-                        "discard" | "input" | "deep"
-                    ) {
-                        anyhow::bail!("ambient sensing review has an unknown disposition");
-                    }
-                    if required_text(decision, "reason")?.chars().count() > 800 {
-                        anyhow::bail!("ambient sensing review reason exceeds 800 characters");
-                    }
-                    if optional_text(decision, "display_text")
-                        .is_some_and(|value| value.chars().count() > 1_800)
-                    {
-                        anyhow::bail!(
-                            "ambient sensing review display_text exceeds 1800 characters"
-                        );
-                    }
-                    if optional_text(decision, "qualification_note")
-                        .is_some_and(|value| value.chars().count() > 800)
-                    {
-                        anyhow::bail!(
-                            "ambient sensing review qualification_note exceeds 800 characters"
-                        );
-                    }
-                    if let Some(presentation) = optional_text(decision, "presentation")
-                        && !matches!(presentation, "original" | "condensed")
-                    {
-                        anyhow::bail!("ambient sensing review presentation is unknown");
-                    }
-                    if optional_text(decision, "presentation") == Some("condensed")
-                        && optional_text(decision, "display_text").is_none()
-                    {
-                        anyhow::bail!("condensed ambient input requires display_text");
-                    }
-                }
-                Ok((
-                    serde_json::to_string(&json!({
-                        "accepted": true,
-                        "decisionCount": decisions.len()
-                    }))?,
-                    None,
-                ))
-            }
             PROPOSE_OUTREACH_TOOL => {
                 require_proactive_origin(run_origin, tool)?;
                 let source_revision_ids = string_array(arguments, "source_revision_ids")?;
@@ -1896,18 +1714,6 @@ impl SymbiontTools {
                     }))?,
                     None,
                 ))
-            }
-            "complete_pcp_maintenance" => {
-                if run_origin != "pcp_maintenance" {
-                    anyhow::bail!(
-                        "complete_pcp_maintenance is available only to PCP Runtime maintenance"
-                    );
-                }
-                let response = serde_json::from_value::<pcp_runtime::MaintenanceWorkerResponse>(
-                    arguments.clone(),
-                )
-                .context("invalid PCP maintenance decision")?;
-                Ok((serde_json::to_string(&response)?, None))
             }
             "fetch_url" => {
                 let fetcher = self

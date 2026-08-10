@@ -39,6 +39,7 @@ impl LunaInput {
         let result = client
             .sense_luna(
                 &config.focus,
+                config.output_language.prompt_instruction(),
                 sensing_context,
                 compute,
                 profile,

@@ -31,23 +31,7 @@ pub(super) struct SensingReviewEnvelope {
     pub decisions: Vec<SensingReviewDecision>,
 }
 
-pub(crate) fn codex_prompt(candidates: &[SensingCandidate], silent_marker: &str) -> Result<String> {
-    prompt(
-        candidates,
-        &format!(
-            "Call `symbiont.review_sensing_candidates` exactly once. After the tool call, return exactly\n`{silent_marker}`."
-        ),
-    )
-}
-
 pub(super) fn runtime_prompt(candidates: &[SensingCandidate]) -> Result<String> {
-    prompt(
-        candidates,
-        "Return exactly one JSON object and no Markdown or commentary. Its only top-level field is `decisions`, whose value is an array using the fields `candidate_id`, `disposition`, `reason`, and optional `presentation`, `display_text`, and `qualification_note`. Return exactly one decision for every supplied candidate.",
-    )
-}
-
-fn prompt(candidates: &[SensingCandidate], completion: &str) -> Result<String> {
     let candidates = serde_json::to_string_pretty(candidates)
         .context("encode ambient sensing review candidates")?;
     Ok(format!(
@@ -73,7 +57,9 @@ framing. In that case provide a self-contained `display_text` and state the conc
 reason in `reason`; never condense merely to make the prose sound more polished. If the packet needs
 a sourcing or confidence caveat, put that short caveat in `qualification_note` rather than replacing
 the received message. This is qualification, not verification: do not add facts or say you checked a
-link.
+link. Any generated `display_text` and `qualification_note` must use the same language as that
+candidate's `received_text`; never switch an input role's language during review. The internal
+`reason` may be concise English.
 Reserve `deep` for value, not for ordinary source cleanup. Do not infer that the user is unaware of
 an event.
 
@@ -86,7 +72,10 @@ neighboring digest item must not poison another candidate. `display_text`, when 
 the external input role rather than symbiont-d's voice. The candidate pool is not memory
 and this review must not write PCP, Hunches, profile, or other state.
 
-{completion}
+Return exactly one JSON object and no Markdown or commentary. Its only top-level field is
+`decisions`, whose value is an array using the fields `candidate_id`, `disposition`, `reason`, and
+optional `presentation`, `display_text`, and `qualification_note`. Return exactly one decision for
+every supplied candidate.
 
 <ambient-candidates>
 {candidates}
@@ -181,5 +170,13 @@ mod tests {
             },
         ];
         assert!(validate_decisions(&candidates, &decisions).is_err());
+    }
+
+    #[test]
+    fn review_prompt_preserves_each_candidate_language() {
+        let prompt = runtime_prompt(&[candidate("one")]).unwrap();
+        assert!(prompt.contains("must use the same language as that"));
+        assert!(prompt.contains("candidate's `received_text`"));
+        assert!(prompt.contains("never switch an input role's language"));
     }
 }

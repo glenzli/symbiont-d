@@ -54,8 +54,8 @@ use crate::{
 };
 
 use self::sensing_route::{
-    annotate_sensing_delivery, link_sensing_invocations, plan_sensing_routes,
-    prioritize_candidate_batches,
+    SensingDeliveryMetrics, annotate_sensing_delivery, link_sensing_invocations,
+    plan_sensing_routes, prioritize_candidate_batches,
 };
 
 const POLICY_REFRESH: Duration = Duration::from_secs(30);
@@ -1140,70 +1140,32 @@ async fn run_once(
         }
 
         if !reviewed_candidates.is_empty() {
-            let (decisions, mut review_invocations, review_interrupted) = match inference
-                .review_sensing(&reviewed_candidates, input_events.clone())
-                .await
-            {
-                InferenceAttempt::Completed(outcome) => {
-                    (outcome.value, outcome.invocations, outcome.interrupted)
-                }
-                InferenceAttempt::Fallback {
-                    reason,
-                    mut invocations,
-                } => {
-                    tracing::warn!(
-                        target: crate::runtime_log::TARGET,
-                        event = "generic_inference_fallback",
-                        task = "ambient_review",
+            let (decisions, mut review_invocations, review_interrupted, review_deferred_reason) =
+                match inference
+                    .review_sensing(&reviewed_candidates, input_events.clone())
+                    .await
+                {
+                    InferenceAttempt::Completed(outcome) => (
+                        outcome.value,
+                        outcome.invocations,
+                        outcome.interrupted,
+                        None,
+                    ),
+                    InferenceAttempt::Deferred {
                         reason,
-                        "ambient review fell back to the Codex-native executor"
-                    );
-                    if input_events.has_changed().unwrap_or(true) {
-                        (Vec::new(), invocations, true)
-                    } else {
-                        let Ok(mut client) = codex.try_lock() else {
-                            let _ = link_sensing_invocations(
-                                &mut invocations,
-                                sensing_trace_id.as_deref(),
-                            );
-                            usage.record_all(&invocations).await?;
-                            stop_activity_relay(runtime_tx, activity_task).await?;
-                            settle_sensing_only(
-                                &state,
-                                &manual_runs,
-                                &attempts,
-                                trigger.as_ref(),
-                                ExplorationIntentStatus::Superseded,
-                                "superseded",
-                                pending_candidate_count,
-                                Some("codex_busy"),
-                                !invocations.is_empty(),
-                            )
-                            .await?;
-                            return Ok(ExplorationRunCompletion::superseded("codex_busy"));
-                        };
-                        let review = client
-                            .review_sensing(
-                                &reviewed_candidates,
-                                &compute,
-                                &profile,
-                                input_events.clone(),
-                                runtime_tx.clone(),
-                            )
-                            .await;
-                        drop(client);
-                        let review = match review {
-                            Ok(outcome) => outcome,
-                            Err(error) => {
-                                stop_activity_relay(runtime_tx, activity_task).await?;
-                                return Err(error);
-                            }
-                        };
-                        invocations.extend(review.invocations);
-                        (review.decisions, invocations, review.interrupted)
+                        invocations,
+                    } => {
+                        tracing::warn!(
+                            target: crate::runtime_log::TARGET,
+                            event = "generic_inference_deferred",
+                            task = "ambient_review",
+                            reason,
+                            "ambient review was deferred for a later intake cycle"
+                        );
+                        let interrupted = input_events.has_changed().unwrap_or(true);
+                        (Vec::new(), invocations, interrupted, Some(reason))
                     }
-                }
-            };
+                };
             sensing_trace_id =
                 link_sensing_invocations(&mut review_invocations, sensing_trace_id.as_deref());
             if let Err(error) = usage.record_all(&review_invocations).await {
@@ -1228,6 +1190,17 @@ async fn run_once(
             }
 
             let route_plan = plan_sensing_routes(&reviewed_candidates, decisions);
+            let review_metrics = SensingDeliveryMetrics {
+                reviewed_candidate_count: reviewed_candidates.len(),
+                input_count: route_plan.inputs.len(),
+                deep_count: route_plan.deep_candidates.len(),
+                discard_count: route_plan
+                    .terminal_ids
+                    .len()
+                    .saturating_sub(route_plan.inputs.len()),
+                deferred_candidate_count: route_plan.deferred_ids.len(),
+                ..SensingDeliveryMetrics::default()
+            };
             let mut suppressed_input_count = 0usize;
             for input in route_plan.inputs {
                 match signals
@@ -1246,13 +1219,17 @@ async fn run_once(
                     }
                 }
             }
-            annotate_sensing_delivery(
-                &mut review_invocations,
-                published_input_count,
-                suppressed_input_count,
-                route_plan.deferred_ids.len(),
-            );
-            usage.record_all(&review_invocations).await?;
+            if review_deferred_reason.is_none() {
+                annotate_sensing_delivery(
+                    &mut review_invocations,
+                    SensingDeliveryMetrics {
+                        published_input_count,
+                        suppressed_input_count,
+                        ..review_metrics
+                    },
+                );
+                usage.record_all(&review_invocations).await?;
+            }
             sensing
                 .settle_review(&route_plan.terminal_ids, &route_plan.deferred_ids)
                 .await?;
@@ -1263,6 +1240,14 @@ async fn run_once(
                 .collect();
             if reviewed_candidates.is_empty() && (scheduled || published_input_count > 0) {
                 let pending_candidate_count = sensing.count().await?;
+                let review_deferred = review_deferred_reason.is_some();
+                let outcome = if review_deferred {
+                    "ambient_review_deferred"
+                } else if published_input_count > 0 {
+                    "input_signals_published"
+                } else {
+                    "reviewed_silent"
+                };
                 stop_activity_relay(runtime_tx, activity_task).await?;
                 settle_sensing_only(
                     &state,
@@ -1270,13 +1255,9 @@ async fn run_once(
                     &attempts,
                     trigger.as_ref(),
                     ExplorationIntentStatus::Silent,
-                    if published_input_count > 0 {
-                        "input_signals_published"
-                    } else {
-                        "reviewed_silent"
-                    },
+                    outcome,
                     pending_candidate_count,
-                    None,
+                    review_deferred.then_some("infer_runtime_unavailable"),
                     true,
                 )
                 .await?;
@@ -1284,9 +1265,9 @@ async fn run_once(
                     status: ExplorationIntentStatus::Silent,
                     trace_id: sensing_trace_id,
                     result_revision_id: None,
-                    retry_reason: None,
+                    retry_reason: review_deferred.then(|| "infer_runtime_unavailable".to_owned()),
                     attempted_at: Utc::now(),
-                    completed: true,
+                    completed: !review_deferred,
                 });
             }
         }

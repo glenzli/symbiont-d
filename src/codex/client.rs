@@ -22,17 +22,16 @@ use super::{
     approvals::{approval_response, automatic_server_request_response, permission_request},
     autonomous::{
         finding_from_invocations, luna_sensing_prompt, review_prompt, scout_prompt,
-        sensing_candidates_from_invocations, sensing_review_from_invocations,
+        sensing_candidates_from_invocations,
     },
     interaction_output::{
         ChatDisposition, InteractiveDeltaGate, interaction_disposition_prompt,
         interpret_interactive_output,
     },
     prompts::{
-        additional_context_value, ambient_review_developer_instructions, context_fragments,
-        context_maintenance_prompt, developer_instructions, interaction_reflection_prompt,
-        luna_sensing_developer_instructions, memory_reconciliation_prompt, profile_review_prompt,
-        summary_maintenance_prompt,
+        additional_context_value, context_fragments, context_maintenance_prompt,
+        developer_instructions, interaction_reflection_prompt, luna_sensing_developer_instructions,
+        memory_reconciliation_prompt, profile_review_prompt, summary_maintenance_prompt,
     },
     tool_dedup::{ToolCallPlan, TurnToolDeduplicator},
     tools::{EscalationRequest, SymbiontTools, tool_result},
@@ -49,9 +48,6 @@ use crate::{
         ContextFragment, ContextSnapshot, ExecutionTraceEvent, NativeThreadSnapshot, TraceEventKind,
     },
     exploration::ExplorationIntentQueue,
-    inference::{
-        PCP_CODEX_INSTRUCTIONS, SensingReviewDecision, pcp_codex_prompt, sensing_codex_prompt,
-    },
     memory::{MessageMetadata, MessageRunMetadata},
     outreach::{OutreachCandidate, PROPOSE_OUTREACH_TOOL},
     permission::PermissionBroker,
@@ -76,7 +72,6 @@ const CONTEXT_MAINTENANCE_COMPLETE_MARKER: &str = "<symbiont-context-maintained/
 const PROFILE_REVIEW_COMPLETE_MARKER: &str = "<symbiont-profile-reviewed/>";
 const REFLECTION_COMPLETE_MARKER: &str = "<symbiont-reflected/>";
 const RECONCILIATION_COMPLETE_MARKER: &str = "<symbiont-reconciled/>";
-const PCP_MAINTENANCE_COMPLETE_MARKER: &str = "<symbiont-pcp-maintained/>";
 const CONTINUATION_SILENT_MARKER: &str = "<symbiont-no-continuation/>";
 // Starting an app-server includes initializing account state and Symbiont's
 // isolated native threads. A cold desktop reconnect can take longer than a
@@ -165,12 +160,6 @@ pub struct ExplorationOutcome {
     pub interrupted: bool,
 }
 
-pub struct SensingReviewOutcome {
-    pub decisions: Vec<SensingReviewDecision>,
-    pub invocations: Vec<InvocationRecord>,
-    pub interrupted: bool,
-}
-
 pub struct LunaSensingOutcome {
     pub candidates: Vec<SensingCandidateDraft>,
     pub invocations: Vec<InvocationRecord>,
@@ -237,20 +226,6 @@ pub struct ReconciliationModelRequest<'a> {
     pub events: mpsc::Sender<RuntimeEvent>,
 }
 
-pub struct PcpMaintenanceModelRequest<'a> {
-    pub request: &'a pcp_runtime::MaintenanceWorkerRequest,
-    pub compute: &'a ComputeConfig,
-    pub profile: &'a ProfileSnapshot,
-    pub input_events: watch::Receiver<u64>,
-    pub events: mpsc::Sender<RuntimeEvent>,
-}
-
-pub struct PcpMaintenanceModelOutcome {
-    pub response: pcp_runtime::MaintenanceWorkerResponse,
-    pub invocations: Vec<InvocationRecord>,
-    pub interrupted: bool,
-}
-
 #[derive(Clone, Debug, Default)]
 struct TokenBreakdown {
     input_tokens: u64,
@@ -276,20 +251,16 @@ struct TurnOverrides {
 #[derive(Clone, Copy)]
 enum BackgroundThread {
     LunaSensing,
-    AmbientReview,
     AutonomousScout,
     AutonomousReview,
     Maintenance,
-    PcpMaintenance,
 }
 
 #[derive(Clone, Copy)]
 enum ToolSurface {
     Full,
     LunaSensing,
-    AmbientReview,
     AutonomousScout,
-    PcpMaintenance,
 }
 
 pub struct CodexClient {
@@ -300,12 +271,10 @@ pub struct CodexClient {
     stdout: Lines<BufReader<ChildStdout>>,
     next_id: u64,
     interactive_thread_id: String,
-    ambient_review_thread_id: String,
     luna_sensing_thread_id: String,
     autonomous_scout_thread_id: String,
     autonomous_review_thread_id: String,
     maintenance_thread_id: String,
-    pcp_maintenance_thread_id: String,
     workspace: PathBuf,
     continuity: Arc<ContinuityHost>,
     interactive_cursor: NativeThreadCursor,
@@ -442,11 +411,9 @@ impl CodexClient {
             next_id: 1,
             interactive_thread_id: String::new(),
             luna_sensing_thread_id: String::new(),
-            ambient_review_thread_id: String::new(),
             autonomous_scout_thread_id: String::new(),
             autonomous_review_thread_id: String::new(),
             maintenance_thread_id: String::new(),
-            pcp_maintenance_thread_id: String::new(),
             workspace: config.workspace.clone(),
             continuity: Arc::clone(&dependencies.continuity),
             interactive_cursor: NativeThreadCursor::new(),
@@ -476,9 +443,6 @@ impl CodexClient {
         client.interactive_thread_id = client
             .start_thread(&config.workspace, ToolSurface::Full)
             .await?;
-        client.ambient_review_thread_id = client
-            .start_thread(&config.workspace, ToolSurface::AmbientReview)
-            .await?;
         client.luna_sensing_thread_id = client
             .start_thread(&config.workspace, ToolSurface::LunaSensing)
             .await?;
@@ -490,9 +454,6 @@ impl CodexClient {
             .await?;
         client.maintenance_thread_id = client
             .start_thread(&config.workspace, ToolSurface::Full)
-            .await?;
-        client.pcp_maintenance_thread_id = client
-            .start_thread(&config.workspace, ToolSurface::PcpMaintenance)
             .await?;
         Ok(client)
     }
@@ -786,54 +747,10 @@ impl CodexClient {
         })
     }
 
-    pub async fn review_sensing(
-        &mut self,
-        candidates: &[crate::sensing::SensingCandidate],
-        compute: &ComputeConfig,
-        profile: &ProfileSnapshot,
-        input_events: watch::Receiver<u64>,
-        events: mpsc::Sender<RuntimeEvent>,
-    ) -> Result<SensingReviewOutcome> {
-        let thread_id = self.ambient_review_thread_id.clone();
-        let outcome = self
-            .run_request(
-                thread_id.clone(),
-                text_input_items(&sensing_codex_prompt(candidates, AUTONOMOUS_SILENT_MARKER)?),
-                ComputeLane::Conversation,
-                "ambient_review",
-                compute,
-                profile,
-                "",
-                None,
-                None,
-                false,
-                Some(input_events),
-                &events,
-            )
-            .await?;
-        if !outcome.interrupted {
-            self.renew_background_thread(&thread_id, BackgroundThread::AmbientReview)
-                .await;
-        }
-        let decisions = if outcome.interrupted {
-            Vec::new()
-        } else {
-            sensing_review_from_invocations(&outcome.invocations)?
-        };
-        let mut invocations = outcome.invocations;
-        for invocation in &mut invocations {
-            invocation.produced_message = false;
-        }
-        Ok(SensingReviewOutcome {
-            decisions,
-            invocations,
-            interrupted: outcome.interrupted,
-        })
-    }
-
     pub async fn sense_luna(
         &mut self,
         focus: &str,
+        output_language_instruction: &str,
         sensing_context: &str,
         compute: &ComputeConfig,
         profile: &ProfileSnapshot,
@@ -846,6 +763,7 @@ impl CodexClient {
                 thread_id.clone(),
                 text_input_items(&luna_sensing_prompt(
                     focus,
+                    output_language_instruction,
                     sensing_context,
                     AUTONOMOUS_SILENT_MARKER,
                 )),
@@ -1221,83 +1139,20 @@ impl CodexClient {
         })
     }
 
-    pub async fn evaluate_pcp_maintenance(
-        &mut self,
-        request: PcpMaintenanceModelRequest<'_>,
-    ) -> Result<PcpMaintenanceModelOutcome> {
-        let prompt = pcp_codex_prompt(request.request, PCP_MAINTENANCE_COMPLETE_MARKER)?;
-        let thread_id = self.pcp_maintenance_thread_id.clone();
-        let outcome = self
-            .run_request(
-                thread_id.clone(),
-                text_input_items(&prompt),
-                ComputeLane::Investigate,
-                "pcp_maintenance",
-                request.compute,
-                request.profile,
-                "",
-                None,
-                None,
-                false,
-                Some(request.input_events),
-                &request.events,
-            )
-            .await?;
-        if !outcome.interrupted {
-            self.renew_background_thread(&thread_id, BackgroundThread::PcpMaintenance)
-                .await;
-        }
-        let completion = outcome
-            .invocations
-            .iter()
-            .flat_map(|invocation| &invocation.trace_steps)
-            .rev()
-            .find(|step| {
-                step.succeeded
-                    && step.namespace == "symbiont"
-                    && step.tool == "complete_pcp_maintenance"
-            });
-        let response = if outcome.interrupted {
-            pcp_runtime::MaintenanceWorkerResponse::Defer {
-                reason: Some("superseded by newer user input".to_owned()),
-            }
-        } else {
-            completion
-                .map(|step| step.arguments.clone())
-                .map(serde_json::from_value::<pcp_runtime::MaintenanceWorkerResponse>)
-                .transpose()
-                .context("parse PCP semantic maintenance decision")?
-                .context("PCP semantic maintenance completed without a decision")?
-        };
-        let mut invocations = outcome.invocations;
-        for invocation in &mut invocations {
-            invocation.produced_message = false;
-        }
-        Ok(PcpMaintenanceModelOutcome {
-            response,
-            invocations,
-            interrupted: outcome.interrupted,
-        })
-    }
-
     async fn renew_background_thread(&mut self, previous: &str, slot: BackgroundThread) {
         let workspace = self.workspace.clone();
         let tool_surface = match slot {
             BackgroundThread::LunaSensing => ToolSurface::LunaSensing,
-            BackgroundThread::AmbientReview => ToolSurface::AmbientReview,
             BackgroundThread::AutonomousScout => ToolSurface::AutonomousScout,
             BackgroundThread::AutonomousReview | BackgroundThread::Maintenance => ToolSurface::Full,
-            BackgroundThread::PcpMaintenance => ToolSurface::PcpMaintenance,
         };
         match self.start_thread(&workspace, tool_surface).await {
             Ok(next) => {
                 match slot {
                     BackgroundThread::LunaSensing => self.luna_sensing_thread_id = next,
-                    BackgroundThread::AmbientReview => self.ambient_review_thread_id = next,
                     BackgroundThread::AutonomousScout => self.autonomous_scout_thread_id = next,
                     BackgroundThread::AutonomousReview => self.autonomous_review_thread_id = next,
                     BackgroundThread::Maintenance => self.maintenance_thread_id = next,
-                    BackgroundThread::PcpMaintenance => self.pcp_maintenance_thread_id = next,
                 }
                 self.clear_thread_state(previous);
             }
@@ -1557,8 +1412,7 @@ impl CodexClient {
             // message can interrupt their work immediately.
             (Vec::new(), false)
         };
-        let mut fragments = if matches!(origin, "pcp_maintenance" | "ambient_review" | "luna_sense")
-        {
+        let mut fragments = if origin == "luna_sense" {
             Vec::new()
         } else {
             context_fragments(
@@ -1582,8 +1436,6 @@ impl CodexClient {
             fragments: fragments.clone(),
             working_context: working_context.cloned(),
             developer_instructions: match origin {
-                "pcp_maintenance" => PCP_CODEX_INSTRUCTIONS.to_owned(),
-                "ambient_review" => ambient_review_developer_instructions().to_owned(),
                 "luna_sense" => luna_sensing_developer_instructions().to_owned(),
                 _ => developer_instructions(),
             },
@@ -2004,16 +1856,12 @@ impl CodexClient {
     ) -> Result<String> {
         let instructions = match tool_surface {
             ToolSurface::LunaSensing => luna_sensing_developer_instructions().to_owned(),
-            ToolSurface::AmbientReview => ambient_review_developer_instructions().to_owned(),
-            ToolSurface::PcpMaintenance => PCP_CODEX_INSTRUCTIONS.to_owned(),
             ToolSurface::Full | ToolSurface::AutonomousScout => developer_instructions(),
         };
         let dynamic_tools = match tool_surface {
             ToolSurface::Full => SymbiontTools::specifications(),
             ToolSurface::LunaSensing => SymbiontTools::sensing_specifications(),
-            ToolSurface::AmbientReview => SymbiontTools::sensing_review_specifications(),
             ToolSurface::AutonomousScout => SymbiontTools::scout_specifications(),
-            ToolSurface::PcpMaintenance => SymbiontTools::pcp_maintenance_specifications(),
         };
         let result = self
             .request(

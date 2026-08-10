@@ -669,6 +669,67 @@ async fn mailbox_review_reports_the_external_input_instead_of_internal_reasoning
 }
 
 #[tokio::test]
+async fn infer_runtime_review_reports_host_routing_without_a_codex_tool_call() {
+    let nonce = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_nanos();
+    let path = std::env::temp_dir().join(format!("symbiont-runtime-review-{nonce}.sqlite3"));
+    let store = UsageStore::open(path.clone()).await.unwrap();
+    let started = Utc::now();
+    let started_at = started.to_rfc3339_opts(SecondsFormat::Millis, true);
+    let completed_at =
+        (started + Duration::seconds(2)).to_rfc3339_opts(SecondsFormat::Millis, true);
+    store
+        .record_all(&[autonomous_invocation(
+            "runtime-review",
+            None,
+            "ambient_review",
+            &started_at,
+            &completed_at,
+            25,
+            false,
+            vec![ToolTraceStep {
+                sequence: 0,
+                namespace: "symbiont".to_owned(),
+                tool: "route_sensing_candidates".to_owned(),
+                started_at: completed_at.clone(),
+                completed_at: completed_at.clone(),
+                duration_ms: 0,
+                succeeded: true,
+                arguments: json!({
+                    "reviewedCandidateCount": 4,
+                    "inputCount": 2,
+                    "deepCount": 1,
+                    "discardCount": 1
+                }),
+                result: json!({
+                    "accepted": true,
+                    "hostRouting": {
+                        "publishedInputCount": 1,
+                        "suppressedInputCount": 1,
+                        "deferredCandidateCount": 0
+                    }
+                }),
+            }],
+            Vec::new(),
+        )])
+        .await
+        .unwrap();
+
+    let runs = store.recent_explorations(5).await.unwrap();
+    assert!(runs[0].sensing_reviewed);
+    assert_eq!(runs[0].sensing_candidate_count, 4);
+    assert_eq!(runs[0].sensing_input_count, 2);
+    assert_eq!(runs[0].sensing_deep_count, 1);
+    assert_eq!(runs[0].sensing_discard_count, 1);
+    assert_eq!(runs[0].sensing_published_count, 1);
+    assert_eq!(runs[0].sensing_suppressed_count, 1);
+
+    std::fs::remove_file(path).unwrap();
+}
+
+#[tokio::test]
 async fn does_not_duplicate_legacy_sensing_before_a_full_exploration() {
     let nonce = SystemTime::now()
         .duration_since(UNIX_EPOCH)

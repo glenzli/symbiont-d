@@ -24,7 +24,6 @@ use crate::{
     continuity::{ContinuityHost, MessageLinks},
     curiosity::CuriosityStore,
     exploration::{ExplorationIntentQueue, ExplorationIntentReceiver},
-    inference::{pcp_codex_prompt, sensing_codex_prompt},
     memory::MemoryRole,
     profile::{CalibrationMode, ProfileSnapshot, ProfileStore, SetupStatus},
     reconciliation::ReconciliationMode,
@@ -136,30 +135,6 @@ fn dynamic_tools_expose_host_and_pcp_namespaces() {
 }
 
 #[test]
-fn pcp_maintenance_thread_exposes_only_its_completion_tool() {
-    let specs = SymbiontTools::pcp_maintenance_specifications();
-    assert_eq!(specs.as_array().unwrap().len(), 1);
-    assert_eq!(specs[0]["name"], "symbiont");
-    let tools = specs[0]["tools"].as_array().unwrap();
-    assert_eq!(tools.len(), 1);
-    assert_eq!(tools[0]["name"], "complete_pcp_maintenance");
-}
-
-#[test]
-fn pcp_maintenance_prompt_keeps_semantics_in_the_model_and_mutation_outside() {
-    let request = pcp_runtime::MaintenanceWorkerRequest::SelectConsolidation {
-        pages: Vec::new(),
-        max_pages: 4,
-        excluded_candidate_sets: Vec::new(),
-    };
-    let prompt = pcp_codex_prompt(&request, "<done/>").unwrap();
-    assert!(prompt.contains("Semantic quality"));
-    assert!(prompt.contains("complete_pcp_maintenance"));
-    assert!(prompt.contains("shared vocabulary alone"));
-    assert!(prompt.contains("<done/>"));
-}
-
-#[test]
 fn autonomous_scout_sees_only_its_read_only_tool_surface() {
     let specs = SymbiontTools::scout_specifications();
     let symbiont = specs[0]["tools"]
@@ -185,42 +160,6 @@ fn autonomous_scout_sees_only_its_read_only_tool_surface() {
             "search_pages",
             "read_pages"
         ]
-    );
-}
-
-#[test]
-fn ambient_review_is_bounded_to_candidate_dispositions() {
-    let specs = SymbiontTools::sensing_review_specifications();
-    assert_eq!(specs.as_array().unwrap().len(), 1);
-    assert_eq!(specs[0]["name"], "symbiont");
-    assert_eq!(
-        specs[0]["tools"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .filter_map(|tool| tool["name"].as_str())
-            .collect::<Vec<_>>(),
-        vec!["review_sensing_candidates"]
-    );
-    let schema = &specs[0]["tools"][0]["inputSchema"];
-    assert_eq!(schema["required"], json!(["decisions"]));
-    assert!(schema["properties"]["decisions"].is_object());
-
-    let prompt = sensing_codex_prompt(&[], "<silent/>").unwrap();
-    assert!(prompt.contains("discard"));
-    assert!(prompt.contains("`input`"));
-    assert!(prompt.contains("`deep`"));
-    assert!(prompt.contains("lower than the bar"));
-    assert!(prompt.contains("qualification, not verification"));
-    assert!(prompt.contains("Reserve `deep` for value"));
-    assert!(prompt.contains("write PCP, Hunches, profile"));
-    assert!(prompt.contains("You cannot browse"));
-    assert!(prompt.contains("Weak or secondary sourcing alone"));
-    assert!(prompt.contains("Standalone science, mathematics, culture"));
-    assert!(!prompt.contains("`hold`"));
-    assert_eq!(
-        schema["properties"]["decisions"]["items"]["properties"]["disposition"]["enum"],
-        json!(["discard", "input", "deep"])
     );
 }
 

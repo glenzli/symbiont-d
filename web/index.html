@@ -239,11 +239,20 @@
                 id="temporary-discussion-toggle"
                 class="composer-tool-button temporary-discussion-toggle"
                 type="button"
-                title="临时讨论"
-                aria-label="临时讨论"
+                title="独立讨论"
+                aria-label="独立讨论"
                 aria-pressed="false"
-                data-tooltip="临时讨论"
-              ><span class="temporary-discussion-mark" aria-hidden="true">…</span></button>
+                data-tooltip="独立讨论"
+              ><svg class="temporary-discussion-icon" viewBox="0 0 20 20" aria-hidden="true">
+                <path
+                  class="temporary-discussion-icon-main"
+                  d="M3.75 7.4h6.45a2.1 2.1 0 0 1 2.1 2.1v2.3a2.1 2.1 0 0 1-2.1 2.1H6.6L3.4 16l.65-2.1h-.3a2.1 2.1 0 0 1-2.1-2.1V9.5a2.1 2.1 0 0 1 2.1-2.1Z"
+                />
+                <path
+                  class="temporary-discussion-icon-branch"
+                  d="M14.1 2.65h2.1a2.1 2.1 0 0 1 2.1 2.1v.45a2.1 2.1 0 0 1-2.1 2.1h-.25l.5 1.45-2.35-1.45a2.1 2.1 0 0 1-2.1-2.1v-.45a2.1 2.1 0 0 1 2.1-2.1Z"
+                />
+              </svg></button>
             </div>
               <div id="voice-recording-status" class="voice-recording-status" role="status" hidden>
                 <span class="voice-recording-indicator" aria-hidden="true"></span>
@@ -311,10 +320,6 @@
             </div>
           </div>
         </div>
-        <div id="temporary-discussion-banner" class="temporary-discussion-banner" hidden>
-          <span><strong>临时讨论</strong> · 读取已有记忆，不写入这段讨论</span>
-          <button id="temporary-discussion-finish" type="button">结束</button>
-        </div>
         <input
           id="image-input"
           type="file"
@@ -329,10 +334,82 @@
       </footer>
     </main>
 
+    <div id="temporary-discussion-layer" class="temporary-discussion-layer" hidden>
+      <button
+        id="temporary-discussion-backdrop"
+        class="temporary-discussion-backdrop"
+        type="button"
+        aria-label="结束独立讨论"
+      ></button>
+      <aside
+        id="temporary-discussion-panel"
+        class="temporary-discussion-panel"
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby="temporary-discussion-title"
+      >
+        <header class="temporary-discussion-header">
+          <div>
+            <span>独立会话</span>
+            <h2 id="temporary-discussion-title">独立讨论</h2>
+            <p>可以读取已有记忆，但这里不会自动进入主对话或记忆整理。</p>
+          </div>
+          <button
+            id="temporary-discussion-finish"
+            class="temporary-discussion-close"
+            type="button"
+            aria-label="结束独立讨论"
+          >×</button>
+        </header>
+        <section
+          id="temporary-discussion-conversation"
+          class="temporary-discussion-conversation"
+          aria-live="polite"
+          aria-label="独立讨论消息"
+        >
+          <div id="temporary-discussion-empty" class="temporary-discussion-empty">
+            <strong>这段讨论只停留在这里</strong>
+            <p>结束时，你可以丢弃它，也可以明确选择把结论或完整过程带回记忆。</p>
+          </div>
+        </section>
+        <form id="temporary-discussion-composer" class="temporary-discussion-composer">
+          <div class="temporary-discussion-composer-field">
+            <textarea
+              id="temporary-discussion-message"
+              rows="1"
+              maxlength="12000"
+              placeholder="这段讨论不会自动保存…"
+              aria-label="独立讨论消息"
+            ></textarea>
+            <footer>
+              <span id="temporary-discussion-runtime" role="status">仅保留在当前进程</span>
+              <div>
+                <button
+                  id="temporary-discussion-stop"
+                  class="temporary-discussion-stop"
+                  type="button"
+                  title="停止回复"
+                  aria-label="停止回复"
+                  hidden
+                >■</button>
+                <button
+                  id="temporary-discussion-send"
+                  class="temporary-discussion-send"
+                  type="submit"
+                  title="发送"
+                  aria-label="发送"
+                >↑</button>
+              </div>
+            </footer>
+          </div>
+        </form>
+      </aside>
+    </div>
+
     <dialog id="temporary-discussion-dialog" class="panel-dialog temporary-discussion-dialog">
       <header class="dialog-header">
         <div>
-          <h2>结束临时讨论</h2>
+          <h2>结束独立讨论</h2>
           <p>这段内容仍只停留在当前进程中。</p>
         </div>
       </header>
@@ -533,6 +610,14 @@
                 <label class="toggle-row compact-toggle">
                   <span>启用 Luna</span>
                   <input id="luna-enabled" type="checkbox">
+                </label>
+                <label class="field">
+                  <span>输出语言</span>
+                  <select id="luna-output-language">
+                    <option value="interface">跟随界面（简体中文）</option>
+                    <option value="simplified_chinese">简体中文</option>
+                    <option value="english">English</option>
+                  </select>
                 </label>
                 <label class="field"><span>观察范围</span><textarea id="luna-focus" rows="3" maxlength="1600"></textarea></label>
               </div>

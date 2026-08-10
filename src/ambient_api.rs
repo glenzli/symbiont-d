@@ -83,8 +83,35 @@ impl Default for AmbientConfig {
 pub struct LunaInputConfig {
     #[serde(default)]
     pub enabled: bool,
+    #[serde(default)]
+    pub output_language: LunaOutputLanguage,
     #[serde(default = "default_luna_focus")]
     pub focus: String,
+}
+
+#[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum LunaOutputLanguage {
+    #[default]
+    Interface,
+    SimplifiedChinese,
+    English,
+}
+
+impl LunaOutputLanguage {
+    pub(crate) fn prompt_instruction(self) -> &'static str {
+        match self {
+            Self::Interface => {
+                "Write every candidate title, summary, proposed_input, possible_connection, and source detail in Simplified Chinese, matching the current application interface. Keep proper names, paper titles, product names, and URLs in their clearest original form."
+            }
+            Self::SimplifiedChinese => {
+                "Write every candidate title, summary, proposed_input, possible_connection, and source detail in Simplified Chinese. Keep proper names, paper titles, product names, and URLs in their clearest original form."
+            }
+            Self::English => {
+                "Write every candidate title, summary, proposed_input, possible_connection, and source detail in English. Keep proper names, paper titles, product names, and URLs in their clearest original form."
+            }
+        }
+    }
 }
 
 /// A selected broad-input role for one exploration cycle. Selection is shared
@@ -102,6 +129,7 @@ impl Default for LunaInputConfig {
     fn default() -> Self {
         Self {
             enabled: false,
+            output_language: LunaOutputLanguage::default(),
             focus: default_luna_focus(),
         }
     }
@@ -949,5 +977,16 @@ mod tests {
         let mut config = AmbientConfig::default();
         config.luna.enabled = true;
         assert!(validate_config(&config).is_ok());
+    }
+
+    #[test]
+    fn luna_language_defaults_to_the_application_interface_and_round_trips() {
+        let config = AmbientConfig::default();
+        assert_eq!(config.luna.output_language, LunaOutputLanguage::Interface);
+
+        let persisted = toml::to_string(&config).unwrap();
+        assert!(persisted.contains("outputLanguage = \"interface\""));
+        let reopened: AmbientConfig = toml::from_str(&persisted).unwrap();
+        assert_eq!(reopened.luna.output_language, LunaOutputLanguage::Interface);
     }
 }

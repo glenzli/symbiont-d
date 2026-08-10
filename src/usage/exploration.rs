@@ -211,6 +211,27 @@ fn summarize(bundle: TraceBundle) -> ExplorationRunSummary {
                             .unwrap_or_default() as usize;
                 }
             }
+            if step.succeeded
+                && step.namespace == "symbiont"
+                && step.tool == "route_sensing_candidates"
+            {
+                sensing_reviewed = true;
+                sensing_candidate_count = sensing_candidate_count
+                    .max(count_argument(&step.arguments, "reviewedCandidateCount"));
+                sensing_input_count += count_argument(&step.arguments, "inputCount");
+                sensing_deep_count += count_argument(&step.arguments, "deepCount");
+                sensing_discard_count += count_argument(&step.arguments, "discardCount");
+                sensing_published_count += step
+                    .result
+                    .pointer("/hostRouting/publishedInputCount")
+                    .and_then(serde_json::Value::as_u64)
+                    .unwrap_or_default() as usize;
+                sensing_suppressed_count += step
+                    .result
+                    .pointer("/hostRouting/suppressedInputCount")
+                    .and_then(serde_json::Value::as_u64)
+                    .unwrap_or_default() as usize;
+            }
             if step.namespace == "symbiont" && step.tool == "fetch_url" {
                 web_searches += 1;
                 if let Some(purpose) = compact_argument(&step.arguments, "purpose", 220) {
@@ -333,6 +354,13 @@ fn summarize(bundle: TraceBundle) -> ExplorationRunSummary {
         pcp_write_calls: bundle.pcp_write_calls,
         details_retained: bundle.details_retained,
     }
+}
+
+fn count_argument(arguments: &serde_json::Value, key: &str) -> usize {
+    arguments
+        .get(key)
+        .and_then(serde_json::Value::as_u64)
+        .unwrap_or_default() as usize
 }
 
 fn fallback_focus(
