@@ -38,7 +38,7 @@
 ```
 
 - **与 Codex：** Symbiont-d 可以把选定的 Codex 对话作为一次性、只读的自然上下文，也可以按当前用途召回相关主题的现有认识、用户确认与来源证据，供你带到 Codex。需要核验时再展开原始讨论。它不替你派发、接管或伪造 Codex 任务。
-- **与 PCP：** Symbiont-d 是 Host，负责判断何时写入、复核、修订或撤回记忆；[Paged Context Protocol (PCP)](https://github.com/glenzli/paged-context-protocol) Runtime 提供持久的 Pages、不可变 Revision、来源、关系和检索能力。
+- **与长期上下文 Runtime：** Symbiont-d 是 Host，负责判断何时写入、复核、修订或撤回记忆，并通过 [Paged Context Protocol (PCP)](https://github.com/glenzli/paged-context-protocol) 使用持久的 Pages、不可变 Revision、来源、关系和检索能力。开发环境可以使用内嵌本地存储，常驻服务则可以连接兼容的本机 Runtime。
 - **与本地数据：** 数据默认留在本机。PCP Console 是独立的只读观察界面；Symbiont-d 自身只呈现与当前协作有关的工作状态。
 
 ### 输入渠道
@@ -49,13 +49,21 @@
 
 外部输入不会直接写入长期记忆。账号凭据、文件夹标识、邮箱地址和本地运行记录都不属于仓库内容。
 
+### 外部运行依赖
+
+- **长期上下文：[Paged Context Protocol](https://github.com/glenzli/paged-context-protocol)。** 当前源码构建使用该仓库中的客户端与存储组件；常驻安装也可以从同级 checkout 构建并启动本地 Runtime 和只读 Console。
+- **语音输入：[infer-runtime](https://github.com/glenzli/infer-runtime)。** 这是可选依赖。启用语音输入后，Symbiont-d 将录音交给用户授权的本机 infer-runtime 转写，并把结果作为可编辑文本返回；未配置时不影响文字对话、探索、Drive 或邮箱输入。
+
+两项集成都只在这里说明能力边界；具体连接信息和本机配置由运行环境管理。
+
 ### 运行
 
 此仓库目前是早期原型，需要：
 
 - Rust 1.88+；
 - 已登录的 Codex CLI；
-- [Paged Context Protocol](https://github.com/glenzli/paged-context-protocol) 仓库的同级 checkout 与 PCP Runtime。
+- [Paged Context Protocol](https://github.com/glenzli/paged-context-protocol) 仓库的同级 checkout，供当前源码依赖与本地 Runtime 使用；
+- 若要使用语音输入，需要另行运行并授权 [infer-runtime](https://github.com/glenzli/infer-runtime)。
 
 本地开发：
 
@@ -111,7 +119,7 @@ outside world / your conversation / selected Codex context
 ```
 
 - **With Codex:** Symbiont-d can attach a selected Codex conversation as bounded, read-only context for one turn, or recall the current understanding, user confirmations, and source evidence for a topic according to the work at hand. The original exchange is expanded only when verification needs it. It does not dispatch, take over, or impersonate Codex tasks.
-- **With PCP:** Symbiont-d is the Host. It decides when memory is written, reviewed, revised, or retracted. The [Paged Context Protocol (PCP)](https://github.com/glenzli/paged-context-protocol) Runtime provides durable Pages, immutable Revisions, provenance, relations, and retrieval.
+- **With a durable-context runtime:** Symbiont-d is the Host. It decides when memory is written, reviewed, revised, or retracted, and uses the [Paged Context Protocol (PCP)](https://github.com/glenzli/paged-context-protocol) boundary for durable Pages, immutable Revisions, provenance, relations, and retrieval. Development can use embedded local storage, while the resident service can connect to a compatible local Runtime.
 - **With local data:** Data stays local by default. PCP Console is a separate read-only observation surface; Symbiont-d presents only the working state relevant to the current collaboration.
 
 ### Input channels
@@ -122,13 +130,21 @@ outside world / your conversation / selected Codex context
 
 External input does not enter durable memory directly. Account credentials, folder identifiers, email addresses, and local runtime records are not repository content.
 
+### External runtime dependencies
+
+- **Durable context: [Paged Context Protocol](https://github.com/glenzli/paged-context-protocol).** The current source build uses client and storage components from that repository. The resident installer can also build and launch its local Runtime and read-only Console from a sibling checkout.
+- **Voice input: [infer-runtime](https://github.com/glenzli/infer-runtime).** This dependency is optional. When voice input is enabled, Symbiont-d sends recordings to a user-authorized local infer-runtime and returns editable transcript text. Without it, text conversations, exploration, Drive, and Mail input continue to work.
+
+These integrations are documented at the capability boundary; concrete connection details and machine-specific configuration remain with the local runtime environment.
+
 ### Run it
 
 This early prototype needs:
 
 - Rust 1.88+;
 - a logged-in Codex CLI;
-- a sibling checkout of the [Paged Context Protocol repository](https://github.com/glenzli/paged-context-protocol) and its PCP Runtime.
+- a sibling checkout of the [Paged Context Protocol repository](https://github.com/glenzli/paged-context-protocol) for the current source dependencies and local Runtime;
+- a separately running and authorized [infer-runtime](https://github.com/glenzli/infer-runtime) only when voice input is needed.
 
 For local development:
 
