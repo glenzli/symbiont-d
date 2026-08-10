@@ -9,7 +9,7 @@ use std::{
 
 use anyhow::{Context, Result};
 use chrono::{DateTime, Utc};
-use pcp_client::PcpApi;
+use pcp_client::{AccessMode, PcpApi};
 use pcp_core::AccessPrincipalType;
 use pcp_rpc::{
     BeginEnrollmentParams, EnrollmentClient, EnrollmentClientClaim, EnrollmentPrincipalClaim,
@@ -171,7 +171,18 @@ impl EnrollmentManager {
                 })
                 .await
             {
-                Ok(response) => return self.handle_result(selected, response.result).await,
+                Ok(response) => {
+                    let access_changed = matches!(
+                        &response.result,
+                        EnrollmentResult::Active { session }
+                            if !session_matches_requested_access(&selected.service, session)
+                    );
+                    if access_changed {
+                        self.clear_registration().await?;
+                    } else {
+                        return self.handle_result(selected, response.result).await;
+                    }
+                }
                 Err(error) if is_not_found(&error) => {
                     self.clear_registration().await?;
                 }
@@ -232,6 +243,10 @@ impl EnrollmentManager {
                 Ok(EnrollmentProbe::Rejected)
             }
             EnrollmentResult::Active { session } => {
+                anyhow::ensure!(
+                    session_matches_requested_access(&selected.service, &session),
+                    "PCP enrollment session does not match the current requested access"
+                );
                 let active =
                     validate_active_session(&self.runtime_root, &selected, &session).await?;
                 let mut state = self.state.lock().await;
@@ -325,6 +340,38 @@ fn requested_access() -> RequestedAccess {
         ],
         allow_cross_scope_derivation: true,
     }
+}
+
+fn session_matches_requested_access(
+    service: &EnrollmentServiceIdentity,
+    session: &EnrollmentSession,
+) -> bool {
+    let requested = requested_access();
+    let mode = match requested.mode {
+        RequestedAccessMode::Observe => AccessMode::Observe,
+        RequestedAccessMode::Read => AccessMode::Read,
+        RequestedAccessMode::Audit => AccessMode::Audit,
+        RequestedAccessMode::Write => AccessMode::Write,
+        RequestedAccessMode::Admin => AccessMode::Admin,
+    };
+    let scopes = requested
+        .scopes
+        .into_iter()
+        .map(|scope| {
+            if scope == "user:self" {
+                format!("user:{}", service.instance_id)
+            } else {
+                scope
+            }
+        })
+        .collect();
+    let expected = mode.session(
+        session.access.principal.clone(),
+        session.access.session_id.clone(),
+        scopes,
+        requested.allow_cross_scope_derivation,
+    );
+    session.access == expected
 }
 
 async fn validate_active_session(
@@ -1103,6 +1150,45 @@ mod tests {
                 CONVERSATION_NAMESPACE.to_owned(),
             ]
         );
+    }
+
+    #[test]
+    fn enrollment_rejects_a_registration_with_stale_scope_grants() {
+        let owner_id = "usr-test";
+        let service = EnrollmentServiceIdentity {
+            kind: "pcp".to_owned(),
+            instance_id: owner_id.to_owned(),
+            generation: "proc-test".to_owned(),
+        };
+        let principal = ContinuityHost::access_session(owner_id).principal;
+        let access = |conversation: &str| {
+            AccessMode::Admin.session(
+                principal.clone(),
+                "enrolled:reg-test:proc-test",
+                vec![
+                    format!("user:{owner_id}"),
+                    PROJECT_NAMESPACE.to_owned(),
+                    conversation.to_owned(),
+                ],
+                true,
+            )
+        };
+        let session = |access| EnrollmentSession {
+            registration_id: "reg-test".to_owned(),
+            service: service.clone(),
+            binding: UNIX_SOCKET_BINDING.to_owned(),
+            endpoint: "sockets/session.sock".to_owned(),
+            access,
+        };
+
+        assert!(session_matches_requested_access(
+            &service,
+            &session(access(CONVERSATION_NAMESPACE))
+        ));
+        assert!(!session_matches_requested_access(
+            &service,
+            &session(access("conversation:symbiont-d"))
+        ));
     }
 
     #[test]
