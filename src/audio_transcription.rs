@@ -5,17 +5,23 @@
 //! infer-runtime instance, and returns editable text to the browser.  The
 //! browser owns recording and discard; PCP only sees text the user sends.
 
-use std::{io::ErrorKind, path::PathBuf, time::Duration};
+mod discovery;
+
+use std::{env, io::ErrorKind, path::PathBuf, time::Duration};
 
 use anyhow::{Context, Result};
-use reqwest::{Client, StatusCode, Url, multipart};
+use chrono::Utc;
+use reqwest::{Client, StatusCode, Url, multipart, redirect::Policy};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use tokio::{fs, sync::RwLock};
 
 use crate::secrets::{CredentialStatus, CredentialStore, SecretStore};
+use discovery::{DiscoveredConsumer, canonical_loopback_origin, discover_consumer};
 
 const TRANSCRIPTION_SECRET_ID: &str = "infer-runtime";
+const ENDPOINT_OVERRIDE_ENV: &str = "SYMBIONT_INFER_RUNTIME_BASE_URL";
+const COMPATIBILITY_FALLBACK: &str = "http://127.0.0.1:8787";
 pub const MAX_AUDIO_BYTES: usize = 25 * 1024 * 1024;
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(75);
 
@@ -24,7 +30,7 @@ const REQUEST_TIMEOUT: Duration = Duration::from_secs(75);
 pub struct AudioTranscriptionConfig {
     #[serde(default)]
     pub enabled: bool,
-    #[serde(default = "default_base_url")]
+    #[serde(default)]
     pub base_url: String,
     #[serde(default)]
     pub credential_store: CredentialStore,
@@ -38,16 +44,12 @@ impl Default for AudioTranscriptionConfig {
     fn default() -> Self {
         Self {
             enabled: false,
-            base_url: default_base_url(),
+            base_url: String::new(),
             credential_store: CredentialStore::ConfigFile,
             credential_value: None,
             language: default_language(),
         }
     }
-}
-
-fn default_base_url() -> String {
-    "http://127.0.0.1:8787".to_owned()
 }
 
 fn default_language() -> String {
@@ -63,6 +65,14 @@ pub struct AudioTranscriptionSnapshot {
     pub credential_status: String,
     pub debug_credential_override: bool,
     pub availability: String,
+    pub resolved_base_url: String,
+    pub endpoint_source: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub endpoint_instance_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub endpoint_generation: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub endpoint_lease_expires_at: Option<String>,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -79,11 +89,52 @@ pub struct AudioTranscriptionStore {
     config: RwLock<AudioTranscriptionConfig>,
     credentials: SecretStore,
     client: Client,
+    resolved_endpoint: RwLock<Option<ResolvedConsumerEndpoint>>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+enum EndpointSource {
+    Environment,
+    Settings,
+    Discovery,
+    CompatibilityFallback,
+}
+
+impl EndpointSource {
+    fn as_str(&self) -> &'static str {
+        match self {
+            Self::Environment => "environment",
+            Self::Settings => "settings",
+            Self::Discovery => "discovery",
+            Self::CompatibilityFallback => "compatibility_fallback",
+        }
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct ResolvedConsumerEndpoint {
+    base_url: String,
+    source: EndpointSource,
+    instance_id: Option<String>,
+    generation: Option<String>,
+    lease_expires_at: Option<chrono::DateTime<Utc>>,
+}
+
+impl ResolvedConsumerEndpoint {
+    fn discovered(selection: DiscoveredConsumer) -> Self {
+        Self {
+            base_url: selection.base_url,
+            source: EndpointSource::Discovery,
+            instance_id: Some(selection.instance_id),
+            generation: Some(selection.generation),
+            lease_expires_at: Some(selection.expires_at),
+        }
+    }
 }
 
 impl AudioTranscriptionStore {
     pub async fn open(config_path: PathBuf) -> Result<Self> {
-        let config = match fs::read_to_string(&config_path).await {
+        let mut config = match fs::read_to_string(&config_path).await {
             Ok(value) => match toml::from_str::<AudioTranscriptionConfig>(&value) {
                 Ok(config) if validate_config(&config).is_ok() => config,
                 Ok(_) | Err(_) => {
@@ -103,13 +154,21 @@ impl AudioTranscriptionStore {
                 });
             }
         };
+        if config.base_url.trim() == COMPATIBILITY_FALLBACK {
+            config.base_url.clear();
+        }
         persist_config(&config_path, &config).await?;
         let credential_path = config_path.with_file_name("infer-runtime-secrets.toml");
         Ok(Self {
             config_path,
             config: RwLock::new(config),
             credentials: SecretStore::open(credential_path).await?,
-            client: Client::builder().timeout(REQUEST_TIMEOUT).build()?,
+            client: Client::builder()
+                .timeout(REQUEST_TIMEOUT)
+                .no_proxy()
+                .redirect(Policy::none())
+                .build()?,
+            resolved_endpoint: RwLock::new(None),
         })
     }
 
@@ -119,11 +178,42 @@ impl AudioTranscriptionStore {
             .credentials
             .status(TRANSCRIPTION_SECRET_ID, config.credential_store)
             .await;
+        let endpoint = self.resolve_endpoint(&config).await;
+        if let Err(error) = &endpoint {
+            tracing::warn!(error = %error, "infer-runtime endpoint resolution failed");
+        }
+        let endpoint_ready = endpoint.is_ok();
+        let (
+            resolved_base_url,
+            endpoint_source,
+            endpoint_instance_id,
+            endpoint_generation,
+            endpoint_lease_expires_at,
+        ) = endpoint
+            .as_ref()
+            .map(|endpoint| {
+                (
+                    endpoint.base_url.clone(),
+                    endpoint.source.as_str().to_owned(),
+                    endpoint.instance_id.clone(),
+                    endpoint.generation.clone(),
+                    endpoint
+                        .lease_expires_at
+                        .as_ref()
+                        .map(chrono::DateTime::to_rfc3339),
+                )
+            })
+            .unwrap_or_else(|_| (String::new(), "unavailable".to_owned(), None, None, None));
         AudioTranscriptionSnapshot {
-            availability: availability(&config, credential_status),
+            availability: availability(&config, credential_status, endpoint_ready),
             active_credential_store: self.credentials.active_store(config.credential_store),
             credential_status: credential_status.as_str().to_owned(),
             debug_credential_override: self.credentials.debug_override(config.credential_store),
+            resolved_base_url,
+            endpoint_source,
+            endpoint_instance_id,
+            endpoint_generation,
+            endpoint_lease_expires_at,
             config,
         }
     }
@@ -172,37 +262,39 @@ impl AudioTranscriptionStore {
             .read(TRANSCRIPTION_SECRET_ID, config.credential_store)
             .await?
             .ok_or_else(|| anyhow::anyhow!("本地语音转写尚未配置访问令牌"))?;
-        let endpoint = transcription_endpoint(&config.base_url)?;
+        let selected = self.resolve_endpoint(&config).await?;
         let file_name = filename
             .filter(|value| !value.trim().is_empty())
             .unwrap_or("voice-input.webm");
-        let mut part = multipart::Part::bytes(audio).file_name(file_name.to_owned());
-        if let Some(mime_type) = mime_type.filter(|value| !value.trim().is_empty()) {
-            part = part
-                .mime_str(mime_type)
-                .context("invalid audio MIME type")?;
-        }
-        let metadata = json!({
-            "infer.priority": "interactive",
-            "infer.placement": "local_only",
-            "infer.prefer": "local",
-            "infer.offline_required": "true",
-            "infer.fallback": "none",
-        });
-        let form = multipart::Form::new()
-            .text("model", "audio.transcribe")
-            .part("file", part)
-            .text("language", config.language)
-            .text("response_format", "verbose_json")
-            .text("metadata", metadata.to_string());
-        let response = self
-            .client
-            .post(endpoint)
-            .bearer_auth(token)
-            .multipart(form)
-            .send()
+        let response = match self
+            .send_transcription(
+                &selected,
+                &token,
+                file_name,
+                mime_type,
+                &config.language,
+                &audio,
+            )
             .await
-            .context("contact local infer-runtime")?;
+        {
+            Ok(response) => response,
+            Err(first_error) => {
+                let refreshed = self.resolve_endpoint(&config).await?;
+                if refreshed == selected {
+                    return Err(first_error).context("contact local infer-runtime");
+                }
+                self.send_transcription(
+                    &refreshed,
+                    &token,
+                    file_name,
+                    mime_type,
+                    &config.language,
+                    &audio,
+                )
+                .await
+                .context("contact rediscovered local infer-runtime")?
+            }
+        };
         let status = response.status();
         let payload = response
             .json::<Value>()
@@ -239,17 +331,94 @@ impl AudioTranscriptionStore {
         );
         Ok(result)
     }
+
+    async fn resolve_endpoint(
+        &self,
+        config: &AudioTranscriptionConfig,
+    ) -> Result<ResolvedConsumerEndpoint> {
+        let selected = resolve_endpoint(config)?;
+        *self.resolved_endpoint.write().await = Some(selected.clone());
+        Ok(selected)
+    }
+
+    async fn send_transcription(
+        &self,
+        selected: &ResolvedConsumerEndpoint,
+        token: &str,
+        file_name: &str,
+        mime_type: Option<&str>,
+        language: &str,
+        audio: &[u8],
+    ) -> Result<reqwest::Response> {
+        let mut part = multipart::Part::bytes(audio.to_vec()).file_name(file_name.to_owned());
+        if let Some(mime_type) = mime_type.filter(|value| !value.trim().is_empty()) {
+            part = part
+                .mime_str(mime_type)
+                .context("invalid audio MIME type")?;
+        }
+        let metadata = json!({
+            "infer.priority": "interactive",
+            "infer.placement": "local_only",
+            "infer.prefer": "local",
+            "infer.offline_required": "true",
+            "infer.fallback": "none",
+        });
+        let form = multipart::Form::new()
+            .text("model", "audio.transcribe")
+            .part("file", part)
+            .text("language", language.to_owned())
+            .text("response_format", "verbose_json")
+            .text("metadata", metadata.to_string());
+        self.client
+            .post(transcription_endpoint(&selected.base_url)?)
+            .bearer_auth(token)
+            .multipart(form)
+            .send()
+            .await
+            .context("send infer-runtime transcription request")
+    }
 }
 
 fn transcription_endpoint(base_url: &str) -> Result<Url> {
-    let mut url = Url::parse(base_url.trim()).context("parse infer-runtime address")?;
-    let host = url.host_str().unwrap_or_default();
-    if !matches!(host, "127.0.0.1" | "localhost" | "::1") {
-        anyhow::bail!("infer-runtime 地址必须是本机回环地址");
+    let base_url = canonical_loopback_origin(base_url)?;
+    Url::parse(&format!("{base_url}/v1/audio/transcriptions"))
+        .context("build infer-runtime transcription endpoint")
+}
+
+fn resolve_endpoint(config: &AudioTranscriptionConfig) -> Result<ResolvedConsumerEndpoint> {
+    if let Some(value) = env::var_os(ENDPOINT_OVERRIDE_ENV) {
+        let value = value
+            .into_string()
+            .map_err(|_| anyhow::anyhow!("{ENDPOINT_OVERRIDE_ENV} is not UTF-8"))?;
+        if !value.trim().is_empty() {
+            return Ok(ResolvedConsumerEndpoint {
+                base_url: canonical_loopback_origin(&value)?,
+                source: EndpointSource::Environment,
+                instance_id: None,
+                generation: None,
+                lease_expires_at: None,
+            });
+        }
     }
-    url.set_path("/v1/audio/transcriptions");
-    url.set_query(None);
-    Ok(url)
+    if !config.base_url.trim().is_empty() {
+        return Ok(ResolvedConsumerEndpoint {
+            base_url: canonical_loopback_origin(&config.base_url)?,
+            source: EndpointSource::Settings,
+            instance_id: None,
+            generation: None,
+            lease_expires_at: None,
+        });
+    }
+    if let Some(discovered) = discover_consumer(Utc::now())? {
+        return Ok(ResolvedConsumerEndpoint::discovered(discovered));
+    }
+    Ok(ResolvedConsumerEndpoint {
+        base_url: COMPATIBILITY_FALLBACK.to_owned(),
+        source: EndpointSource::CompatibilityFallback,
+        instance_id: None,
+        generation: None,
+        lease_expires_at: None,
+    })
 }
 
 fn validate_config(config: &AudioTranscriptionConfig) -> Result<()> {
@@ -257,18 +426,25 @@ fn validate_config(config: &AudioTranscriptionConfig) -> Result<()> {
     if language.is_empty() || language.chars().count() > 16 {
         anyhow::bail!("语音识别语言必须是 1 到 16 个字符");
     }
-    transcription_endpoint(&config.base_url)?;
+    if !config.base_url.trim().is_empty() {
+        canonical_loopback_origin(&config.base_url)?;
+    }
     Ok(())
 }
 
-fn availability(config: &AudioTranscriptionConfig, credential_status: CredentialStatus) -> String {
+fn availability(
+    config: &AudioTranscriptionConfig,
+    credential_status: CredentialStatus,
+    endpoint_ready: bool,
+) -> String {
     if !config.enabled {
         return "disabled".to_owned();
     }
-    match credential_status {
-        CredentialStatus::Configured => "ready".to_owned(),
-        CredentialStatus::Missing => "missing_credential".to_owned(),
-        CredentialStatus::Unavailable => "credential_unavailable".to_owned(),
+    match (credential_status, endpoint_ready) {
+        (CredentialStatus::Configured, false) => "endpoint_unavailable".to_owned(),
+        (CredentialStatus::Configured, true) => "ready".to_owned(),
+        (CredentialStatus::Missing, _) => "missing_credential".to_owned(),
+        (CredentialStatus::Unavailable, _) => "credential_unavailable".to_owned(),
     }
 }
 
@@ -323,7 +499,8 @@ mod tests {
     #[test]
     fn only_accepts_loopback_infer_runtime_addresses() {
         assert!(transcription_endpoint("http://127.0.0.1:8787").is_ok());
-        assert!(transcription_endpoint("http://localhost:8787/api").is_ok());
+        assert!(transcription_endpoint("http://localhost:8787").is_err());
+        assert!(transcription_endpoint("http://127.0.0.1:8787/api").is_err());
         assert!(transcription_endpoint("https://example.com").is_err());
     }
 

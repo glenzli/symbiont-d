@@ -699,12 +699,12 @@
         <form id="audio-transcription-form">
           <header class="settings-panel-intro compact-intro">
             <h3>本地语音转写</h3>
-            <p>录音仅在本机临时保留，转写后进入可编辑输入框；只有你发送的文字才会进入对话与 PCP。请先在 infer-runtime 中为 <code>symbiont-d</code> 注册本地 consumer，并填入它的令牌。</p>
+            <p>录音只在本机转写为可编辑文字；只有发送后的文字会进入对话与 PCP。</p>
           </header>
           <div class="setting-section">
             <div class="ambient-config-row-head"><strong>infer-runtime</strong><span id="audio-transcription-availability" class="ambient-row-status">正在读取</span></div>
             <div class="field-grid">
-              <label class="field"><span>本地地址</span><input id="audio-transcription-base-url" type="url" maxlength="300" placeholder="http://127.0.0.1:8787"></label>
+              <label class="field"><span>地址覆盖（可选）</span><input id="audio-transcription-base-url" type="url" maxlength="300" placeholder="留空以自动发现本地 infer-runtime"></label>
               <label class="field"><span>语言</span><input id="audio-transcription-language" type="text" maxlength="16" placeholder="zh"></label>
               <label class="field"><span>令牌存储</span><select id="audio-transcription-credential-store"><option value="config_file">本地配置文件</option><option value="keychain">系统凭据库</option></select></label>
               <label class="field"><span>infer-runtime 令牌</span><input id="audio-transcription-credential-value" type="password" autocomplete="new-password" placeholder="留空以保持现有令牌"></label>

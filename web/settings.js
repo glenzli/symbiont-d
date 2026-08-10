@@ -173,13 +173,27 @@ export function initSettings(state) {
   function renderAudioTranscription() {
     if (!state.audioTranscription) return;
     const transcription = state.audioTranscription;
-    audioTranscriptionBaseUrl.value = transcription.baseUrl || "http://127.0.0.1:8787";
+    audioTranscriptionBaseUrl.value = transcription.baseUrl || "";
     audioTranscriptionLanguage.value = transcription.language || "zh";
     audioTranscriptionCredentialStore.value = transcription.credentialStore || "config_file";
     audioTranscriptionCredentialValue.value = "";
     audioTranscriptionEnabled.checked = transcription.enabled === true;
-    audioTranscriptionAvailability.textContent = availabilityText(transcription.availability);
+    const endpoint = transcription.resolvedBaseUrl
+      ? `${endpointSourceText(transcription.endpointSource)} ${transcription.resolvedBaseUrl}`
+      : endpointSourceText(transcription.endpointSource);
+    audioTranscriptionAvailability.textContent = [availabilityText(transcription.availability), endpoint]
+      .filter(Boolean)
+      .join(" · ");
     audioTranscriptionCredentialNote.textContent = credentialNote(transcription);
+  }
+
+  function endpointSourceText(source) {
+    if (source === "environment") return "环境覆盖";
+    if (source === "settings") return "设置覆盖";
+    if (source === "discovery") return "自动发现";
+    if (source === "compatibility_fallback") return "兼容地址";
+    if (source === "unavailable") return "地址不可用";
+    return "";
   }
 
   function availabilityText(availability, runtime = {}) {
@@ -189,6 +203,7 @@ export function initSettings(state) {
     if (availability === "incomplete") return "配置未完成";
     if (availability === "missing_credential") return "未配置密钥";
     if (availability === "credential_unavailable") return "密钥暂不可读取";
+    if (availability === "endpoint_unavailable") return "本地服务地址不可用";
     if (availability === "unavailable") return "Codex 暂不可用";
     return availability || "尚不可用";
   }
