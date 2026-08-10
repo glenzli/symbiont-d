@@ -41,8 +41,8 @@ use crate::{
 const USER_SCOPE_LABEL: &str = "User context";
 pub const MAX_QUOTES_PER_MESSAGE: usize = 6;
 pub const MAX_QUOTE_TEXT_CHARS: usize = 6_000;
-const PROJECT_NAMESPACE: &str = "project:symbiont-d";
-const CONVERSATION_NAMESPACE: &str = "conversation:symbiont-d-main";
+pub(crate) const PROJECT_NAMESPACE: &str = "project:symbiont-d";
+pub(crate) const CONVERSATION_NAMESPACE: &str = "conversation:symbiont-d-main";
 const MODEL_ACTOR_ID: &str = "codex:symbiont-d";
 const SYSTEM_ACTOR_ID: &str = "symbiont-d";
 const MAX_MODEL_WRITE_CHARS: usize = 64_000;

@@ -20,6 +20,8 @@ use pcp_rpc::{
 use serde::{Deserialize, Serialize};
 use tokio::{fs, io::AsyncWriteExt, sync::Mutex};
 
+use crate::continuity::{CONVERSATION_NAMESPACE, PROJECT_NAMESPACE};
+
 #[cfg(unix)]
 use std::os::unix::fs::{FileTypeExt, MetadataExt, PermissionsExt};
 
@@ -318,8 +320,8 @@ fn requested_access() -> RequestedAccess {
         mode: RequestedAccessMode::Admin,
         scopes: vec![
             "user:self".to_owned(),
-            "project:symbiont-d".to_owned(),
-            "conversation:symbiont-d".to_owned(),
+            PROJECT_NAMESPACE.to_owned(),
+            CONVERSATION_NAMESPACE.to_owned(),
         ],
         allow_cross_scope_derivation: true,
     }
@@ -1089,6 +1091,18 @@ mod tests {
         assert!(resolve_unix_endpoint(root, "sockets/../pcp-a.sock").is_err());
         assert!(resolve_unix_endpoint(root, "/sockets/pcp-a.sock").is_err());
         assert!(resolve_unix_endpoint(root, "other/pcp-a.sock").is_err());
+    }
+
+    #[test]
+    fn enrollment_requests_the_scopes_owned_by_continuity() {
+        assert_eq!(
+            requested_access().scopes,
+            vec![
+                "user:self".to_owned(),
+                PROJECT_NAMESPACE.to_owned(),
+                CONVERSATION_NAMESPACE.to_owned(),
+            ]
+        );
     }
 
     #[test]
