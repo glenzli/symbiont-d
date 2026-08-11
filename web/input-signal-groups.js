@@ -68,7 +68,7 @@ export function regroupInputSignals(container) {
   const children = [...container.children];
   const items = children.map((element) => ({
     isSignal: element.matches(".input-signal"),
-    roleId: element.dataset.inputRoleId || "",
+    roleId: `${element.dataset.inputRoleId || ""}:${element.dataset.signalKind || "external_input"}`,
     observedAt: element.dataset.signalObservedAt || "",
   }));
   const runs = inputSignalGroupRuns(items);

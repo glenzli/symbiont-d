@@ -160,6 +160,8 @@ impl ContinuityHost {
             "observed_at": signal.observed_at,
             "source_class": signal.source_class,
             "review_reason": signal.review_reason,
+            "signal_kind": signal.kind,
+            "related_signal_ids": signal.related_signal_ids,
         }))?;
         self.store
             .write_page(WritePageRequest {

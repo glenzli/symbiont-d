@@ -3,7 +3,10 @@ use std::path::PathBuf;
 use anyhow::{Context, Result};
 use chrono::{DateTime, Duration, NaiveDate, SecondsFormat, Utc};
 use serde::{Deserialize, Serialize};
-use tokio::{fs, sync::RwLock};
+use tokio::{
+    fs,
+    sync::{RwLock, watch},
+};
 
 use crate::external_markdown::normalize_external_markdown;
 use crate::sensing::{
@@ -24,6 +27,8 @@ const MAX_DEDUPLICATION_EXCERPT_CHARS: usize = 480;
 #[serde(rename_all = "camelCase")]
 pub struct SignalEvent {
     pub id: String,
+    #[serde(default)]
+    pub kind: SignalKind,
     #[serde(alias = "candidate_id")]
     pub candidate_id: String,
     /// A stable identity derived from the underlying event and sources. Candidate
@@ -52,10 +57,22 @@ pub struct SignalEvent {
     pub observed_at: String,
     #[serde(alias = "review_reason")]
     pub review_reason: String,
+    /// Exact transient inputs this event examines. Relations remain local to
+    /// the chat stream until the user explicitly replies to the event.
+    #[serde(default, alias = "related_signal_ids")]
+    pub related_signal_ids: Vec<String>,
     #[serde(default, alias = "promoted_revision_id")]
     pub promoted_revision_id: Option<String>,
     #[serde(default)]
     pub hidden: bool,
+}
+
+#[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SignalKind {
+    #[default]
+    ExternalInput,
+    AttackerChallenge,
 }
 
 /// Bounded, read-only comparison material for the existing ambient review.
@@ -83,6 +100,7 @@ struct SignalDocument {
 pub struct SignalStore {
     path: PathBuf,
     document: RwLock<SignalDocument>,
+    changes: watch::Sender<u64>,
 }
 
 #[derive(Clone, Debug)]
@@ -112,6 +130,7 @@ impl SignalStore {
         let store = Self {
             path,
             document: RwLock::new(document),
+            changes: watch::channel(0).0,
         };
         if changed {
             store.persist().await?;
@@ -167,6 +186,7 @@ impl SignalStore {
         let sequence = document.signals.len();
         let event = SignalEvent {
             id: format!("signal_{}_{}", now.timestamp_millis(), sequence),
+            kind: SignalKind::ExternalInput,
             candidate_id: candidate.id.clone(),
             fingerprint: candidate.fingerprint.clone(),
             actor: candidate.actor.clone(),
@@ -183,6 +203,7 @@ impl SignalStore {
             event_at: candidate.event_at.clone(),
             observed_at: timestamp(now),
             review_reason: review_reason.trim().to_owned(),
+            related_signal_ids: Vec::new(),
             promoted_revision_id: None,
             hidden: false,
         };
@@ -190,6 +211,76 @@ impl SignalStore {
         normalize_and_prune(&mut document, now);
         drop(document);
         self.persist().await?;
+        self.notify_changed();
+        Ok(SignalPublishOutcome::Published)
+    }
+
+    /// Publishes a restrained challenge as another transient conversation
+    /// event. It is deliberately not an assistant message and therefore does
+    /// not enter PCP unless the user chooses to reply to it.
+    pub async fn publish_attacker_challenge(
+        &self,
+        actor: InputRoleSnapshot,
+        issue_key: &str,
+        message: String,
+        reason: String,
+        related_signal_ids: Vec<String>,
+        sources: Vec<SensingSource>,
+    ) -> Result<SignalPublishOutcome> {
+        let now = Utc::now();
+        let mut document = self.document.write().await;
+        // Keep retries idempotent without turning one disputed issue into a
+        // permanent ban. The Attacker store enforces the precise rolling
+        // cooldown; this coarse epoch also survives a crash between timeline
+        // publication and reviewer-state persistence.
+        let cooldown_epoch = now.timestamp() / (7 * 24 * 60 * 60);
+        let fingerprint = format!("attacker|{}|{cooldown_epoch}", normalize(issue_key));
+        if document
+            .signals
+            .iter()
+            .any(|signal| signal.fingerprint == fingerprint)
+        {
+            return Ok(SignalPublishOutcome::Existing);
+        }
+        let related = related_signal_ids
+            .into_iter()
+            .filter(|id| {
+                document
+                    .signals
+                    .iter()
+                    .any(|signal| signal.id == *id && signal.kind == SignalKind::ExternalInput)
+            })
+            .collect::<Vec<_>>();
+        if related.is_empty() {
+            anyhow::bail!("attacker challenge requires at least one known external input");
+        }
+        let sequence = document.signals.len();
+        let event = SignalEvent {
+            id: format!("signal_{}_{}", now.timestamp_millis(), sequence),
+            kind: SignalKind::AttackerChallenge,
+            candidate_id: format!("attacker_{}", now.timestamp_millis()),
+            fingerprint,
+            actor,
+            content: message.trim().to_owned(),
+            received_text: message.trim().to_owned(),
+            presentation: SensingPresentation::Original,
+            qualification_note: None,
+            title: "逆向审视".to_owned(),
+            summary: message.trim().to_owned(),
+            sources,
+            source_class: SensingSourceClass::OpenDiscovery,
+            event_at: None,
+            observed_at: timestamp(now),
+            review_reason: reason.trim().to_owned(),
+            related_signal_ids: related,
+            promoted_revision_id: None,
+            hidden: false,
+        };
+        document.signals.push(event);
+        normalize_and_prune(&mut document, now);
+        drop(document);
+        self.persist().await?;
+        self.notify_changed();
         Ok(SignalPublishOutcome::Published)
     }
 
@@ -221,12 +312,34 @@ impl SignalStore {
             .cloned())
     }
 
+    pub async fn attacker_inputs(&self) -> Result<Vec<SignalEvent>> {
+        let now = Utc::now();
+        let mut document = self.document.write().await;
+        let changed = normalize_and_prune(&mut document, now);
+        let signals = document
+            .signals
+            .iter()
+            .filter(|signal| signal.kind == SignalKind::ExternalInput && !signal.hidden)
+            .cloned()
+            .collect();
+        drop(document);
+        if changed {
+            self.persist().await?;
+        }
+        Ok(signals)
+    }
+
+    pub fn subscribe(&self) -> watch::Receiver<u64> {
+        self.changes.subscribe()
+    }
+
     pub async fn deduplication_references(&self) -> Vec<SignalDeduplicationReference> {
         let document = self.document.read().await;
         document
             .signals
             .iter()
             .rev()
+            .filter(|signal| signal.kind == SignalKind::ExternalInput)
             .take(MAX_DEDUPLICATION_REFERENCES)
             .map(|signal| SignalDeduplicationReference {
                 signal_id: signal.id.clone(),
@@ -265,6 +378,7 @@ impl SignalStore {
         drop(document);
         if dismissed {
             self.persist().await?;
+            self.notify_changed();
         }
         Ok(dismissed)
     }
@@ -292,8 +406,14 @@ impl SignalStore {
         drop(document);
         if event.is_some() {
             self.persist().await?;
+            self.notify_changed();
         }
         Ok(event)
+    }
+
+    fn notify_changed(&self) {
+        let next = self.changes.borrow().wrapping_add(1);
+        self.changes.send_replace(next);
     }
 
     async fn persist(&self) -> Result<()> {
@@ -695,6 +815,51 @@ mod tests {
         );
         assert_eq!(references[0].excerpt.chars().count(), 481);
         assert!(references[0].excerpt.ends_with('…'));
+        let _ = tokio::fs::remove_file(path).await;
+    }
+
+    #[tokio::test]
+    async fn attacker_challenge_keeps_relations_without_polluting_input_deduplication() {
+        let nonce = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let path = std::env::temp_dir().join(format!("symbiont-signals-attacker-{nonce}.json"));
+        let store = SignalStore::open(path.clone()).await.unwrap();
+        store
+            .publish_with_content(
+                &candidate("sense_attacked"),
+                "A model input.".to_owned(),
+                "credible".to_owned(),
+            )
+            .await
+            .unwrap();
+        let source = store.visible(10).await.unwrap().remove(0);
+        let actor = InputRoleSnapshot::ambient("attacker", "逆向审视", "gpt-test", "codex");
+
+        let outcome = store
+            .publish_attacker_challenge(
+                actor,
+                "benchmark-overclaim",
+                "这个结论把受控基准外推到了真实部署，而公开复现实验并不支持这一步。".to_owned(),
+                "A consequential extrapolation needs correction.".to_owned(),
+                vec![source.id.clone()],
+                vec![SensingSource {
+                    url: "https://example.test/counterevidence".to_owned(),
+                    detail: "Independent reproduction".to_owned(),
+                }],
+            )
+            .await
+            .unwrap();
+
+        assert!(matches!(outcome, SignalPublishOutcome::Published));
+        let visible = store.visible(10).await.unwrap();
+        let challenge = visible.last().unwrap();
+        assert_eq!(challenge.kind, super::SignalKind::AttackerChallenge);
+        assert_eq!(challenge.related_signal_ids, vec![source.id]);
+        let references = store.deduplication_references().await;
+        assert_eq!(references.len(), 1);
+        assert_eq!(references[0].signal_id, visible[0].id);
         let _ = tokio::fs::remove_file(path).await;
     }
 }

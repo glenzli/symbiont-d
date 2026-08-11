@@ -19,6 +19,8 @@ const DEFAULT_ATTENTION_POSTURE: &str = "我不想每天自己刷新闻。除了
 #[serde(rename_all = "camelCase")]
 pub struct AutonomyConfig {
     pub enabled: bool,
+    #[serde(default = "default_attacker_enabled")]
+    pub attacker_enabled: bool,
     pub interval_minutes: u32,
     #[serde(default = "default_max_input_parallelism")]
     pub max_input_parallelism: u8,
@@ -110,6 +112,7 @@ impl Default for AutonomyConfig {
     fn default() -> Self {
         Self {
             enabled: false,
+            attacker_enabled: true,
             interval_minutes: 360,
             max_input_parallelism: DEFAULT_MAX_INPUT_PARALLELISM,
             daily_interrupt_limit: 2,
@@ -164,6 +167,10 @@ const fn default_daily_note_limit() -> u8 {
 
 const fn default_max_input_parallelism() -> u8 {
     DEFAULT_MAX_INPUT_PARALLELISM
+}
+
+const fn default_attacker_enabled() -> bool {
+    true
 }
 
 fn default_attention_posture() -> String {

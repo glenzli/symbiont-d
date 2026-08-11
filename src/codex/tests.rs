@@ -164,6 +164,19 @@ fn autonomous_scout_sees_only_its_read_only_tool_surface() {
 }
 
 #[test]
+fn attacker_sees_only_its_single_publication_gate() {
+    let specs = SymbiontTools::attacker_specifications();
+    assert_eq!(specs.as_array().unwrap().len(), 1);
+    let tools = specs[0]["tools"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter_map(|tool| tool["name"].as_str())
+        .collect::<Vec<_>>();
+    assert_eq!(tools, vec!["submit_attacker_assessment"]);
+}
+
+#[test]
 fn ambient_sensing_does_not_receive_the_user_orientation() {
     let profile = ProfileSnapshot {
         status: SetupStatus::Ready,

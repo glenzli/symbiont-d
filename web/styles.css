@@ -888,6 +888,17 @@ html[data-native-shell="macos"] .topbar {
   font-size: inherit;
 }
 
+.input-signal.attacker-challenge .message-body {
+  border-left: 2px solid color-mix(in srgb, var(--text-soft) 48%, transparent);
+  padding-left: 10px;
+}
+
+.attacker-signal-relation {
+  margin: 7px 0 0;
+  color: var(--text-faint);
+  font-size: 9px;
+}
+
 .input-signal-foot {
   justify-content: space-between;
 }

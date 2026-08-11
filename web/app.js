@@ -45,6 +45,7 @@ const appState = {
     reflectionTokensToday: 0,
   },
   exploration: null,
+  attacker: null,
   reflection: null,
   reconciliation: null,
   memoryIndex: null,
@@ -344,6 +345,8 @@ function appendInputSignal(signal, options = {}) {
   article.className = "message input-signal";
   article.dataset.signalId = signal.id;
   article.dataset.inputRoleId = signal.actor?.id || "";
+  article.dataset.signalKind = signal.kind || "external_input";
+  if (signal.kind === "attacker_challenge") article.classList.add("attacker-challenge");
   article.dataset.signalObservedAt =
     signal.observedAt || signal.observed_at || new Date().toISOString();
   const layout = document.createElement("div");
@@ -376,7 +379,7 @@ function appendInputSignal(signal, options = {}) {
   const observedLabel = !Number.isNaN(observedAt.getTime())
     ? `采集于 ${observedAt.toLocaleDateString([], { month: "numeric", day: "numeric" })}`
     : null;
-  label.textContent = ["外部输入", eventLabel, observedLabel].filter(Boolean).join(" · ");
+  label.textContent = [signal.kind === "attacker_challenge" ? "逆向审视" : "外部输入", eventLabel, observedLabel].filter(Boolean).join(" · ");
   meta.append(speaker, label, time);
   const receivedText = signal.receivedText || signal.received_text || signal.summary || "";
   const displayText = signal.content || receivedText || signal.title;
@@ -440,6 +443,12 @@ function appendInputSignal(signal, options = {}) {
   renderIcons(actions);
   foot.append(title, actions);
   content.append(meta, body);
+  if (signal.kind === "attacker_challenge" && signal.relatedSignalIds?.length) {
+    const relation = document.createElement("p");
+    relation.className = "attacker-signal-relation";
+    relation.textContent = `↳ 回应 ${signal.relatedSignalIds.length} 条外部输入`;
+    content.append(relation);
+  }
   const isCondensed = signal.presentation === "condensed";
   if (isCondensed && receivedText && receivedText.trim() !== displayText.trim()) {
     const original = document.createElement("details");
@@ -712,6 +721,7 @@ function renderRuntimeStatus() {
   }
   connectionStatus.textContent = "在线";
   const exploration = appState.exploration;
+  const attacker = appState.attacker;
   const phase = exploration?.phase;
   if (phase === "exploring") {
     const reviewing = exploration.currentReviewCandidateCount
@@ -722,6 +732,11 @@ function renderRuntimeStatus() {
       : "";
     setRuntimeStatus(
       `${exploration.currentActivity?.label || "正在主动探索"}${reviewing}${candidates}`,
+      "working",
+    );
+  } else if (attacker?.phase === "reviewing") {
+    setRuntimeStatus(
+      `正在逆向审视 ${attacker.currentBatchSize || 0} 条外部输入`,
       "working",
     );
   } else if (phase === "quiet_hours") {
@@ -768,6 +783,7 @@ function applyRuntime(payload) {
   appState.audioTranscription =
     payload.audioTranscription || appState.audioTranscription;
   appState.exploration = payload.exploration || appState.exploration;
+  appState.attacker = payload.attacker || appState.attacker;
   if (payload.reflection) {
     appState.reflection = appState.reflection?.config
       ? { ...appState.reflection, runtime: payload.reflection }

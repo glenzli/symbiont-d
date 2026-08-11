@@ -114,6 +114,7 @@ async fn replied_external_signal_becomes_a_visible_pcp_source_reference() {
         .expect("open host");
     let signal = SignalEvent {
         id: "signal-reference-test".to_owned(),
+        kind: crate::signals::SignalKind::ExternalInput,
         candidate_id: "candidate-reference-test".to_owned(),
         fingerprint: "fingerprint-reference-test".to_owned(),
         actor: InputRoleSnapshot::ambient("luna", "Luna", "gpt-test", "codex"),
@@ -131,6 +132,7 @@ async fn replied_external_signal_becomes_a_visible_pcp_source_reference() {
         event_at: Some("2026-08-10T12:00:00.000Z".to_owned()),
         observed_at: "2026-08-10T12:05:00.000Z".to_owned(),
         review_reason: "Worth presenting as an external input".to_owned(),
+        related_signal_ids: Vec::new(),
         promoted_revision_id: None,
         hidden: false,
     };

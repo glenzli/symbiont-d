@@ -30,6 +30,7 @@ use ephemeral_discussion::{
 use crate::{
     ambient_api::{AmbientConfig, AmbientSnapshot, AmbientTopologyStore},
     asset::{AssetStore, MAX_IMAGE_BYTES, MAX_IMAGES_PER_MESSAGE, SavedImage},
+    attacker::{AttackerHandle, AttackerSnapshot},
     audio_transcription::{
         AudioTranscriptionConfig, AudioTranscriptionSnapshot, AudioTranscriptionStore,
         MAX_AUDIO_BYTES, TranscriptionResult,
@@ -155,6 +156,7 @@ pub struct AppState {
     usage: Arc<UsageStore>,
     rate_limits: Arc<RwLock<Option<RateLimitInfo>>>,
     exploration: ExplorationHandle,
+    attacker: AttackerHandle,
     signals: Arc<SignalStore>,
     input_roles: Arc<InputRoleStore>,
     reflection: ReflectionHandle,
@@ -187,6 +189,7 @@ impl AppState {
         usage: Arc<UsageStore>,
         rate_limits: Arc<RwLock<Option<RateLimitInfo>>>,
         exploration: ExplorationHandle,
+        attacker: AttackerHandle,
         signals: Arc<SignalStore>,
         input_roles: Arc<InputRoleStore>,
         reflection: ReflectionHandle,
@@ -220,6 +223,7 @@ impl AppState {
             usage,
             rate_limits,
             exploration,
+            attacker,
             signals,
             input_roles,
             reflection,
@@ -285,6 +289,7 @@ struct BootstrapResponse {
     rate_limits: Option<RateLimitInfo>,
     usage: UsageHeadline,
     exploration: ExplorationSnapshot,
+    attacker: AttackerSnapshot,
     reflection: ReflectionSnapshot,
     reconciliation: ReconciliationSnapshot,
     memory_index: PcpIndexSnapshot,
@@ -311,6 +316,7 @@ struct RuntimeResponse {
     mail_input: MailInputSnapshot,
     audio_transcription: AudioTranscriptionSnapshot,
     exploration: ExplorationSnapshot,
+    attacker: AttackerSnapshot,
     reflection: ReflectionRuntime,
     reconciliation: ReconciliationRuntime,
     memory_index: PcpIndexSnapshot,
@@ -1011,7 +1017,12 @@ async fn bootstrap(State(state): State<AppState>) -> Result<Json<BootstrapRespon
     let mail_input = state.mail_input.snapshot().await;
     let input_roles = state
         .input_roles
-        .snapshot(&ambient, &drive_input, &mail_input)
+        .snapshot(
+            &ambient,
+            &drive_input,
+            &mail_input,
+            autonomy.attacker_enabled,
+        )
         .await;
 
     Ok(Json(BootstrapResponse {
@@ -1035,6 +1046,7 @@ async fn bootstrap(State(state): State<AppState>) -> Result<Json<BootstrapRespon
         rate_limits: state.rate_limits.read().await.clone(),
         usage,
         exploration,
+        attacker: state.attacker.snapshot().await,
         reflection: state
             .reflection
             .snapshot()
@@ -1257,7 +1269,12 @@ async fn update_input_roles(
     Ok(Json(
         state
             .input_roles
-            .snapshot(&ambient, &drive_input, &mail_input)
+            .snapshot(
+                &ambient,
+                &drive_input,
+                &mail_input,
+                state.autonomy.snapshot().await.attacker_enabled,
+            )
             .await,
     ))
 }
@@ -1269,7 +1286,12 @@ async fn input_roles_snapshot(State(state): State<AppState>) -> Json<InputRoleSe
     Json(
         state
             .input_roles
-            .snapshot(&ambient, &drive_input, &mail_input)
+            .snapshot(
+                &ambient,
+                &drive_input,
+                &mail_input,
+                state.autonomy.snapshot().await.attacker_enabled,
+            )
             .await,
     )
 }
@@ -1598,7 +1620,12 @@ async fn runtime(
     let mail_input = state.mail_input.snapshot().await;
     let input_roles = state
         .input_roles
-        .snapshot(&ambient, &drive_input, &mail_input)
+        .snapshot(
+            &ambient,
+            &drive_input,
+            &mail_input,
+            state.autonomy.snapshot().await.attacker_enabled,
+        )
         .await;
     Ok(Json(RuntimeResponse {
         identity: state.identity.snapshot().await,
@@ -1608,6 +1635,7 @@ async fn runtime(
         mail_input,
         audio_transcription: state.audio_transcription.snapshot().await,
         exploration: state.exploration.snapshot().await,
+        attacker: state.attacker.snapshot().await,
         reflection: state.reflection.runtime().await,
         reconciliation: state.reconciliation.runtime().await,
         memory_index: state.pcp_index.snapshot().await,
@@ -3052,17 +3080,26 @@ fn codex_task_context(detail: crate::codex::CodexTaskDetail) -> ExternalContext 
 }
 
 fn signal_context(signal: &SignalEvent) -> ExternalContext {
+    let relation = if signal.related_signal_ids.is_empty() {
+        String::new()
+    } else {
+        format!(
+            "\nRelated transient input IDs: {}\n",
+            signal.related_signal_ids.join(", ")
+        )
+    };
     ExternalContext {
         source: "symbiont_input_signal".to_owned(),
         title: format!("{} · {}", signal.actor.name, signal.title),
         content: format!(
-            "Input-only model role: {} ({}, {}). This is an external signal the user chose to reply to; respond as symbiont-d, do not impersonate the input role. Treat the following as a self-contained source packet: restate the relevant factual context before interpreting it, and never assume the user saw an earlier card.\n\nTitle: {}\nUnderlying event date: {}\nObserved by Symbiont: {}\n\nReceived text:\n{}\n\nDisplayed text:\n{}\n\nQualification:\n{}\n\nSources:\n{}",
+            "Input-only model role: {} ({}, {}). This is a transient external-input or adversarial-review event the user chose to reply to; respond as symbiont-d, do not impersonate the input role. Treat the following as a self-contained source packet: restate the relevant factual context before interpreting it, and never assume the user saw an earlier card.\n\nTitle: {}\nUnderlying event date: {}\nObserved by Symbiont: {}\n{}\nReceived text:\n{}\n\nDisplayed text:\n{}\n\nQualification:\n{}\n\nSources:\n{}",
             signal.actor.name,
             signal.actor.model,
             signal.actor.effort,
             signal.title,
             signal.event_at.as_deref().unwrap_or("not supplied"),
             signal.observed_at,
+            relation,
             signal.received_text,
             signal.content,
             signal.qualification_note.as_deref().unwrap_or("none"),

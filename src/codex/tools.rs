@@ -8,6 +8,7 @@ use pcp_core::{
 use serde_json::{Value, json};
 
 use crate::{
+    attacker::SUBMIT_ATTACKER_ASSESSMENT_TOOL,
     compute::ComputeLane,
     compute_policy::{ComputePolicyStore, ComputeTopicPolicyDraft},
     continuation::ContinuationQueue,
@@ -1098,6 +1099,44 @@ impl SymbiontTools {
         specifications
     }
 
+    pub(super) fn attacker_specifications() -> Value {
+        json!([{
+            "type": "namespace",
+            "name": "symbiont",
+            "description": "A narrow handoff for adversarial review of transient external inputs.",
+            "tools": [{
+                "type": "function",
+                "name": SUBMIT_ATTACKER_ASSESSMENT_TOOL,
+                "description": "Complete one adversarial review. Publish only a concrete, evidence-backed correction or counterargument; otherwise remain silent.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "disposition": {"type": "string", "enum": ["silent", "challenge"]},
+                        "issue_key": {"type": "string", "maxLength": 240, "description": "Stable semantic identity of the disputed issue, not a timestamp or run id."},
+                        "message": {"type": "string", "maxLength": 2400, "description": "Exact concise user-visible challenge in Simplified Chinese. Empty when silent."},
+                        "reason": {"type": "string", "maxLength": 1200, "description": "Private publication-gate reasoning."},
+                        "related_signal_ids": {"type": "array", "minItems": 1, "maxItems": 8, "items": {"type": "string"}},
+                        "sources": {
+                            "type": "array",
+                            "maxItems": 5,
+                            "items": {
+                                "type": "object",
+                                "properties": {
+                                    "url": {"type": "string", "maxLength": 900},
+                                    "detail": {"type": "string", "maxLength": 800}
+                                },
+                                "required": ["url", "detail"],
+                                "additionalProperties": false
+                            }
+                        }
+                    },
+                    "required": ["disposition", "issue_key", "message", "reason", "related_signal_ids", "sources"],
+                    "additionalProperties": false
+                }
+            }]
+        }])
+    }
+
     #[cfg(test)]
     pub(super) async fn execute(&self, params: &Value) -> ToolExecution {
         self.execute_for_model(params, None, "interactive").await
@@ -1171,6 +1210,9 @@ impl SymbiontTools {
         }
         if run_origin == "autonomous_scout" && tool != "submit_exploration_finding" {
             anyhow::bail!("{tool} is outside the read-only autonomous reconnaissance boundary");
+        }
+        if run_origin == "attacker" && tool != SUBMIT_ATTACKER_ASSESSMENT_TOOL {
+            anyhow::bail!("{tool} is outside the adversarial-review publication gate");
         }
         if matches!(run_origin, "ambient_sense" | "luna_sense")
             && tool != "submit_sensing_candidates"
@@ -1663,6 +1705,60 @@ impl SymbiontTools {
                         "kind": kind,
                         "sourceRevisionIds": source_revision_ids
                     }))?,
+                    None,
+                ))
+            }
+            SUBMIT_ATTACKER_ASSESSMENT_TOOL => {
+                if run_origin != "attacker" {
+                    anyhow::bail!("{tool} is available only to adversarial external-input review");
+                }
+                let disposition = required_text(arguments, "disposition")?;
+                if !matches!(disposition, "silent" | "challenge") {
+                    anyhow::bail!("attacker disposition must be silent or challenge");
+                }
+                let issue_key = required_text(arguments, "issue_key")?;
+                let message = arguments
+                    .get("message")
+                    .and_then(Value::as_str)
+                    .unwrap_or("")
+                    .trim();
+                let reason = required_text(arguments, "reason")?;
+                let related = string_array(arguments, "related_signal_ids")?;
+                let sources = arguments
+                    .get("sources")
+                    .and_then(Value::as_array)
+                    .context("attacker assessment requires sources")?;
+                if related.is_empty() || related.len() > 8 {
+                    anyhow::bail!("attacker assessment requires one to eight related signals");
+                }
+                if disposition == "challenge" && message.is_empty() {
+                    anyhow::bail!("an attacker challenge requires user-visible text");
+                }
+                if disposition == "silent" && !message.is_empty() {
+                    anyhow::bail!("a silent attacker assessment cannot contain a message");
+                }
+                if issue_key.chars().count() > 240
+                    || message.chars().count() > 2_400
+                    || reason.chars().count() > 1_200
+                    || sources.len() > 5
+                {
+                    anyhow::bail!("attacker assessment exceeds its bounded contract");
+                }
+                for source in sources {
+                    let source_url = required_text(source, "url")?;
+                    let parsed_url = reqwest::Url::parse(source_url)
+                        .context("attacker source must be an absolute URL")?;
+                    if !matches!(parsed_url.scheme(), "http" | "https") {
+                        anyhow::bail!("attacker sources must use http or https");
+                    }
+                    if source_url.chars().count() > 900
+                        || required_text(source, "detail")?.chars().count() > 800
+                    {
+                        anyhow::bail!("attacker source exceeds its compact contract");
+                    }
+                }
+                Ok((
+                    serde_json::to_string(&json!({"accepted": true, "disposition": disposition}))?,
                     None,
                 ))
             }

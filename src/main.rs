@@ -2,6 +2,7 @@
 
 mod ambient_api;
 mod asset;
+mod attacker;
 mod audio_transcription;
 mod autonomy;
 mod bridge;
@@ -59,6 +60,7 @@ use std::{
 use ambient_api::{AmbientScout, AmbientTopologyStore};
 use anyhow::{Context, Result};
 use asset::AssetStore;
+use attacker::AttackerHandle;
 use audio_transcription::AudioTranscriptionStore;
 use autonomy::AutonomyStore;
 use bridge::CodexBridge;
@@ -427,6 +429,17 @@ async fn main() -> Result<()> {
         exploration_intent_receiver,
     )
     .await;
+    let attacker = AttackerHandle::start(
+        resolve_data_path(&workspace, "SYMBIONT_ATTACKER_PATH", "attacker.json"),
+        Arc::clone(&autonomy),
+        Arc::clone(&profile),
+        Arc::clone(&codex),
+        Arc::clone(&compute),
+        Arc::clone(&signals),
+        Arc::clone(&usage),
+        conversation.clone(),
+    )
+    .await?;
     let reflection = ReflectionHandle::start(
         Arc::clone(&reflection_store),
         Arc::clone(&pcp_index),
@@ -509,6 +522,7 @@ async fn main() -> Result<()> {
         usage,
         rate_limits,
         exploration,
+        attacker,
         signals,
         input_roles,
         reflection,

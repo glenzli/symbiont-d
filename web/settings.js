@@ -70,6 +70,7 @@ export function initSettings(state, actions = {}) {
   const addComputePolicy = document.querySelector("#add-compute-policy");
   const autonomyForm = document.querySelector("#autonomy-form");
   const autonomyEnabled = document.querySelector("#autonomy-enabled");
+  const attackerEnabled = document.querySelector("#attacker-enabled");
   const autonomyInterval = document.querySelector("#autonomy-interval");
   const maxInputParallelism = document.querySelector("#max-input-parallelism");
   const dailyInterruptLimit = document.querySelector("#daily-interrupt-limit");
@@ -368,6 +369,7 @@ export function initSettings(state, actions = {}) {
   function renderAutonomyConfig() {
     if (!state.autonomy) return;
     autonomyEnabled.checked = state.autonomy.enabled;
+    attackerEnabled.checked = state.autonomy.attackerEnabled !== false;
     autonomyInterval.value = String(state.autonomy.intervalMinutes);
     maxInputParallelism.value = String(state.autonomy.maxInputParallelism || 1);
     dailyInterruptLimit.value = String(state.autonomy.dailyInterruptLimit);
@@ -799,6 +801,7 @@ export function initSettings(state, actions = {}) {
     autonomySaveState.textContent = "保存中";
     const config = {
       enabled: autonomyEnabled.checked,
+      attackerEnabled: attackerEnabled.checked,
       intervalMinutes: Number(autonomyInterval.value),
       maxInputParallelism: Number(maxInputParallelism.value),
       dailyInterruptLimit: Number(dailyInterruptLimit.value),

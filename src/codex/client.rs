@@ -40,6 +40,7 @@ use super::{
     },
 };
 use crate::{
+    attacker::{AttackerAssessment, attacker_assessment_from_invocations, attacker_prompt},
     compute::{ComputeConfig, ComputeLane, LaneConfig, ModelInfo},
     continuation::ContinuationQueue,
     continuity::ContinuityHost,
@@ -73,6 +74,7 @@ const PROFILE_REVIEW_COMPLETE_MARKER: &str = "<symbiont-profile-reviewed/>";
 const REFLECTION_COMPLETE_MARKER: &str = "<symbiont-reflected/>";
 const RECONCILIATION_COMPLETE_MARKER: &str = "<symbiont-reconciled/>";
 const CONTINUATION_SILENT_MARKER: &str = "<symbiont-no-continuation/>";
+const ATTACKER_COMPLETE_MARKER: &str = "<symbiont-attacker-reviewed/>";
 // Starting an app-server includes initializing account state and Symbiont's
 // isolated native threads. A cold desktop reconnect can take longer than a
 // plain process spawn; do not mistake that for a dead process.
@@ -166,6 +168,12 @@ pub struct LunaSensingOutcome {
     pub interrupted: bool,
 }
 
+pub struct AttackerOutcome {
+    pub assessment: Option<AttackerAssessment>,
+    pub invocations: Vec<InvocationRecord>,
+    pub interrupted: bool,
+}
+
 #[derive(Clone, Debug)]
 pub struct HunchRevisionRef {
     pub page_id: String,
@@ -253,6 +261,7 @@ enum BackgroundThread {
     LunaSensing,
     AutonomousScout,
     AutonomousReview,
+    Attacker,
     Maintenance,
 }
 
@@ -261,6 +270,7 @@ enum ToolSurface {
     Full,
     LunaSensing,
     AutonomousScout,
+    Attacker,
 }
 
 pub struct CodexClient {
@@ -274,6 +284,7 @@ pub struct CodexClient {
     luna_sensing_thread_id: String,
     autonomous_scout_thread_id: String,
     autonomous_review_thread_id: String,
+    attacker_thread_id: String,
     maintenance_thread_id: String,
     workspace: PathBuf,
     continuity: Arc<ContinuityHost>,
@@ -413,6 +424,7 @@ impl CodexClient {
             luna_sensing_thread_id: String::new(),
             autonomous_scout_thread_id: String::new(),
             autonomous_review_thread_id: String::new(),
+            attacker_thread_id: String::new(),
             maintenance_thread_id: String::new(),
             workspace: config.workspace.clone(),
             continuity: Arc::clone(&dependencies.continuity),
@@ -799,6 +811,55 @@ impl CodexClient {
         })
     }
 
+    pub async fn review_attacker_signals(
+        &mut self,
+        packet: &str,
+        compute: &ComputeConfig,
+        profile: &ProfileSnapshot,
+        input_events: watch::Receiver<u64>,
+        events: mpsc::Sender<RuntimeEvent>,
+    ) -> Result<AttackerOutcome> {
+        if self.attacker_thread_id.is_empty() {
+            self.attacker_thread_id = self
+                .start_thread(&self.workspace.clone(), ToolSurface::Attacker)
+                .await?;
+        }
+        let thread_id = self.attacker_thread_id.clone();
+        let outcome = self
+            .run_request(
+                thread_id.clone(),
+                text_input_items(&attacker_prompt(packet, ATTACKER_COMPLETE_MARKER)),
+                ComputeLane::Investigate,
+                "attacker",
+                compute,
+                profile,
+                "",
+                None,
+                None,
+                false,
+                Some(input_events),
+                &events,
+            )
+            .await?;
+        if !outcome.interrupted {
+            self.renew_background_thread(&thread_id, BackgroundThread::Attacker)
+                .await;
+        }
+        let assessment = (!outcome.interrupted)
+            .then(|| attacker_assessment_from_invocations(&outcome.invocations))
+            .transpose()?
+            .flatten();
+        let mut invocations = outcome.invocations;
+        for invocation in &mut invocations {
+            invocation.produced_message = false;
+        }
+        Ok(AttackerOutcome {
+            assessment,
+            invocations,
+            interrupted: outcome.interrupted,
+        })
+    }
+
     pub async fn maintain_summary(
         &mut self,
         target_revision_id: &str,
@@ -1144,6 +1205,7 @@ impl CodexClient {
         let tool_surface = match slot {
             BackgroundThread::LunaSensing => ToolSurface::LunaSensing,
             BackgroundThread::AutonomousScout => ToolSurface::AutonomousScout,
+            BackgroundThread::Attacker => ToolSurface::Attacker,
             BackgroundThread::AutonomousReview | BackgroundThread::Maintenance => ToolSurface::Full,
         };
         match self.start_thread(&workspace, tool_surface).await {
@@ -1152,6 +1214,7 @@ impl CodexClient {
                     BackgroundThread::LunaSensing => self.luna_sensing_thread_id = next,
                     BackgroundThread::AutonomousScout => self.autonomous_scout_thread_id = next,
                     BackgroundThread::AutonomousReview => self.autonomous_review_thread_id = next,
+                    BackgroundThread::Attacker => self.attacker_thread_id = next,
                     BackgroundThread::Maintenance => self.maintenance_thread_id = next,
                 }
                 self.clear_thread_state(previous);
@@ -1412,7 +1475,7 @@ impl CodexClient {
             // message can interrupt their work immediately.
             (Vec::new(), false)
         };
-        let mut fragments = if origin == "luna_sense" {
+        let mut fragments = if matches!(origin, "luna_sense" | "attacker") {
             Vec::new()
         } else {
             context_fragments(
@@ -1856,12 +1919,15 @@ impl CodexClient {
     ) -> Result<String> {
         let instructions = match tool_surface {
             ToolSurface::LunaSensing => luna_sensing_developer_instructions().to_owned(),
-            ToolSurface::Full | ToolSurface::AutonomousScout => developer_instructions(),
+            ToolSurface::Full | ToolSurface::AutonomousScout | ToolSurface::Attacker => {
+                developer_instructions()
+            }
         };
         let dynamic_tools = match tool_surface {
             ToolSurface::Full => SymbiontTools::specifications(),
             ToolSurface::LunaSensing => SymbiontTools::sensing_specifications(),
             ToolSurface::AutonomousScout => SymbiontTools::scout_specifications(),
+            ToolSurface::Attacker => SymbiontTools::attacker_specifications(),
         };
         let result = self
             .request(

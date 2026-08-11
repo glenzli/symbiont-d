@@ -23,6 +23,7 @@ impl InvocationActivity {
             "ambient_review" => Self::exploration("review"),
             "autonomous_scout" => Self::exploration("scout"),
             "autonomous" => Self::exploration("review"),
+            "attacker" => Self::exploration("challenge"),
             "reflection" => Self::reflection("organize"),
             "maintenance" => Self::maintenance("context"),
             "pcp_maintenance" => Self::maintenance("pcp"),

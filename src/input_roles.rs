@@ -100,6 +100,7 @@ impl InputRoleStore {
         ambient: &AmbientSnapshot,
         drive: &DriveInputSnapshot,
         mail: &MailInputSnapshot,
+        attacker_enabled: bool,
     ) -> InputRoleSettingsSnapshot {
         let document = self.document.read().await;
         let mut roles = Vec::new();
@@ -146,6 +147,15 @@ impl InputRoleStore {
                 "mailbox",
                 "IMAP · 私有收件箱",
                 &mail.config.name,
+            ));
+        }
+        if attacker_enabled {
+            roles.push(descriptor(
+                &document,
+                "symbiont_attacker",
+                "reviewer",
+                "Codex · 逆向审视",
+                "逆向审视",
             ));
         }
         InputRoleSettingsSnapshot {
@@ -241,6 +251,9 @@ fn descriptor(
 }
 
 fn default_avatar(id: &str) -> &'static str {
+    if id == "symbiont_attacker" {
+        return "prism";
+    }
     let hash = id.bytes().fold(0usize, |hash, byte| {
         hash.wrapping_mul(31).wrapping_add(byte as usize)
     });
@@ -287,6 +300,7 @@ mod tests {
         let first = default_avatar("ambient_luna");
         assert_eq!(first, default_avatar("ambient_luna"));
         assert!(INPUT_ROLE_AVATARS.contains(&first));
+        assert_eq!(default_avatar("symbiont_attacker"), "prism");
     }
 
     #[test]
