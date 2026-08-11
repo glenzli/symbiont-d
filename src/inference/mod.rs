@@ -312,7 +312,7 @@ impl InferenceExecutor {
         priority: &str,
     ) -> Result<(RuntimeConnection, Response, &'static str)> {
         let intent = workload.intent();
-        let request = responses_request(intent, instructions, input.clone(), priority);
+        let request = responses_request(workload, instructions, input.clone(), priority);
         match self.send(&connection, &request).await {
             Ok(response) => Ok((connection, response, intent)),
             Err(first_error) => {
@@ -322,7 +322,7 @@ impl InferenceExecutor {
                 }
                 let refreshed_intent = workload.intent();
                 let refreshed_request =
-                    responses_request(refreshed_intent, instructions, input.clone(), priority);
+                    responses_request(workload, instructions, input.clone(), priority);
                 let response = self
                     .send(&refreshed, &refreshed_request)
                     .await
@@ -432,15 +432,21 @@ fn extract_output_text(payload: &Value) -> Option<String> {
     (!chunks.is_empty()).then(|| chunks.join("\n"))
 }
 
-fn responses_request(intent: &str, instructions: &str, input: Value, priority: &str) -> Value {
+fn responses_request(
+    workload: InferenceWorkload,
+    instructions: &str,
+    input: Value,
+    priority: &str,
+) -> Value {
     json!({
-        "model": intent,
+        "model": workload.intent(),
         "input": input,
         "instructions": instructions,
         "stream": false,
         "store": false,
         "metadata": {
             "infer.priority": priority,
+            "infer.capability_floor": workload.capability_floor(),
             "infer.max_cost_usd": "0"
         }
     })
@@ -588,7 +594,7 @@ mod tests {
     #[test]
     fn generic_requests_are_stateless_tool_free_and_zero_cost() {
         let request = responses_request(
-            InferenceWorkload::LanguageResponse.intent(),
+            InferenceWorkload::LanguageResponse,
             "instructions",
             Value::String("input".to_owned()),
             "background",
@@ -597,6 +603,7 @@ mod tests {
         assert_eq!(request["stream"], false);
         assert_eq!(request["store"], false);
         assert_eq!(request["metadata"]["infer.priority"], "background");
+        assert_eq!(request["metadata"]["infer.capability_floor"], "advanced");
         assert_eq!(request["metadata"]["infer.max_cost_usd"], "0");
         assert!(
             request["metadata"]
@@ -643,6 +650,16 @@ mod tests {
         assert_eq!(
             pcp_maintenance_workload(&request),
             InferenceWorkload::DeepReasoning
+        );
+        let runtime_request = responses_request(
+            pcp_maintenance_workload(&request),
+            "instructions",
+            Value::String("input".to_owned()),
+            "background",
+        );
+        assert_eq!(
+            runtime_request["metadata"]["infer.capability_floor"],
+            "expert"
         );
     }
 }

@@ -20,6 +20,19 @@ impl InferenceWorkload {
             Self::TextSummarize => "text.summarize",
         }
     }
+
+    /// Minimum semantic capability accepted by Symbiont for this workload.
+    ///
+    /// Bounded mechanical work such as audio transcription has its own
+    /// contract. Every text workload here can affect conversation, attention,
+    /// or durable memory structure and therefore must not fall back to a
+    /// merely capable model.
+    pub(crate) fn capability_floor(self) -> &'static str {
+        match self {
+            Self::LanguageResponse | Self::TextSummarize => "advanced",
+            Self::DeepReasoning => "expert",
+        }
+    }
 }
 
 #[cfg(test)]
@@ -34,6 +47,22 @@ mod tests {
         );
         assert_eq!(InferenceWorkload::DeepReasoning.intent(), "reasoning.solve");
         assert_eq!(InferenceWorkload::TextSummarize.intent(), "text.summarize");
+    }
+
+    #[test]
+    fn semantic_workloads_never_accept_merely_capable_models() {
+        assert_eq!(
+            InferenceWorkload::LanguageResponse.capability_floor(),
+            "advanced"
+        );
+        assert_eq!(
+            InferenceWorkload::TextSummarize.capability_floor(),
+            "advanced"
+        );
+        assert_eq!(
+            InferenceWorkload::DeepReasoning.capability_floor(),
+            "expert"
+        );
     }
 
     #[test]
