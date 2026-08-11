@@ -104,6 +104,32 @@ export function renderMessageContent(target, entry, options = {}) {
       excerpt.textContent = part.quote.text;
       quote.append(meta, excerpt);
       target.append(quote);
+    } else if (part.type === "externalInput" && part.input) {
+      const reference = document.createElement("details");
+      reference.className = "message-external-input-reference";
+      if (part.input.sourceRevisionId) {
+        reference.dataset.sourceRevisionId = part.input.sourceRevisionId;
+      }
+      const summary = document.createElement("summary");
+      const label = document.createElement("small");
+      label.textContent = `来源 · ${part.input.actorName || "外部输入"}`;
+      const title = document.createElement("span");
+      title.textContent = part.input.title || "外部输入";
+      summary.append(label, title);
+      const body = document.createElement("div");
+      body.className = "message-external-input-body";
+      const excerpt = document.createElement("p");
+      excerpt.textContent = part.input.excerpt || "";
+      const meta = document.createElement("small");
+      meta.textContent = [
+        formatQuoteTime(part.input.observedAt),
+        part.input.sourceCount ? `${part.input.sourceCount} 个来源` : "",
+      ]
+        .filter(Boolean)
+        .join(" · ");
+      body.append(excerpt, meta);
+      reference.append(summary, body);
+      target.append(reference);
     }
   }
 }

@@ -8,6 +8,7 @@ import { manualCompletionNotice } from "/exploration-receipt.js";
 import { initIdentityUi } from "/identity-ui.js";
 import { applyInputRoleAvatar, initInputRoleUi } from "/input-roles.js";
 import { regroupInputSignals } from "/input-signal-groups.js";
+import { initConversationFocusUi } from "/conversation-focus-ui.js";
 import { initComputeModeUi } from "/compute-mode-ui.js";
 import { initComposerContextUi } from "/composer-context-ui.js";
 import { initVoiceInput } from "/voice-input.js";
@@ -83,6 +84,13 @@ const memorySize = document.querySelector("#memory-size");
 const tokenTotal = document.querySelector("#token-total");
 const messageTemplate = document.querySelector("#message-template");
 const scrollToLatestButton = document.querySelector("#scroll-to-latest");
+const conversationFocusButton = document.querySelector("#toggle-conversation-focus");
+const conversationFocusLabel = document.querySelector("#conversation-focus-label");
+const conversationFocusBanner = document.querySelector("#conversation-focus-banner");
+const conversationFocusHiddenCount = document.querySelector(
+  "#conversation-focus-hidden-count",
+);
+const conversationFocusShowAll = document.querySelector("#conversation-focus-show-all");
 
 let busy = false;
 let activityStartedAt = 0;
@@ -139,6 +147,16 @@ const turnDispositionUi = initTurnDispositionUi({
   conversation,
   messageActions,
   appendEphemeralReaction,
+  notify: notifyComposer,
+});
+initConversationFocusUi({
+  conversation,
+  button: conversationFocusButton,
+  buttonLabel: conversationFocusLabel,
+  banner: conversationFocusBanner,
+  hiddenCount: conversationFocusHiddenCount,
+  showAllButton: conversationFocusShowAll,
+  renderIcons,
   notify: notifyComposer,
 });
 
@@ -924,7 +942,8 @@ async function sendMessage(
     );
     return;
   }
-  const localEntry = localUserEntry(text, images, quotes, topic);
+  const signal = appState.signals.find((item) => item.id === signalId) || null;
+  const localEntry = localUserEntry(text, images, quotes, topic, signal);
   const outgoing = appendMessage(localEntry, { deliveryState: "pending" });
   activeOutgoing = [outgoing];
   const pending = appendMessage(
@@ -1066,7 +1085,8 @@ async function appendToActiveResponse(
   codexTaskIds = [],
   signalId = selectedSignalId,
 ) {
-  const outgoing = appendMessage(localUserEntry(text, images, quotes, topic), {
+  const signal = appState.signals.find((item) => item.id === signalId) || null;
+  const outgoing = appendMessage(localUserEntry(text, images, quotes, topic, signal), {
     deliveryState: "pending",
   });
   if (activePending?.isConnected) {
@@ -1097,7 +1117,7 @@ async function appendToActiveResponse(
   }
 }
 
-function localUserEntry(text, images, quotes, topic) {
+function localUserEntry(text, images, quotes, topic, signal = null) {
   return {
     role: "user",
     at: new Date().toISOString(),
@@ -1125,6 +1145,27 @@ function localUserEntry(text, images, quotes, topic) {
           truncated: quote.truncated === true,
         },
       })),
+      ...(signal
+        ? [
+            {
+              type: "externalInput",
+              input: {
+                sourceRevisionId: signal.promotedRevisionId || "",
+                actorName: signal.actor?.name || "外部输入",
+                title: signal.title || "外部输入",
+                observedAt:
+                  signal.observedAt || signal.observed_at || new Date().toISOString(),
+                excerpt:
+                  signal.content ||
+                  signal.receivedText ||
+                  signal.received_text ||
+                  signal.summary ||
+                  "",
+                sourceCount: signal.sources?.length || 0,
+              },
+            },
+          ]
+        : []),
       ...(text.trim() ? [{ type: "markdown", text: text.trim() }] : []),
       ...images.map((image) => ({
         type: "image",

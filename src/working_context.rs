@@ -142,7 +142,8 @@ fn bounded_tail(entries: &[MemoryEntry]) -> (Vec<WorkingContextMessage>, bool) {
                 MessagePart::Image { asset } => Some(asset.filename.clone()),
                 MessagePart::Markdown { .. }
                 | MessagePart::Quote { .. }
-                | MessagePart::Topic { .. } => None,
+                | MessagePart::Topic { .. }
+                | MessagePart::ExternalInput { .. } => None,
             })
             .collect::<Vec<_>>();
         let quotes = entry
@@ -159,7 +160,8 @@ fn bounded_tail(entries: &[MemoryEntry]) -> (Vec<WorkingContextMessage>, bool) {
                 }
                 MessagePart::Markdown { .. }
                 | MessagePart::Image { .. }
-                | MessagePart::Topic { .. } => None,
+                | MessagePart::Topic { .. }
+                | MessagePart::ExternalInput { .. } => None,
             })
             .take(WORKING_CONTEXT_MAX_QUOTES)
             .collect::<Vec<_>>();
@@ -167,7 +169,8 @@ fn bounded_tail(entries: &[MemoryEntry]) -> (Vec<WorkingContextMessage>, bool) {
             MessagePart::Topic { topic } => Some(topic.clone()),
             MessagePart::Markdown { .. }
             | MessagePart::Image { .. }
-            | MessagePart::Quote { .. } => None,
+            | MessagePart::Quote { .. }
+            | MessagePart::ExternalInput { .. } => None,
         });
         let quote_chars = serde_json::to_string(&quotes)
             .unwrap_or_default()

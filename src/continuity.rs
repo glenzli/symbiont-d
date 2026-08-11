@@ -30,8 +30,8 @@ use crate::{
     asset::{ImageAttachment, SavedImage},
     conversation_projection::ConversationProjection,
     memory::{
-        MemoryEntry, MemoryRole, MemoryStore, MessageDeliveryState, MessageMetadata, MessagePart,
-        MessageQuote, MessageQuoteDraft, MessageTopicReference,
+        MemoryEntry, MemoryRole, MemoryStore, MessageDeliveryState, MessageExternalInputReference,
+        MessageMetadata, MessagePart, MessageQuote, MessageQuoteDraft, MessageTopicReference,
     },
     profile::{ProfileSnapshot, SetupStatus},
     signals::SignalEvent,
@@ -206,6 +206,30 @@ impl ContinuityHost {
                 idempotency_key: Some(format!("external-signal:{}", signal.id)),
             })
             .await
+    }
+
+    async fn external_input_references(
+        &self,
+        revision_ids: &[String],
+    ) -> Result<Vec<MessageExternalInputReference>> {
+        if revision_ids.is_empty() {
+            return Ok(Vec::new());
+        }
+        let mut revision_ids = revision_ids.to_vec();
+        revision_ids.sort();
+        revision_ids.dedup();
+        let pages = self
+            .read(ReadPagesRequest {
+                page_ids: Vec::new(),
+                revision_ids,
+                projections: vec![Projection::Payload, Projection::Sources, Projection::Facets],
+                max_chars: 64_000,
+            })
+            .await?;
+        Ok(pages
+            .into_iter()
+            .filter_map(external_input_reference_from_page)
+            .collect())
     }
 
     pub fn access_session(owner_id: &str) -> AccessSession {
@@ -565,9 +589,17 @@ impl ContinuityHost {
             .ingest_image_assets(&images, &observed_at, &actor, tool_or_model.as_deref())
             .await
             .context("ingest image assets into PCP")?;
+        let external_inputs = if role == MemoryRole::User {
+            self.external_input_references(&links.input_revision_ids)
+                .await
+                .context("resolve external input references")?
+        } else {
+            Vec::new()
+        };
         let mut parts = Vec::with_capacity(
             images.len()
                 + links.quotes.len()
+                + external_inputs.len()
                 + usize::from(links.topic.is_some())
                 + usize::from(!content.is_empty()),
         );
@@ -580,6 +612,12 @@ impl ContinuityHost {
                 .iter()
                 .cloned()
                 .map(|quote| MessagePart::Quote { quote }),
+        );
+        parts.extend(
+            external_inputs
+                .iter()
+                .cloned()
+                .map(|input| MessagePart::ExternalInput { input }),
         );
         if !content.is_empty() {
             parts.push(MessagePart::Markdown {
@@ -631,6 +669,11 @@ impl ContinuityHost {
                 .iter()
                 .cloned()
                 .map(|revision_id| ("quotes".to_owned(), revision_id)),
+        );
+        relation_targets.extend(
+            external_inputs
+                .iter()
+                .map(|input| ("references".to_owned(), input.source_revision_id.clone())),
         );
         let initial_relations = self
             .initial_relations_for_revision_targets(relation_targets)
@@ -1795,6 +1838,58 @@ fn message_facets(entry: &MemoryEntry) -> Value {
         },
         "messageMetadata": entry.metadata,
         "contentParts": entry.parts
+    })
+}
+
+fn external_input_reference_from_page(page: ReadPage) -> Option<MessageExternalInputReference> {
+    let facets = page.revision.facets.as_ref()?;
+    if page_kind(Some(facets), "") != "external_signal" {
+        return None;
+    }
+    let payload = page.revision.payload.as_ref()?;
+    if payload.media_type != "application/vnd.symbiont.external-signal+json" {
+        return None;
+    }
+    let value = serde_json::from_str::<Value>(&payload.content).ok()?;
+    let title = value
+        .get("title")
+        .and_then(Value::as_str)
+        .filter(|value| !value.trim().is_empty())
+        .unwrap_or("外部输入")
+        .to_owned();
+    let actor_name = facets
+        .get("actor_name")
+        .and_then(Value::as_str)
+        .or_else(|| value.pointer("/actor/name").and_then(Value::as_str))
+        .filter(|value| !value.trim().is_empty())
+        .unwrap_or("外部输入")
+        .to_owned();
+    let raw_excerpt = value
+        .get("content")
+        .and_then(Value::as_str)
+        .filter(|value| !value.trim().is_empty())
+        .or_else(|| {
+            value
+                .get("received_text")
+                .and_then(Value::as_str)
+                .filter(|value| !value.trim().is_empty())
+        })
+        .or_else(|| value.get("summary").and_then(Value::as_str))
+        .unwrap_or(&title);
+    let (excerpt, _) = truncate_with_flag(raw_excerpt.trim(), 360);
+    let observed_at = value
+        .get("observed_at")
+        .and_then(Value::as_str)
+        .map(str::to_owned)
+        .or_else(|| page.revision.observed_at.clone())
+        .unwrap_or_else(|| page.revision.created_at.clone());
+    Some(MessageExternalInputReference {
+        source_revision_id: page.revision.revision_id,
+        actor_name,
+        title,
+        observed_at,
+        excerpt,
+        source_count: page.revision.source_refs.len(),
     })
 }
 

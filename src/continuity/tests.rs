@@ -20,6 +20,8 @@ use crate::{
         MemoryRole, MessageDeliveryState, MessageMetadata, MessagePart, MessageQuoteDraft,
         MessageRunMetadata,
     },
+    sensing::{InputRoleSnapshot, SensingPresentation, SensingSource, SensingSourceClass},
+    signals::SignalEvent,
 };
 
 const ONE_PIXEL_PNG: &[u8] = &[
@@ -93,6 +95,103 @@ async fn connect_remote_when_ready(socket_path: &std::path::Path) -> RemotePcpCl
         tokio::time::sleep(std::time::Duration::from_millis(10)).await;
     }
     panic!("PCP runtime did not become ready: {last_error:?}");
+}
+
+#[tokio::test]
+async fn replied_external_signal_becomes_a_visible_pcp_source_reference() {
+    let nonce = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .expect("clock")
+        .as_nanos();
+    let root = std::env::temp_dir().join(format!("symbiont-external-reference-{nonce}"));
+    let store = Arc::new(
+        SqlitePcpStore::open(root.join("context.sqlite3"))
+            .await
+            .expect("open PCP store"),
+    );
+    let continuity = ContinuityHost::open_embedded_for_test(store)
+        .await
+        .expect("open host");
+    let signal = SignalEvent {
+        id: "signal-reference-test".to_owned(),
+        candidate_id: "candidate-reference-test".to_owned(),
+        fingerprint: "fingerprint-reference-test".to_owned(),
+        actor: InputRoleSnapshot::ambient("luna", "Luna", "gpt-test", "codex"),
+        content: "A newly observed scientific result with enough context to discuss.".to_owned(),
+        received_text: "The complete received report.".to_owned(),
+        presentation: SensingPresentation::Condensed,
+        qualification_note: None,
+        title: "A scientific result".to_owned(),
+        summary: "A compact result summary".to_owned(),
+        sources: vec![SensingSource {
+            url: "https://example.test/result".to_owned(),
+            detail: "Primary report".to_owned(),
+        }],
+        source_class: SensingSourceClass::Research,
+        event_at: Some("2026-08-10T12:00:00.000Z".to_owned()),
+        observed_at: "2026-08-10T12:05:00.000Z".to_owned(),
+        review_reason: "Worth presenting as an external input".to_owned(),
+        promoted_revision_id: None,
+        hidden: false,
+    };
+    let source = continuity
+        .ingest_external_signal(&signal)
+        .await
+        .expect("promote external signal");
+    let reply = continuity
+        .ingest_message(
+            MemoryRole::User,
+            "This is worth discussing.",
+            Vec::new(),
+            None,
+            MessageLinks {
+                input_revision_ids: vec![source.revision_id.clone()],
+                ..MessageLinks::default()
+            },
+        )
+        .await
+        .expect("ingest user reply");
+
+    let Some(MessagePart::ExternalInput { input }) = reply.entry.parts.first() else {
+        panic!("reply should retain a visible external input reference");
+    };
+    assert_eq!(input.source_revision_id, source.revision_id);
+    assert_eq!(input.actor_name, "Luna");
+    assert_eq!(input.title, "A scientific result");
+    assert_eq!(input.source_count, 1);
+
+    let pages = continuity
+        .read(ReadPagesRequest {
+            page_ids: Vec::new(),
+            revision_ids: vec![reply.page.revision_id.clone()],
+            projections: vec![
+                Projection::Facets,
+                Projection::Provenance,
+                Projection::Relations,
+            ],
+            max_chars: 8_000,
+        })
+        .await
+        .expect("read reply");
+    assert!(
+        pages[0].revision.provenance[0]
+            .input_revision_ids
+            .contains(&source.revision_id)
+    );
+    assert!(pages[0].relations.iter().any(|relation| {
+        relation.relation_type == "references" && relation.to_page_id == source.page_id
+    }));
+
+    let recent = continuity
+        .recent_messages(10)
+        .await
+        .expect("read recent conversation");
+    assert!(matches!(
+        recent[0].parts.first(),
+        Some(MessagePart::ExternalInput { .. })
+    ));
+
+    let _ = tokio::fs::remove_dir_all(root).await;
 }
 
 #[tokio::test]

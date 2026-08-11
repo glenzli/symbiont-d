@@ -56,10 +56,33 @@ pub struct MemoryEntry {
     rename_all_fields = "camelCase"
 )]
 pub enum MessagePart {
-    Markdown { text: String },
-    Image { asset: ImageAttachment },
-    Quote { quote: MessageQuote },
-    Topic { topic: MessageTopicReference },
+    Markdown {
+        text: String,
+    },
+    Image {
+        asset: ImageAttachment,
+    },
+    Quote {
+        quote: MessageQuote,
+    },
+    Topic {
+        topic: MessageTopicReference,
+    },
+    ExternalInput {
+        input: MessageExternalInputReference,
+    },
+}
+
+#[derive(Clone, Debug, Deserialize, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MessageExternalInputReference {
+    pub source_revision_id: String,
+    pub actor_name: String,
+    pub title: String,
+    pub observed_at: String,
+    pub excerpt: String,
+    #[serde(default)]
+    pub source_count: usize,
 }
 
 #[derive(Clone, Debug, Deserialize, PartialEq, Eq, Serialize)]

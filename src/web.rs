@@ -97,6 +97,7 @@ const CURIOSITY_UI_JS: &str = include_str!("../web/curiosity-ui.js");
 const IDENTITY_UI_JS: &str = include_str!("../web/identity-ui.js");
 const INPUT_ROLES_JS: &str = include_str!("../web/input-roles.js");
 const INPUT_SIGNAL_GROUPS_JS: &str = include_str!("../web/input-signal-groups.js");
+const CONVERSATION_FOCUS_UI_JS: &str = include_str!("../web/conversation-focus-ui.js");
 const SETTINGS_JS: &str = include_str!("../web/settings.js");
 const USAGE_UI_JS: &str = include_str!("../web/usage-ui.js");
 const COMPOSER_CONTEXT_UI_JS: &str = include_str!("../web/composer-context-ui.js");
@@ -558,6 +559,7 @@ pub fn router(state: AppState) -> Router {
         .route("/identity-ui.js", get(identity_ui_js))
         .route("/input-roles.js", get(input_roles_js))
         .route("/input-signal-groups.js", get(input_signal_groups_js))
+        .route("/conversation-focus-ui.js", get(conversation_focus_ui_js))
         .route("/settings.js", get(settings_js))
         .route("/usage-ui.js", get(usage_ui_js))
         .route("/composer-context-ui.js", get(composer_context_ui_js))
@@ -820,6 +822,13 @@ async fn input_signal_groups_js() -> impl IntoResponse {
     (
         [(header::CONTENT_TYPE, "text/javascript; charset=utf-8")],
         INPUT_SIGNAL_GROUPS_JS,
+    )
+}
+
+async fn conversation_focus_ui_js() -> impl IntoResponse {
+    (
+        [(header::CONTENT_TYPE, "text/javascript; charset=utf-8")],
+        CONVERSATION_FOCUS_UI_JS,
     )
 }
 
