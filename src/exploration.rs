@@ -37,7 +37,7 @@ use crate::{
     conversation::ConversationCoordinator,
     curiosity::CuriosityStore,
     drive_input::DriveInputStore,
-    inference::{InferenceAttempt, InferenceExecutor},
+    inference::{InferenceAttempt, InferenceExecutor, hard_deduplicate},
     luna_input::LunaInput,
     mail_input::MailInputStore,
     memory::{MemoryEntry, MemoryRole},
@@ -1156,34 +1156,108 @@ async fn run_once(
 
         if !reviewed_candidates.is_empty() {
             let deduplication_references = signals.deduplication_references().await;
-            let (decisions, mut review_invocations, review_interrupted, review_deferred_reason) =
-                match inference
-                    .review_sensing(
-                        &reviewed_candidates,
-                        &deduplication_references,
-                        input_events.clone(),
-                    )
-                    .await
-                {
-                    InferenceAttempt::Completed(outcome) => (
-                        outcome.value,
-                        outcome.invocations,
-                        outcome.interrupted,
-                        None,
-                    ),
-                    InferenceAttempt::Deferred {
+            let hard_deduplication =
+                hard_deduplicate(&reviewed_candidates, &deduplication_references);
+            let mut duplicate_candidate_ids = hard_deduplication.duplicate_candidate_ids;
+            let hard_duplicate_count = duplicate_candidate_ids.len();
+            let semantic_candidates = hard_deduplication.survivors;
+            let (semantic_duplicate_ids, mut dedup_invocations, dedup_interrupted) = match inference
+                .classify_sensing_duplicates(
+                    &semantic_candidates,
+                    &deduplication_references,
+                    input_events.clone(),
+                )
+                .await
+            {
+                InferenceAttempt::Completed(outcome) => {
+                    (outcome.value, outcome.invocations, outcome.interrupted)
+                }
+                InferenceAttempt::Deferred {
+                    reason,
+                    invocations,
+                } => {
+                    tracing::warn!(
+                        target: crate::runtime_log::TARGET,
+                        event = "sensing_duplicate_classification_deferred",
                         reason,
+                        "local duplicate classification failed open; value review will continue"
+                    );
+                    (
+                        Vec::new(),
                         invocations,
-                    } => {
-                        tracing::warn!(
-                            target: crate::runtime_log::TARGET,
-                            event = "generic_inference_deferred",
-                            task = "ambient_review",
+                        input_events.has_changed().unwrap_or(true),
+                    )
+                }
+            };
+            sensing_trace_id =
+                link_sensing_invocations(&mut dedup_invocations, sensing_trace_id.as_deref());
+            if let Err(error) = usage.record_all(&dedup_invocations).await {
+                stop_activity_relay(runtime_tx, activity_task).await?;
+                return Err(error);
+            }
+            if dedup_interrupted {
+                stop_activity_relay(runtime_tx, activity_task).await?;
+                settle_sensing_only(
+                    &state,
+                    &manual_runs,
+                    &attempts,
+                    trigger.as_ref(),
+                    ExplorationIntentStatus::Superseded,
+                    "superseded",
+                    pending_candidate_count,
+                    Some("newer_user_input"),
+                    false,
+                )
+                .await?;
+                return Ok(ExplorationRunCompletion::superseded("newer_user_input"));
+            }
+            duplicate_candidate_ids.extend(semantic_duplicate_ids);
+            duplicate_candidate_ids.sort();
+            duplicate_candidate_ids.dedup();
+            if !duplicate_candidate_ids.is_empty() {
+                tracing::info!(
+                    target: crate::runtime_log::TARGET,
+                    event = "sensing_duplicates_suppressed",
+                    hard_duplicate_count,
+                    local_model_duplicate_count = duplicate_candidate_ids
+                        .len()
+                        .saturating_sub(hard_duplicate_count),
+                    "suppressed repeated external inputs before value review"
+                );
+            }
+            let value_candidates = semantic_candidates
+                .into_iter()
+                .filter(|candidate| !duplicate_candidate_ids.contains(&candidate.id))
+                .collect::<Vec<_>>();
+
+            let (decisions, mut review_invocations, review_interrupted, review_deferred_reason) =
+                if value_candidates.is_empty() {
+                    (Vec::new(), Vec::new(), false, None)
+                } else {
+                    match inference
+                        .review_sensing(&value_candidates, input_events.clone())
+                        .await
+                    {
+                        InferenceAttempt::Completed(outcome) => (
+                            outcome.value,
+                            outcome.invocations,
+                            outcome.interrupted,
+                            None,
+                        ),
+                        InferenceAttempt::Deferred {
                             reason,
-                            "ambient review was deferred for a later intake cycle"
-                        );
-                        let interrupted = input_events.has_changed().unwrap_or(true);
-                        (Vec::new(), invocations, interrupted, Some(reason))
+                            invocations,
+                        } => {
+                            tracing::warn!(
+                                target: crate::runtime_log::TARGET,
+                                event = "generic_inference_deferred",
+                                task = "ambient_review",
+                                reason,
+                                "ambient review was deferred for a later intake cycle"
+                            );
+                            let interrupted = input_events.has_changed().unwrap_or(true);
+                            (Vec::new(), invocations, interrupted, Some(reason))
+                        }
                     }
                 };
             sensing_trace_id =
@@ -1209,7 +1283,12 @@ async fn run_once(
                 return Ok(ExplorationRunCompletion::superseded("newer_user_input"));
             }
 
-            let route_plan = plan_sensing_routes(&reviewed_candidates, decisions);
+            let mut route_plan = plan_sensing_routes(&value_candidates, decisions);
+            route_plan
+                .terminal_ids
+                .extend(duplicate_candidate_ids.iter().cloned());
+            route_plan.terminal_ids.sort();
+            route_plan.terminal_ids.dedup();
             let review_metrics = SensingDeliveryMetrics {
                 reviewed_candidate_count: reviewed_candidates.len(),
                 input_count: route_plan.inputs.len(),

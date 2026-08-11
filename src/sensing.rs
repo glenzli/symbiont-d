@@ -578,7 +578,13 @@ fn candidate_fingerprint(draft: &SensingCandidateDraft) -> String {
         .map(|source| normalize(&source.url))
         .collect::<Vec<_>>();
     sources.sort();
-    format!("{}|{}", normalize(&draft.title), sources.join("|"))
+    format!(
+        "v2|{}|{}|{}|{}",
+        normalize(&draft.title),
+        normalize(&draft.summary),
+        draft.event_at.as_deref().map(normalize).unwrap_or_default(),
+        sources.join("|")
+    )
 }
 
 fn build_candidate(

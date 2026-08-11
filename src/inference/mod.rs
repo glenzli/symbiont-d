@@ -6,6 +6,7 @@
 //! runtime cannot satisfy that contract.
 
 mod pcp_maintenance;
+mod sensing_duplicate;
 mod sensing_review;
 
 use std::{
@@ -31,11 +32,15 @@ use crate::{
     usage::InvocationRecord,
 };
 
+pub(crate) use sensing_duplicate::hard_deduplicate;
 pub(crate) use sensing_review::{SensingReviewDecision, SensingReviewDisposition};
 
 const RESPONSE_TIMEOUT: Duration = Duration::from_secs(180);
 const JOB_LOOKUP_TIMEOUT: Duration = Duration::from_secs(5);
+const AMBIENT_REVIEW_BATCH_SIZE: usize = 4;
 const AMBIENT_REVIEW_WORKLOAD: InferenceWorkload = InferenceWorkload::LanguageResponse;
+const SENSING_DUPLICATE_WORKLOAD: InferenceWorkload =
+    InferenceWorkload::SensingDuplicateClassification;
 const PCP_SUMMARY_WORKLOAD: InferenceWorkload = InferenceWorkload::TextSummarize;
 const PCP_SEMANTIC_MAINTENANCE_WORKLOAD: InferenceWorkload = InferenceWorkload::DeepReasoning;
 const TEMPORARY_DISCUSSION_WORKLOAD: InferenceWorkload = InferenceWorkload::LanguageResponse;
@@ -77,7 +82,6 @@ impl InferenceExecutor {
     pub(crate) async fn review_sensing(
         &self,
         candidates: &[SensingCandidate],
-        recent_signals: &[SignalDeduplicationReference],
         input_events: watch::Receiver<u64>,
     ) -> InferenceAttempt<Vec<SensingReviewDecision>> {
         if input_events.has_changed().unwrap_or(true) {
@@ -87,35 +91,138 @@ impl InferenceExecutor {
                 interrupted: true,
             });
         }
-        let prompt = match sensing_review::runtime_prompt(candidates, recent_signals) {
+        let mut decisions = Vec::new();
+        let mut invocations = Vec::new();
+        let mut failed_batches = Vec::new();
+
+        for (batch_index, batch) in candidates.chunks(AMBIENT_REVIEW_BATCH_SIZE).enumerate() {
+            if input_events.has_changed().unwrap_or(true) {
+                return InferenceAttempt::Completed(InferenceOutcome {
+                    value: decisions,
+                    invocations,
+                    interrupted: true,
+                });
+            }
+            let prompt = match sensing_review::runtime_prompt(batch) {
+                Ok(prompt) => prompt,
+                Err(error) => {
+                    failed_batches.push(format!("batch {}: {error}", batch_index + 1));
+                    continue;
+                }
+            };
+            let completion = match self
+                .execute_text(
+                    AMBIENT_REVIEW_WORKLOAD,
+                    AMBIENT_REVIEW_INSTRUCTIONS,
+                    &prompt,
+                    "ambient_review",
+                    "conversation",
+                )
+                .await
+            {
+                Ok(completion) => completion,
+                Err(error) => {
+                    failed_batches.push(format!("batch {}: {error}", batch_index + 1));
+                    continue;
+                }
+            };
+            match parse_json::<sensing_review::SensingReviewEnvelope>(&completion.text) {
+                Ok(envelope) => {
+                    let validation = sensing_review::validated_decisions(batch, envelope.decisions);
+                    let mut invocation = completion.invocation;
+                    if validation.rejected_count > 0 || validation.missing_count > 0 {
+                        invocation.status = "partial_output".to_owned();
+                        tracing::warn!(
+                            target: crate::runtime_log::TARGET,
+                            event = "ambient_review_partial_output",
+                            batch_index = batch_index + 1,
+                            rejected_decision_count = validation.rejected_count,
+                            missing_decision_count = validation.missing_count,
+                            "ambient value review kept valid decisions and deferred only malformed entries"
+                        );
+                    }
+                    decisions.extend(validation.decisions);
+                    invocations.push(invocation);
+                }
+                Err(error) => {
+                    let mut invocation = completion.invocation;
+                    invocation.status = "invalid_output".to_owned();
+                    invocations.push(invocation);
+                    failed_batches.push(format!(
+                        "batch {} returned invalid output: {error}",
+                        batch_index + 1
+                    ));
+                }
+            }
+        }
+
+        if !failed_batches.is_empty() {
+            tracing::warn!(
+                target: crate::runtime_log::TARGET,
+                event = "ambient_review_batches_deferred",
+                failed_batch_count = failed_batches.len(),
+                total_batch_count = candidates.len().div_ceil(AMBIENT_REVIEW_BATCH_SIZE),
+                "ambient value review deferred only candidates from failed bounded batches"
+            );
+        }
+        if decisions.is_empty() && !failed_batches.is_empty() {
+            InferenceAttempt::Deferred {
+                reason: failed_batches.join("; "),
+                invocations,
+            }
+        } else {
+            InferenceAttempt::Completed(InferenceOutcome {
+                value: decisions,
+                invocations,
+                interrupted: input_events.has_changed().unwrap_or(true),
+            })
+        }
+    }
+
+    /// Finds residual semantic duplicates with one local foundational pass.
+    /// Failure is reported to the caller but is deliberately non-blocking: the
+    /// value reviewer can safely continue with the unsuppressed candidates.
+    pub(crate) async fn classify_sensing_duplicates(
+        &self,
+        candidates: &[SensingCandidate],
+        recent_signals: &[SignalDeduplicationReference],
+        input_events: watch::Receiver<u64>,
+    ) -> InferenceAttempt<Vec<String>> {
+        let interrupted = input_events.has_changed().unwrap_or(true);
+        if candidates.is_empty()
+            || (candidates.len() < 2 && recent_signals.is_empty())
+            || interrupted
+        {
+            return InferenceAttempt::Completed(InferenceOutcome {
+                value: Vec::new(),
+                invocations: Vec::new(),
+                interrupted,
+            });
+        }
+        let prompt = match sensing_duplicate::runtime_prompt(candidates, recent_signals) {
             Ok(prompt) => prompt,
             Err(error) => return InferenceAttempt::deferred(error.to_string()),
         };
         let completion = match self
             .execute_text(
-                AMBIENT_REVIEW_WORKLOAD,
-                AMBIENT_REVIEW_INSTRUCTIONS,
+                SENSING_DUPLICATE_WORKLOAD,
+                sensing_duplicate::RUNTIME_INSTRUCTIONS,
                 &prompt,
-                "ambient_review",
-                "conversation",
+                "ambient_dedup",
+                "sense",
             )
             .await
         {
             Ok(completion) => completion,
             Err(error) => return InferenceAttempt::deferred(error),
         };
-        let envelope = parse_json::<sensing_review::SensingReviewEnvelope>(&completion.text)
-            .and_then(|envelope| {
-                sensing_review::validate_decisions(
+        match parse_json::<sensing_duplicate::SensingDuplicateEnvelope>(&completion.text) {
+            Ok(envelope) => InferenceAttempt::Completed(InferenceOutcome {
+                value: sensing_duplicate::validated_duplicate_ids(
                     candidates,
                     recent_signals,
-                    &envelope.decisions,
-                )?;
-                Ok(envelope)
-            });
-        match envelope {
-            Ok(envelope) => InferenceAttempt::Completed(InferenceOutcome {
-                value: envelope.decisions,
+                    envelope.duplicates,
+                ),
                 invocations: vec![completion.invocation],
                 interrupted: input_events.has_changed().unwrap_or(true),
             }),
@@ -123,7 +230,7 @@ impl InferenceExecutor {
                 let mut invocation = completion.invocation;
                 invocation.status = "invalid_output".to_owned();
                 InferenceAttempt::Deferred {
-                    reason: format!("invalid ambient review output: {error}"),
+                    reason: format!("invalid local duplicate-classification output: {error}"),
                     invocations: vec![invocation],
                 }
             }
@@ -438,7 +545,7 @@ fn responses_request(
     input: Value,
     priority: &str,
 ) -> Value {
-    json!({
+    let mut request = json!({
         "model": workload.intent(),
         "input": input,
         "instructions": instructions,
@@ -449,7 +556,18 @@ fn responses_request(
             "infer.capability_floor": workload.capability_floor(),
             "infer.max_cost_usd": "0"
         }
-    })
+    });
+    if workload.requires_local_only() {
+        let metadata = request["metadata"]
+            .as_object_mut()
+            .expect("metadata object");
+        metadata.insert("infer.policy".to_owned(), json!("local-first"));
+        metadata.insert("infer.placement".to_owned(), json!("local_only"));
+        metadata.insert("infer.offline_required".to_owned(), json!("true"));
+        metadata.insert("infer.fallback".to_owned(), json!("none"));
+        request["reasoning"] = json!({"effort": "none"});
+    }
+    request
 }
 
 fn parse_json<T: for<'de> Deserialize<'de>>(text: &str) -> Result<T> {
@@ -613,6 +731,26 @@ mod tests {
         assert!(request.get("tools").is_none());
         assert!(request.get("conversation").is_none());
         assert!(request.get("previous_response_id").is_none());
+    }
+
+    #[test]
+    fn duplicate_classification_is_foundational_local_and_fail_closed_to_cloud() {
+        let request = responses_request(
+            InferenceWorkload::SensingDuplicateClassification,
+            "instructions",
+            Value::String("input".to_owned()),
+            "background",
+        );
+        assert_eq!(request["model"], "text.deduplicate");
+        assert_eq!(
+            request["metadata"]["infer.capability_floor"],
+            "foundational"
+        );
+        assert_eq!(request["metadata"]["infer.policy"], "local-first");
+        assert_eq!(request["metadata"]["infer.placement"], "local_only");
+        assert_eq!(request["metadata"]["infer.offline_required"], "true");
+        assert_eq!(request["metadata"]["infer.fallback"], "none");
+        assert_eq!(request["reasoning"]["effort"], "none");
     }
 
     #[test]

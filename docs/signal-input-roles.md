@@ -30,8 +30,10 @@ before it can enter review.
 ```text
 ambient sensing role
   -> transient candidate pool
-  -> strong batch review
-     -> discard | hold | broadcast | investigate
+  -> exact identity suppression
+  -> local foundational same-event classification (failure passes through)
+  -> strong value review
+     -> discard | input | deep
   -> signal timeline event
   -> user reply
   -> durable external-signal source + normal user/symbiont conversation
@@ -67,19 +69,26 @@ escalate a candidate, but must not rewrite an accepted input into symbiont-d's v
 
 ## Review contract
 
-Ambient sensing submits one to three source-backed candidate drafts.  Each draft includes a compact
+Ambient sensing submits a bounded set of source-backed candidate drafts. Each draft includes a compact
 natural-language proposed input, an actor snapshot, the underlying event date when known, and exact
 source support.
 
-The stronger review stage is read-only and chooses one terminal disposition per candidate:
+Duplicate suppression is a separate bounded stage. Stable source identities are checked
+deterministically; one local foundational `text.deduplicate` request only classifies
+residual candidate pairs as the same paper, release, event, observation, or materially identical
+claim. Similar topics are not duplicates. If this local stage is unavailable or malformed,
+candidates pass through rather than blocking the pool or being silently lost.
 
-- `discard`: duplicate, unsupported, unsafe, or strong noise;
-- `hold`: credible but not ready for the timeline;
-- `broadcast`: retain the sensing role's wording and publish it as a signal;
-- `investigate`: hand the source packet to the continuous symbiont for directed work.
+The stronger value-review stage no longer compares history or emits duplicate targets. It reviews
+bounded groups rather than one compound packet, and chooses one terminal disposition per candidate:
 
-The review stage may correct factual metadata or reject a draft; substantive rewriting requires an
-investigation and results in a symbiont-d message, not a falsely attributed signal.
+- `discard`: unsupported, unsafe, internally incoherent, or strong noise;
+- `input`: retain the sensing role's wording and publish it as a signal;
+- `deep`: hand the source packet to the continuous symbiont for directed work.
+
+Valid decisions settle independently. A malformed or missing decision defers only its candidate,
+not the whole batch. The review stage may qualify or reject a draft; substantive rewriting requires
+an investigation and results in a symbiont-d message, not a falsely attributed signal.
 
 ## Timeline and reply contract
 

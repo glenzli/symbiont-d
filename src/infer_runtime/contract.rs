@@ -7,6 +7,7 @@ pub(crate) const CONSUMER_PROTOCOL_VERSION: &str = "0.1.0-candidate.3";
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum InferenceWorkload {
+    SensingDuplicateClassification,
     LanguageResponse,
     DeepReasoning,
     TextSummarize,
@@ -15,6 +16,7 @@ pub(crate) enum InferenceWorkload {
 impl InferenceWorkload {
     pub(crate) fn intent(self) -> &'static str {
         match self {
+            Self::SensingDuplicateClassification => "text.deduplicate",
             Self::LanguageResponse => "language.respond",
             Self::DeepReasoning => "reasoning.solve",
             Self::TextSummarize => "text.summarize",
@@ -23,15 +25,20 @@ impl InferenceWorkload {
 
     /// Minimum semantic capability accepted by Symbiont for this workload.
     ///
-    /// Bounded mechanical work such as audio transcription has its own
-    /// contract. Every text workload here can affect conversation, attention,
-    /// or durable memory structure and therefore must not fall back to a
-    /// merely capable model.
+    /// Bounded duplicate classification is local, conservative, and fails
+    /// open, so a foundational model is sufficient. Text that affects visible
+    /// value judgment, conversation, or durable memory remains advanced or
+    /// expert.
     pub(crate) fn capability_floor(self) -> &'static str {
         match self {
+            Self::SensingDuplicateClassification => "foundational",
             Self::LanguageResponse | Self::TextSummarize => "advanced",
             Self::DeepReasoning => "expert",
         }
+    }
+
+    pub(crate) fn requires_local_only(self) -> bool {
+        matches!(self, Self::SensingDuplicateClassification)
     }
 }
 
@@ -63,6 +70,19 @@ mod tests {
             InferenceWorkload::DeepReasoning.capability_floor(),
             "expert"
         );
+    }
+
+    #[test]
+    fn duplicate_classification_is_a_bounded_foundational_local_workload() {
+        assert_eq!(
+            InferenceWorkload::SensingDuplicateClassification.intent(),
+            "text.deduplicate"
+        );
+        assert_eq!(
+            InferenceWorkload::SensingDuplicateClassification.capability_floor(),
+            "foundational"
+        );
+        assert!(InferenceWorkload::SensingDuplicateClassification.requires_local_only());
     }
 
     #[test]

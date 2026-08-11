@@ -65,6 +65,7 @@ pub struct SignalEvent {
 #[serde(rename_all = "camelCase")]
 pub struct SignalDeduplicationReference {
     pub signal_id: String,
+    pub fingerprint: String,
     pub actor_name: String,
     pub title: String,
     pub excerpt: String,
@@ -229,6 +230,7 @@ impl SignalStore {
             .take(MAX_DEDUPLICATION_REFERENCES)
             .map(|signal| SignalDeduplicationReference {
                 signal_id: signal.id.clone(),
+                fingerprint: signal.fingerprint.clone(),
                 actor_name: signal.actor.name.clone(),
                 title: signal.title.clone(),
                 excerpt: bounded_deduplication_excerpt(if signal.summary.trim().is_empty() {
@@ -318,7 +320,12 @@ fn normalize_and_prune(document: &mut SignalDocument, now: DateTime<Utc>) -> boo
     let mut changed = false;
     for signal in &mut document.signals {
         if signal.fingerprint.trim().is_empty() {
-            signal.fingerprint = signal_fingerprint(&signal.title, &signal.sources);
+            signal.fingerprint = signal_fingerprint(
+                &signal.title,
+                &signal.summary,
+                signal.event_at.as_deref(),
+                &signal.sources,
+            );
             changed = true;
         }
         if signal.received_text.trim().is_empty() {
@@ -374,13 +381,24 @@ fn event_is_too_old(event_at: Option<&str>, now: DateTime<Utc>) -> bool {
         .unwrap_or(false)
 }
 
-fn signal_fingerprint(title: &str, sources: &[SensingSource]) -> String {
+fn signal_fingerprint(
+    title: &str,
+    summary: &str,
+    event_at: Option<&str>,
+    sources: &[SensingSource],
+) -> String {
     let mut urls = sources
         .iter()
         .map(|source| normalize(&source.url))
         .collect::<Vec<_>>();
     urls.sort();
-    format!("{}|{}", normalize(title), urls.join("|"))
+    format!(
+        "v2|{}|{}|{}|{}",
+        normalize(title),
+        normalize(summary),
+        event_at.map(normalize).unwrap_or_default(),
+        urls.join("|")
+    )
 }
 
 fn bounded_deduplication_excerpt(value: &str) -> String {

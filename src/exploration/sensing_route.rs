@@ -273,7 +273,6 @@ mod tests {
                 presentation: Some(SensingPresentation::Original),
                 display_text: None,
                 qualification_note: None,
-                duplicate_of: None,
             }],
         );
 
@@ -294,7 +293,6 @@ mod tests {
                 presentation: Some(SensingPresentation::Condensed),
                 display_text: Some("The configured research digest reports this development; the linked claim has not been independently checked here.".to_owned()),
                 qualification_note: Some("The linked claim was not independently checked here.".to_owned()),
-                duplicate_of: None,
             }],
         );
 
@@ -314,7 +312,6 @@ mod tests {
                 presentation: None,
                 display_text: None,
                 qualification_note: None,
-                duplicate_of: None,
             }],
         );
 
@@ -334,7 +331,6 @@ mod tests {
                 presentation: None,
                 display_text: None,
                 qualification_note: None,
-                duplicate_of: None,
             }],
         );
 
@@ -343,7 +339,7 @@ mod tests {
     }
 
     #[test]
-    fn semantic_duplicate_is_terminal_without_becoming_an_external_input() {
+    fn discarded_candidate_is_terminal_without_becoming_an_external_input() {
         let candidates = vec![
             candidate("one", "The better supported account"),
             candidate("two", "The same event in different words"),
@@ -358,7 +354,6 @@ mod tests {
                     presentation: Some(SensingPresentation::Original),
                     display_text: None,
                     qualification_note: None,
-                    duplicate_of: None,
                 },
                 SensingReviewDecision {
                     candidate_id: "two".to_owned(),
@@ -367,7 +362,6 @@ mod tests {
                     presentation: None,
                     display_text: None,
                     qualification_note: None,
-                    duplicate_of: Some("one".to_owned()),
                 },
             ],
         );
