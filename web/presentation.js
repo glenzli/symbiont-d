@@ -1,14 +1,17 @@
+const chineseTokenFormatter = new Intl.NumberFormat("zh-CN", {
+  notation: "compact",
+  maximumFractionDigits: 1,
+});
+
 export function formatMemorySize(chars) {
   if (chars < 1000) return `${chars} chars`;
   return `${(chars / 1000).toFixed(1)}k chars`;
 }
 
 export function formatTokens(tokens) {
-  if (tokens < 1000) return `${tokens} tok`;
-  if (tokens < 1_000_000) {
-    return `${(tokens / 1000).toFixed(tokens < 10000 ? 1 : 0)}k tok`;
-  }
-  return `${(tokens / 1_000_000).toFixed(tokens < 10_000_000 ? 1 : 0)}M tok`;
+  const value = Math.max(0, Math.round(Number(tokens) || 0));
+  if (value < 10_000) return `${value.toLocaleString("zh-CN")} tok`;
+  return `${chineseTokenFormatter.format(value)} tok`;
 }
 
 export function tokensToMillions(tokens) {
