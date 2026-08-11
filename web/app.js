@@ -714,7 +714,16 @@ function renderRuntimeStatus() {
   const exploration = appState.exploration;
   const phase = exploration?.phase;
   if (phase === "exploring") {
-    setRuntimeStatus(exploration.currentActivity?.label || "正在主动探索", "working");
+    const reviewing = exploration.currentReviewCandidateCount
+      ? ` · 本轮复核 ${exploration.currentReviewCandidateCount} 条`
+      : "";
+    const candidates = exploration.pendingCandidateCount
+      ? ` · 候选积压 ${exploration.pendingCandidateCount} 条`
+      : "";
+    setRuntimeStatus(
+      `${exploration.currentActivity?.label || "正在主动探索"}${reviewing}${candidates}`,
+      "working",
+    );
   } else if (phase === "quiet_hours") {
     setRuntimeStatus("主动探索处于安静时段");
   } else if (phase === "token_limit") {
@@ -725,11 +734,14 @@ function renderRuntimeStatus() {
     setRuntimeStatus("最近一次探索运行异常", "error");
   } else if (phase === "waiting" && exploration.nextRunAt) {
     const candidates = exploration.pendingCandidateCount
-      ? ` · 最近候选 ${exploration.pendingCandidateCount} 条`
+      ? ` · 候选积压 ${exploration.pendingCandidateCount} 条`
+      : "";
+    const reviewed = exploration.lastReviewedCandidateCount
+      ? ` · 最近复核 ${exploration.lastReviewedCandidateCount} 条`
       : "";
     setRuntimeStatus(`下次探索 ${new Date(
       exploration.nextRunAt,
-    ).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}${candidates}`);
+    ).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}${candidates}${reviewed}`);
   } else {
     const reflection = appState.reflection?.runtime || appState.reflection;
     setRuntimeStatus(

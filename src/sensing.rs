@@ -7,7 +7,8 @@ use tokio::{fs, sync::RwLock};
 
 const CANDIDATE_TTL_HOURS: i64 = 24;
 const MAX_PENDING_CANDIDATES: usize = 24;
-pub const REVIEW_BATCH_SIZE: usize = 3;
+const MAX_CANDIDATES_PER_INPUT_BATCH: usize = 3;
+const MAX_REVIEW_BATCH_SIZE: usize = 12;
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct SensingSource {
@@ -137,8 +138,10 @@ pub struct SensingCandidateDraft {
 /// input provider.  A candidate is intentionally not trusted evidence, but it
 /// must be compact and attributable before the stronger Codex review sees it.
 pub fn validate_candidate_drafts(drafts: &[SensingCandidateDraft]) -> Result<()> {
-    if drafts.len() > REVIEW_BATCH_SIZE {
-        anyhow::bail!("ambient sensing accepts at most {REVIEW_BATCH_SIZE} candidates");
+    if drafts.len() > MAX_CANDIDATES_PER_INPUT_BATCH {
+        anyhow::bail!(
+            "ambient sensing accepts at most {MAX_CANDIDATES_PER_INPUT_BATCH} candidates"
+        );
     }
     for candidate in drafts {
         for (label, value, limit) in [
@@ -457,7 +460,7 @@ impl SensingStore {
         let candidates = pool
             .candidates
             .iter()
-            .take(limit.clamp(1, REVIEW_BATCH_SIZE))
+            .take(limit.clamp(1, MAX_REVIEW_BATCH_SIZE))
             .cloned()
             .collect();
         drop(pool);
@@ -631,8 +634,9 @@ mod tests {
     use std::time::{SystemTime, UNIX_EPOCH};
 
     use super::{
-        InputRoleSnapshot, MAX_PENDING_CANDIDATES, SensingCandidateDraft, SensingSource,
-        SensingSourceClass, SensingStore, format_candidate_pool,
+        InputRoleSnapshot, MAX_CANDIDATES_PER_INPUT_BATCH, MAX_PENDING_CANDIDATES,
+        MAX_REVIEW_BATCH_SIZE, SensingCandidateDraft, SensingSource, SensingSourceClass,
+        SensingStore, format_candidate_pool, validate_candidate_drafts,
     };
 
     fn candidate(title: &str, url: &str) -> SensingCandidateDraft {
@@ -649,6 +653,52 @@ mod tests {
                 detail: "Primary source.".to_owned(),
             }],
         }
+    }
+
+    #[test]
+    fn intake_batch_limit_remains_source_local() {
+        let drafts = (0..=MAX_CANDIDATES_PER_INPUT_BATCH)
+            .map(|index| {
+                candidate(
+                    &format!("Candidate {index}"),
+                    &format!("https://example.test/{index}"),
+                )
+            })
+            .collect::<Vec<_>>();
+
+        assert!(validate_candidate_drafts(&drafts[..MAX_CANDIDATES_PER_INPUT_BATCH]).is_ok());
+        assert!(validate_candidate_drafts(&drafts).is_err());
+    }
+
+    #[tokio::test]
+    async fn review_can_drain_multiple_input_batches_at_once() {
+        let nonce = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let path = std::env::temp_dir().join(format!("symbiont-sensing-review-{nonce}.json"));
+        let store = SensingStore::open(path.clone()).await.unwrap();
+        let actor = InputRoleSnapshot::ambient("test", "Test observer", "test", "test-provider");
+        let drafts = (0..MAX_REVIEW_BATCH_SIZE)
+            .map(|index| {
+                candidate(
+                    &format!("Candidate {index}"),
+                    &format!("https://example.test/review/{index}"),
+                )
+            })
+            .collect();
+        store.replace(drafts, actor).await.unwrap();
+
+        assert_eq!(
+            store
+                .review_batch(MAX_REVIEW_BATCH_SIZE)
+                .await
+                .unwrap()
+                .len(),
+            MAX_REVIEW_BATCH_SIZE
+        );
+
+        std::fs::remove_file(path).unwrap();
     }
 
     #[tokio::test]

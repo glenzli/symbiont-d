@@ -12,6 +12,16 @@ use crate::{
 };
 
 const ROUTE_SENSING_CANDIDATES_TRACE: &str = "route_sensing_candidates";
+const SCHEDULED_REVIEW_BATCH_SIZE: usize = 6;
+const MANUAL_REVIEW_BATCH_SIZE: usize = 12;
+
+pub(super) fn sensing_review_batch_size(scheduled: bool) -> usize {
+    if scheduled {
+        SCHEDULED_REVIEW_BATCH_SIZE
+    } else {
+        MANUAL_REVIEW_BATCH_SIZE
+    }
+}
 
 #[derive(Clone, Copy, Debug, Default)]
 pub(super) struct SensingDeliveryMetrics {
@@ -191,6 +201,12 @@ mod tests {
     use super::*;
     use crate::sensing::{InputRoleSnapshot, SensingSource, SensingSourceClass};
     use crate::usage::ToolTraceStep;
+
+    #[test]
+    fn scheduled_review_balances_intake_while_manual_review_catches_up() {
+        assert_eq!(sensing_review_batch_size(true), 6);
+        assert_eq!(sensing_review_batch_size(false), 12);
+    }
 
     fn candidate(id: &str, proposed_input: &str) -> SensingCandidate {
         SensingCandidate {

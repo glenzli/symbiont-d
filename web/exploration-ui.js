@@ -549,7 +549,13 @@ function currentStatus(exploration) {
     return manualRunLabel(exploration.manualRun);
   }
   if (exploration.phase === "exploring") {
-    return exploration.currentActivity?.label || "正在主动探索";
+    const reviewing = exploration.currentReviewCandidateCount
+      ? ` · 本轮复核 ${exploration.currentReviewCandidateCount} 条`
+      : "";
+    const pending = exploration.pendingCandidateCount
+      ? ` · 候选积压 ${exploration.pendingCandidateCount} 条`
+      : "";
+    return `${exploration.currentActivity?.label || "正在主动探索"}${reviewing}${pending}`;
   }
   if (exploration.phase === "error") {
     return "最近一次探索运行异常";
@@ -560,7 +566,13 @@ function currentStatus(exploration) {
   }
   if (exploration.lastRunAt) {
     const trigger = triggerLabel(exploration.lastTrigger);
-    return `上次完成于 ${new Date(exploration.lastRunAt).toLocaleString()}${trigger ? ` · ${trigger}` : ""}`;
+    const pending = exploration.pendingCandidateCount
+      ? ` · 候选积压 ${exploration.pendingCandidateCount} 条`
+      : "";
+    const reviewed = exploration.lastReviewedCandidateCount
+      ? ` · 最近复核 ${exploration.lastReviewedCandidateCount} 条`
+      : "";
+    return `上次完成于 ${new Date(exploration.lastRunAt).toLocaleString()}${trigger ? ` · ${trigger}` : ""}${pending}${reviewed}`;
   }
   if (exploration.phase === "disabled") return "主动探索已关闭";
   if (exploration.phase === "needs_setup") return "等待完成初始化";

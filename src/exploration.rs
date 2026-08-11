@@ -44,10 +44,7 @@ use crate::{
     outreach::all_budgets_exhausted,
     profile::{ProfileStore, SetupStatus},
     reflection::ReflectionStore,
-    sensing::{
-        REVIEW_BATCH_SIZE, SensingCandidate, SensingIntakeBrief, SensingStore,
-        format_candidate_pool,
-    },
+    sensing::{SensingCandidate, SensingIntakeBrief, SensingStore, format_candidate_pool},
     signals::{SignalPublishOutcome, SignalStore},
     symbiont_context::SymbiontContextStore,
     usage::{UsageHeadline, UsageStore},
@@ -55,7 +52,7 @@ use crate::{
 
 use self::sensing_route::{
     SensingDeliveryMetrics, annotate_sensing_delivery, link_sensing_invocations,
-    plan_sensing_routes, prioritize_candidate_batches,
+    plan_sensing_routes, prioritize_candidate_batches, sensing_review_batch_size,
 };
 
 const POLICY_REFRESH: Duration = Duration::from_secs(30);
@@ -106,6 +103,8 @@ pub struct ExplorationSnapshot {
     pub last_trigger: Option<String>,
     pub last_skipped_attempt: Option<ExplorationSkippedAttempt>,
     pub pending_candidate_count: usize,
+    pub current_review_candidate_count: usize,
+    pub last_reviewed_candidate_count: usize,
     pub manual_run: Option<ManualExplorationRun>,
     pub manual_receipts: Vec<ManualExplorationRun>,
 }
@@ -124,6 +123,8 @@ impl Default for ExplorationSnapshot {
             last_trigger: None,
             last_skipped_attempt: None,
             pending_candidate_count: 0,
+            current_review_candidate_count: 0,
+            last_reviewed_candidate_count: 0,
             manual_run: None,
             manual_receipts: Vec::new(),
         }
@@ -239,10 +240,12 @@ impl ExplorationHandle {
             }
         }
         let last_skipped_attempt = attempts.latest().await;
+        let pending_candidate_count = sensing.count().await.unwrap_or_default();
         let state = Arc::new(RwLock::new(ExplorationSnapshot {
             manual_run: projection.latest,
             manual_receipts: projection.unpresented,
             last_skipped_attempt,
+            pending_candidate_count,
             ..ExplorationSnapshot::default()
         }));
         let (trigger, trigger_rx) = mpsc::channel(32);
@@ -773,6 +776,7 @@ async fn run_once(
         matches!(&trigger, Some(ExplorationTrigger::DeferredFollowUp));
     let scheduled = trigger.is_none();
     let started_at = timestamp(Utc::now());
+    let starting_candidate_count = sensing.count().await.unwrap_or_default();
     let mut manual_retry_started_at = None;
     if let Some((request_id, _)) = trigger
         .as_ref()
@@ -792,6 +796,9 @@ async fn run_once(
         snapshot.phase = ExplorationPhase::Exploring;
         snapshot.next_run_at = None;
         snapshot.last_error = None;
+        snapshot.pending_candidate_count = starting_candidate_count;
+        snapshot.current_review_candidate_count = 0;
+        snapshot.last_reviewed_candidate_count = 0;
         snapshot.current_activity = Some(ExplorationActivity {
             label: trigger
                 .as_ref()
@@ -1089,13 +1096,21 @@ async fn run_once(
             .await?;
             return Ok(ExplorationRunCompletion::superseded("newer_user_input"));
         }
-        reviewed_candidates = match sensing.review_batch(REVIEW_BATCH_SIZE).await {
+        reviewed_candidates = match sensing
+            .review_batch(sensing_review_batch_size(scheduled))
+            .await
+        {
             Ok(candidates) => candidates,
             Err(error) => {
                 stop_activity_relay(runtime_tx, activity_task).await?;
                 return Err(error);
             }
         };
+        {
+            let mut snapshot = state.write().await;
+            snapshot.pending_candidate_count = pending_candidate_count;
+            snapshot.current_review_candidate_count = reviewed_candidates.len();
+        }
         if scheduled && reviewed_candidates.is_empty() {
             stop_activity_relay(runtime_tx, activity_task).await?;
             let outcome = if channel_failed {
@@ -1238,6 +1253,13 @@ async fn run_once(
             sensing
                 .settle_review(&route_plan.terminal_ids, &route_plan.deferred_ids)
                 .await?;
+            let remaining_candidate_count = sensing.count().await?;
+            {
+                let mut snapshot = state.write().await;
+                snapshot.pending_candidate_count = remaining_candidate_count;
+                snapshot.current_review_candidate_count = 0;
+                snapshot.last_reviewed_candidate_count = review_metrics.reviewed_candidate_count;
+            }
             reviewed_candidates = route_plan.deep_candidates;
             deep_candidate_ids = reviewed_candidates
                 .iter()
@@ -1523,6 +1545,7 @@ async fn run_once(
     snapshot.last_error = None;
     snapshot.current_activity = None;
     snapshot.current_trigger = None;
+    snapshot.current_review_candidate_count = 0;
     snapshot.pending_candidate_count = pending_candidate_count;
     if let Some(message) = published {
         snapshot.latest_message = Some(message);
@@ -1775,6 +1798,7 @@ async fn settle_sensing_only(
     snapshot.last_error = None;
     snapshot.current_activity = None;
     snapshot.current_trigger = None;
+    snapshot.current_review_candidate_count = 0;
     snapshot.pending_candidate_count = pending_candidate_count;
     Ok(())
 }
@@ -1913,6 +1937,7 @@ async fn set_error(
     snapshot.phase = ExplorationPhase::Error;
     snapshot.current_activity = None;
     snapshot.current_trigger = None;
+    snapshot.current_review_candidate_count = 0;
     snapshot.last_error = Some(error);
 }
 
