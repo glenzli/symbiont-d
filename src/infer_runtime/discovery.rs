@@ -10,12 +10,13 @@ use chrono::{DateTime, Utc};
 use reqwest::Url;
 use serde::{Deserialize, Serialize};
 
+use super::contract::CONSUMER_PROTOCOL_VERSION;
+
 const DISCOVERY_SCHEMA: &str = "infra.discovery.registration";
 const DISCOVERY_VERSION: &str = "20260810.1";
 const SERVICE_KIND: &str = "infer-runtime";
 const DEFAULT_INSTANCE_ID: &str = "local";
 const CONSUMER_PROTOCOL: &str = "infer-runtime.consumer";
-const CONSUMER_PROTOCOL_VERSION: &str = "0.1.0-candidate.2";
 const HTTP_LOOPBACK_BINDING: &str = "infer-runtime.http-loopback";
 const MAX_MANIFEST_BYTES: u64 = 64 * 1024;
 
@@ -384,7 +385,7 @@ mod tests {
     fn write_registration(
         root: &Path,
         lease: DiscoveryLease,
-        protocol_version: &str,
+        protocol_versions: &[&str],
         binding: &str,
         endpoint: &str,
     ) {
@@ -399,7 +400,10 @@ mod tests {
             lease,
             offers: vec![DiscoveryOffer {
                 protocol: CONSUMER_PROTOCOL.to_owned(),
-                protocol_versions: vec![protocol_version.to_owned()],
+                protocol_versions: protocol_versions
+                    .iter()
+                    .map(|version| (*version).to_owned())
+                    .collect(),
                 binding: binding.to_owned(),
                 endpoint: endpoint.to_owned(),
             }],
@@ -456,7 +460,7 @@ mod tests {
                 renewed_at: (now - chrono::Duration::seconds(1)).to_rfc3339(),
                 expires_at: (now + chrono::Duration::seconds(44)).to_rfc3339(),
             },
-            CONSUMER_PROTOCOL_VERSION,
+            &[CONSUMER_PROTOCOL_VERSION],
             HTTP_LOOPBACK_BINDING,
             "http://127.0.0.1:8787",
         );
@@ -473,7 +477,7 @@ mod tests {
                 renewed_at: (now - chrono::Duration::seconds(60)).to_rfc3339(),
                 expires_at: (now - chrono::Duration::seconds(1)).to_rfc3339(),
             },
-            CONSUMER_PROTOCOL_VERSION,
+            &[CONSUMER_PROTOCOL_VERSION],
             HTTP_LOOPBACK_BINDING,
             "http://127.0.0.1:8787",
         );
@@ -499,7 +503,7 @@ mod tests {
         write_registration(
             &root,
             lease(),
-            "0.1.0-candidate",
+            &["0.1.0-candidate"],
             HTTP_LOOPBACK_BINDING,
             "http://127.0.0.1:8787",
         );
@@ -508,10 +512,36 @@ mod tests {
         write_registration(
             &root,
             lease(),
-            CONSUMER_PROTOCOL_VERSION,
+            &[CONSUMER_PROTOCOL_VERSION],
             "infra.local.http",
             "http://127.0.0.1:8787",
         );
+        assert_eq!(discover_consumer_at(&root, now).unwrap(), None);
+    }
+
+    #[test]
+    fn rejects_a_candidate_two_only_consumer_offer() {
+        let root = std::env::temp_dir().join(format!(
+            "symbiont-infer-migration-{}-{}",
+            std::process::id(),
+            Utc::now().timestamp_nanos_opt().unwrap_or_default()
+        ));
+        private_dir(&root);
+        private_dir(&root.join("registrations"));
+        private_dir(&root.join("sockets"));
+        let now = Utc::now();
+
+        write_registration(
+            &root,
+            DiscoveryLease {
+                renewed_at: (now - chrono::Duration::seconds(1)).to_rfc3339(),
+                expires_at: (now + chrono::Duration::seconds(44)).to_rfc3339(),
+            },
+            &["0.1.0-candidate.2"],
+            HTTP_LOOPBACK_BINDING,
+            "http://127.0.0.1:8787",
+        );
+
         assert_eq!(discover_consumer_at(&root, now).unwrap(), None);
     }
 }

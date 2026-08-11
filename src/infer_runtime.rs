@@ -4,6 +4,7 @@
 //! loopback HTTP client. Product capabilities such as voice transcription and
 //! generic semantic inference build their own request contracts on top of it.
 
+mod contract;
 mod discovery;
 
 use std::{env, path::PathBuf};
@@ -14,6 +15,7 @@ use reqwest::{Client, Url, redirect::Policy};
 use tokio::sync::RwLock;
 
 use crate::secrets::{CredentialStatus, CredentialStore, SecretStore};
+pub(crate) use contract::InferenceWorkload;
 use discovery::{DiscoveredConsumer, canonical_loopback_origin, discover_consumer};
 
 const SECRET_ID: &str = "infer-runtime";
