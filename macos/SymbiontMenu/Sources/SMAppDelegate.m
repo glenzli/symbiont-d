@@ -6,7 +6,6 @@
 @interface SMAppDelegate () <SMSymbiontWindowControllerDelegate>
 
 @property(nonatomic, strong) NSURL *endpoint;
-@property(nonatomic, strong) NSURL *pcpConsoleEndpoint;
 @property(nonatomic, strong) NSStatusItem *statusItem;
 @property(nonatomic, strong) NSMenu *contextMenu;
 @property(nonatomic, strong) SMSymbiontWindowController *windowController;
@@ -23,8 +22,6 @@ static NSString *const SMHasCompletedFirstLaunchKey = @"hasCompletedFirstLaunch"
     if (self) {
         NSString *configuredURL = NSProcessInfo.processInfo.environment[@"SYMBIONT_URL"];
         _endpoint = [NSURL URLWithString:configuredURL ?: @"http://127.0.0.1:4317/"];
-        NSString *configuredConsoleURL = NSProcessInfo.processInfo.environment[@"PCP_CONSOLE_URL"];
-        _pcpConsoleEndpoint = [NSURL URLWithString:configuredConsoleURL ?: @"http://127.0.0.1:4318/"];
         _presentation = [[SMMenuState alloc] init];
     }
     return self;
@@ -138,7 +135,6 @@ static NSString *const SMHasCompletedFirstLaunchKey = @"hasCompletedFirstLaunch"
     [self addMenuItemWithTitle:@"Open symbiont-d" action:@selector(openWindow:) key:@"" toMenu:menu];
     [self addMenuItemWithTitle:@"Reload" action:@selector(reload:) key:@"r" toMenu:menu];
     [self addMenuItemWithTitle:@"Open in Browser" action:@selector(openInBrowser:) key:@"" toMenu:menu];
-    [self addMenuItemWithTitle:@"Open PCP Console" action:@selector(openPcpConsole:) key:@"" toMenu:menu];
     [menu addItem:NSMenuItem.separatorItem];
     [self addMenuItemWithTitle:@"Quit" action:@selector(quit:) key:@"q" toMenu:menu];
     return menu;
@@ -192,11 +188,6 @@ static NSString *const SMHasCompletedFirstLaunchKey = @"hasCompletedFirstLaunch"
 - (void)openInBrowser:(id)sender {
     (void)sender;
     [NSWorkspace.sharedWorkspace openURL:self.endpoint];
-}
-
-- (void)openPcpConsole:(id)sender {
-    (void)sender;
-    [NSWorkspace.sharedWorkspace openURL:self.pcpConsoleEndpoint];
 }
 
 - (void)quit:(id)sender {
