@@ -27,6 +27,7 @@ use tokio::{sync::watch, time::Instant};
 use crate::{
     infer_runtime::{InferRuntimeAccess, InferenceWorkload, RuntimeConnection, endpoint_url},
     sensing::SensingCandidate,
+    signals::SignalDeduplicationReference,
     usage::InvocationRecord,
 };
 
@@ -76,6 +77,7 @@ impl InferenceExecutor {
     pub(crate) async fn review_sensing(
         &self,
         candidates: &[SensingCandidate],
+        recent_signals: &[SignalDeduplicationReference],
         input_events: watch::Receiver<u64>,
     ) -> InferenceAttempt<Vec<SensingReviewDecision>> {
         if input_events.has_changed().unwrap_or(true) {
@@ -85,7 +87,7 @@ impl InferenceExecutor {
                 interrupted: true,
             });
         }
-        let prompt = match sensing_review::runtime_prompt(candidates) {
+        let prompt = match sensing_review::runtime_prompt(candidates, recent_signals) {
             Ok(prompt) => prompt,
             Err(error) => return InferenceAttempt::deferred(error.to_string()),
         };
@@ -104,7 +106,11 @@ impl InferenceExecutor {
         };
         let envelope = parse_json::<sensing_review::SensingReviewEnvelope>(&completion.text)
             .and_then(|envelope| {
-                sensing_review::validate_decisions(candidates, &envelope.decisions)?;
+                sensing_review::validate_decisions(
+                    candidates,
+                    recent_signals,
+                    &envelope.decisions,
+                )?;
                 Ok(envelope)
             });
         match envelope {

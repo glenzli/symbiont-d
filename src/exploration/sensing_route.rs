@@ -257,6 +257,7 @@ mod tests {
                 presentation: Some(SensingPresentation::Original),
                 display_text: None,
                 qualification_note: None,
+                duplicate_of: None,
             }],
         );
 
@@ -277,6 +278,7 @@ mod tests {
                 presentation: Some(SensingPresentation::Condensed),
                 display_text: Some("The configured research digest reports this development; the linked claim has not been independently checked here.".to_owned()),
                 qualification_note: Some("The linked claim was not independently checked here.".to_owned()),
+                duplicate_of: None,
             }],
         );
 
@@ -296,6 +298,7 @@ mod tests {
                 presentation: None,
                 display_text: None,
                 qualification_note: None,
+                duplicate_of: None,
             }],
         );
 
@@ -315,11 +318,48 @@ mod tests {
                 presentation: None,
                 display_text: None,
                 qualification_note: None,
+                duplicate_of: None,
             }],
         );
 
         assert_eq!(plan.terminal_ids, vec!["one"]);
         assert_eq!(plan.deferred_ids, vec!["two"]);
+    }
+
+    #[test]
+    fn semantic_duplicate_is_terminal_without_becoming_an_external_input() {
+        let candidates = vec![
+            candidate("one", "The better supported account"),
+            candidate("two", "The same event in different words"),
+        ];
+        let plan = plan_sensing_routes(
+            &candidates,
+            vec![
+                SensingReviewDecision {
+                    candidate_id: "one".to_owned(),
+                    disposition: SensingReviewDisposition::Input,
+                    reason: "Best supported representative".to_owned(),
+                    presentation: Some(SensingPresentation::Original),
+                    display_text: None,
+                    qualification_note: None,
+                    duplicate_of: None,
+                },
+                SensingReviewDecision {
+                    candidate_id: "two".to_owned(),
+                    disposition: SensingReviewDisposition::Discard,
+                    reason: "Same event as the first candidate".to_owned(),
+                    presentation: None,
+                    display_text: None,
+                    qualification_note: None,
+                    duplicate_of: Some("one".to_owned()),
+                },
+            ],
+        );
+
+        assert_eq!(plan.inputs.len(), 1);
+        assert_eq!(plan.inputs[0].candidate.id, "one");
+        assert_eq!(plan.terminal_ids, vec!["one", "two"]);
+        assert!(plan.deferred_ids.is_empty());
     }
 
     #[test]

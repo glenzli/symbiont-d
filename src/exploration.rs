@@ -1140,9 +1140,14 @@ async fn run_once(
         }
 
         if !reviewed_candidates.is_empty() {
+            let deduplication_references = signals.deduplication_references().await;
             let (decisions, mut review_invocations, review_interrupted, review_deferred_reason) =
                 match inference
-                    .review_sensing(&reviewed_candidates, input_events.clone())
+                    .review_sensing(
+                        &reviewed_candidates,
+                        &deduplication_references,
+                        input_events.clone(),
+                    )
                     .await
                 {
                     InferenceAttempt::Completed(outcome) => (

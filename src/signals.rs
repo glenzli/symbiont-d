@@ -13,6 +13,8 @@ use crate::sensing::{
 const RETENTION_DAYS: i64 = 30;
 const MAX_EVENT_AGE_DAYS: i64 = 45;
 const MAX_RETAINED_SIGNALS: usize = 100;
+const MAX_DEDUPLICATION_REFERENCES: usize = 24;
+const MAX_DEDUPLICATION_EXCERPT_CHARS: usize = 480;
 
 /// A visible but non-durable input from an auxiliary model role.
 ///
@@ -54,6 +56,21 @@ pub struct SignalEvent {
     pub promoted_revision_id: Option<String>,
     #[serde(default)]
     pub hidden: bool,
+}
+
+/// Bounded, read-only comparison material for the existing ambient review.
+/// Hidden and promoted signals remain eligible so dismissing or adopting an
+/// input cannot make the same event publishable again under different prose.
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SignalDeduplicationReference {
+    pub signal_id: String,
+    pub actor_name: String,
+    pub title: String,
+    pub excerpt: String,
+    pub source_urls: Vec<String>,
+    pub event_at: Option<String>,
+    pub observed_at: String,
 }
 
 #[derive(Default, Deserialize, Serialize)]
@@ -203,6 +220,33 @@ impl SignalStore {
             .cloned())
     }
 
+    pub async fn deduplication_references(&self) -> Vec<SignalDeduplicationReference> {
+        let document = self.document.read().await;
+        document
+            .signals
+            .iter()
+            .rev()
+            .take(MAX_DEDUPLICATION_REFERENCES)
+            .map(|signal| SignalDeduplicationReference {
+                signal_id: signal.id.clone(),
+                actor_name: signal.actor.name.clone(),
+                title: signal.title.clone(),
+                excerpt: bounded_deduplication_excerpt(if signal.summary.trim().is_empty() {
+                    &signal.content
+                } else {
+                    &signal.summary
+                }),
+                source_urls: signal
+                    .sources
+                    .iter()
+                    .map(|source| source.url.clone())
+                    .collect(),
+                event_at: signal.event_at.clone(),
+                observed_at: signal.observed_at.clone(),
+            })
+            .collect()
+    }
+
     /// Removes a temporary signal from the visible conversation without
     /// turning that action into preference feedback. Keep the hidden record so
     /// the same external event is not published again by a later sensing pass.
@@ -337,6 +381,18 @@ fn signal_fingerprint(title: &str, sources: &[SensingSource]) -> String {
         .collect::<Vec<_>>();
     urls.sort();
     format!("{}|{}", normalize(title), urls.join("|"))
+}
+
+fn bounded_deduplication_excerpt(value: &str) -> String {
+    let mut excerpt = value
+        .trim()
+        .chars()
+        .take(MAX_DEDUPLICATION_EXCERPT_CHARS)
+        .collect::<String>();
+    if value.trim().chars().count() > MAX_DEDUPLICATION_EXCERPT_CHARS {
+        excerpt.push('…');
+    }
+    excerpt
 }
 
 fn normalize(value: &str) -> String {
@@ -586,6 +642,41 @@ mod tests {
             SignalPublishOutcome::Existing
         ));
         assert!(store.visible(10).await.unwrap().is_empty());
+        let _ = tokio::fs::remove_file(path).await;
+    }
+
+    #[tokio::test]
+    async fn deduplication_references_include_hidden_signals_with_bounded_context() {
+        let nonce = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let path = std::env::temp_dir().join(format!("symbiont-signals-dedup-{nonce}.json"));
+        let store = SignalStore::open(path.clone()).await.unwrap();
+        let mut original = candidate("sense_reference");
+        original.summary = "x".repeat(600);
+
+        store
+            .publish_with_content(
+                &original,
+                original.proposed_input.clone(),
+                "credible".to_owned(),
+            )
+            .await
+            .unwrap();
+        let signal = store.visible(10).await.unwrap().remove(0);
+        assert!(store.dismiss(&signal.id).await.unwrap());
+
+        let references = store.deduplication_references().await;
+        assert_eq!(references.len(), 1);
+        assert_eq!(references[0].signal_id, signal.id);
+        assert_eq!(references[0].actor_name, "Test observer");
+        assert_eq!(
+            references[0].source_urls,
+            vec!["https://example.test/signal"]
+        );
+        assert_eq!(references[0].excerpt.chars().count(), 481);
+        assert!(references[0].excerpt.ends_with('…'));
         let _ = tokio::fs::remove_file(path).await;
     }
 }
