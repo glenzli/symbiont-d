@@ -401,7 +401,9 @@ async fn main() -> Result<()> {
     );
     let ephemeral_chat = Arc::new(EphemeralChatService::new(
         Arc::clone(&bridge),
-        Arc::clone(&inference),
+        Arc::clone(&codex),
+        Arc::clone(&compute),
+        Arc::clone(&profile),
         Arc::clone(&usage),
     )?);
     let conversation = ConversationCoordinator::new();

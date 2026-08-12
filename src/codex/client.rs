@@ -32,6 +32,7 @@ use super::{
         additional_context_value, context_fragments, context_maintenance_prompt,
         developer_instructions, interaction_reflection_prompt, luna_sensing_developer_instructions,
         memory_reconciliation_prompt, profile_review_prompt, summary_maintenance_prompt,
+        temporary_discussion_developer_instructions,
     },
     tool_dedup::{ToolCallPlan, TurnToolDeduplicator},
     tools::{EscalationRequest, SymbiontTools, tool_result},
@@ -263,6 +264,7 @@ enum BackgroundThread {
     AutonomousReview,
     Attacker,
     Maintenance,
+    TemporaryDiscussion,
 }
 
 #[derive(Clone, Copy)]
@@ -271,6 +273,7 @@ enum ToolSurface {
     LunaSensing,
     AutonomousScout,
     Attacker,
+    TemporaryDiscussion,
 }
 
 pub struct CodexClient {
@@ -286,6 +289,7 @@ pub struct CodexClient {
     autonomous_review_thread_id: String,
     attacker_thread_id: String,
     maintenance_thread_id: String,
+    temporary_discussion_thread_id: String,
     workspace: PathBuf,
     continuity: Arc<ContinuityHost>,
     interactive_cursor: NativeThreadCursor,
@@ -426,6 +430,7 @@ impl CodexClient {
             autonomous_review_thread_id: String::new(),
             attacker_thread_id: String::new(),
             maintenance_thread_id: String::new(),
+            temporary_discussion_thread_id: String::new(),
             workspace: config.workspace.clone(),
             continuity: Arc::clone(&dependencies.continuity),
             interactive_cursor: NativeThreadCursor::new(),
@@ -466,6 +471,9 @@ impl CodexClient {
             .await?;
         client.maintenance_thread_id = client
             .start_thread(&config.workspace, ToolSurface::Full)
+            .await?;
+        client.temporary_discussion_thread_id = client
+            .start_thread(&config.workspace, ToolSurface::TemporaryDiscussion)
             .await?;
         Ok(client)
     }
@@ -639,6 +647,43 @@ impl CodexClient {
             }
         }
         Ok(outcome)
+    }
+
+    /// Runs one non-persistent discussion turn through Codex.
+    ///
+    /// The host owns the complete RAM-only transcript and sends it on every
+    /// attempt. Each attempt receives a fresh ephemeral native thread so a
+    /// failed retry cannot inherit a partially accepted user turn, and the
+    /// main interactive thread never sees temporary content.
+    pub async fn temporary_discussion(
+        &mut self,
+        transcript: String,
+        memory_context: &str,
+        compute: &ComputeConfig,
+        profile: &ProfileSnapshot,
+        input_events: watch::Receiver<u64>,
+        events: mpsc::Sender<RuntimeEvent>,
+    ) -> Result<ChatOutcome> {
+        let thread_id = self.temporary_discussion_thread_id.clone();
+        let outcome = self
+            .run_request(
+                thread_id.clone(),
+                text_input_items(&transcript),
+                ComputeLane::Conversation,
+                "temporary_discussion",
+                compute,
+                profile,
+                memory_context,
+                None,
+                None,
+                false,
+                Some(input_events),
+                &events,
+            )
+            .await;
+        self.renew_background_thread(&thread_id, BackgroundThread::TemporaryDiscussion)
+            .await;
+        outcome
     }
 
     pub fn mark_interactive_revision(&mut self, revision_id: String) {
@@ -1206,6 +1251,7 @@ impl CodexClient {
             BackgroundThread::LunaSensing => ToolSurface::LunaSensing,
             BackgroundThread::AutonomousScout => ToolSurface::AutonomousScout,
             BackgroundThread::Attacker => ToolSurface::Attacker,
+            BackgroundThread::TemporaryDiscussion => ToolSurface::TemporaryDiscussion,
             BackgroundThread::AutonomousReview | BackgroundThread::Maintenance => ToolSurface::Full,
         };
         match self.start_thread(&workspace, tool_surface).await {
@@ -1216,6 +1262,9 @@ impl CodexClient {
                     BackgroundThread::AutonomousReview => self.autonomous_review_thread_id = next,
                     BackgroundThread::Attacker => self.attacker_thread_id = next,
                     BackgroundThread::Maintenance => self.maintenance_thread_id = next,
+                    BackgroundThread::TemporaryDiscussion => {
+                        self.temporary_discussion_thread_id = next
+                    }
                 }
                 self.clear_thread_state(previous);
             }
@@ -1500,6 +1549,7 @@ impl CodexClient {
             working_context: working_context.cloned(),
             developer_instructions: match origin {
                 "luna_sense" => luna_sensing_developer_instructions().to_owned(),
+                "temporary_discussion" => temporary_discussion_developer_instructions(),
                 _ => developer_instructions(),
             },
             native_thread: NativeThreadSnapshot {
@@ -1919,6 +1969,7 @@ impl CodexClient {
     ) -> Result<String> {
         let instructions = match tool_surface {
             ToolSurface::LunaSensing => luna_sensing_developer_instructions().to_owned(),
+            ToolSurface::TemporaryDiscussion => temporary_discussion_developer_instructions(),
             ToolSurface::Full | ToolSurface::AutonomousScout | ToolSurface::Attacker => {
                 developer_instructions()
             }
@@ -1928,6 +1979,7 @@ impl CodexClient {
             ToolSurface::LunaSensing => SymbiontTools::sensing_specifications(),
             ToolSurface::AutonomousScout => SymbiontTools::scout_specifications(),
             ToolSurface::Attacker => SymbiontTools::attacker_specifications(),
+            ToolSurface::TemporaryDiscussion => Value::Array(Vec::new()),
         };
         let result = self
             .request(

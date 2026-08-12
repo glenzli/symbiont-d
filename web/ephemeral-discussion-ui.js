@@ -1,7 +1,19 @@
+export function temporaryDiscussionState(snapshot) {
+  const turns = Array.isArray(snapshot?.turns) ? snapshot.turns : [];
+  const last = turns.at(-1);
+  return {
+    active: Boolean(snapshot?.active),
+    held: Boolean(snapshot?.held),
+    busy: Boolean(snapshot?.busy),
+    retryable: Boolean(last?.role === "user" && last?.failure),
+  };
+}
+
 export function initEphemeralDiscussionUi({
   notify,
   renderSnapshot,
   renderPending,
+  renderRetrying,
   clearMessages,
   appendPromoted,
   canActivate,
@@ -34,6 +46,12 @@ export function initEphemeralDiscussionUi({
   let held = false;
   let busy = false;
   let stopping = false;
+  let retryable = false;
+
+  function applyReply(reply) {
+    applySnapshot(reply.snapshot);
+    if (reply.interrupted) notify("已停止回复，可以重试");
+  }
 
   function resizeInput() {
     input.style.height = "auto";
@@ -55,8 +73,8 @@ export function initEphemeralDiscussionUi({
     layer.hidden = !active;
     shell.inert = active;
     shell.setAttribute("aria-hidden", String(active));
-    input.disabled = busy || held;
-    sendButton.disabled = busy || held || !input.value.trim();
+    input.disabled = busy || held || retryable;
+    sendButton.disabled = busy || held || retryable || !input.value.trim();
     sendButton.hidden = busy;
     stopButton.hidden = !busy;
     stopButton.disabled = stopping;
@@ -66,6 +84,8 @@ export function initEphemeralDiscussionUi({
         ? "正在回应 · 内容仍是临时的"
         : held
           ? "独立讨论已暂停"
+          : retryable
+            ? "上一条回复失败 · 可以重试"
           : "仅保留在当前进程";
   }
 
@@ -77,10 +97,12 @@ export function initEphemeralDiscussionUi({
   }
 
   function applySnapshot(snapshot, shouldRender = true) {
-    serverActive = Boolean(snapshot?.active);
-    held = Boolean(snapshot?.held);
+    const state = temporaryDiscussionState(snapshot);
+    serverActive = state.active;
+    held = state.held;
+    retryable = state.retryable;
     active = active || serverActive;
-    setBusy(Boolean(snapshot?.busy));
+    setBusy(state.busy);
     if (shouldRender) renderSnapshot(snapshot || { turns: [] });
   }
 
@@ -119,11 +141,27 @@ export function initEphemeralDiscussionUi({
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ message }),
       });
-      applySnapshot(reply.snapshot);
-      if (reply.interrupted) notify("已停止回复");
+      applyReply(reply);
     } catch (error) {
       const restored = await restoreAuthoritativeSnapshot();
       if (!restored) clearMessages();
+      notify(error.message);
+    } finally {
+      setBusy(false);
+      focusInput();
+    }
+  }
+
+  async function retry() {
+    if (busy || held) return;
+    renderRetrying?.();
+    setBusy(true);
+    try {
+      applyReply(
+        await request("/api/temporary-discussion/retry", { method: "POST" }),
+      );
+    } catch (error) {
+      await restoreAuthoritativeSnapshot();
       notify(error.message);
     } finally {
       setBusy(false);
@@ -247,6 +285,10 @@ export function initEphemeralDiscussionUi({
     }
   });
   stopButton.addEventListener("click", interrupt);
+  layer.addEventListener("click", (event) => {
+    if (!event.target.closest("[data-temporary-discussion-retry]")) return;
+    retry();
+  });
   document.addEventListener("keydown", (event) => {
     if (event.key !== "Escape" || !active || dialog.open) return;
     event.preventDefault();
@@ -290,5 +332,6 @@ export function initEphemeralDiscussionUi({
     isActive: () => active,
     isBusy: () => busy,
     restore,
+    retry,
   };
 }

@@ -24,7 +24,7 @@ mod ephemeral_discussion;
 use ephemeral_discussion::{
     discard_temporary_discussion, hold_temporary_discussion, interrupt_temporary_discussion,
     promote_temporary_discussion, reply_in_temporary_discussion, resume_temporary_discussion,
-    temporary_discussion_snapshot,
+    retry_temporary_discussion, temporary_discussion_snapshot,
 };
 
 use crate::{
@@ -605,6 +605,10 @@ pub fn router(state: AppState) -> Router {
         .route(
             "/api/temporary-discussion/messages",
             post(reply_in_temporary_discussion),
+        )
+        .route(
+            "/api/temporary-discussion/retry",
+            post(retry_temporary_discussion),
         )
         .route(
             "/api/temporary-discussion/interrupt",

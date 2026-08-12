@@ -61,6 +61,24 @@ pub(super) async fn reply_in_temporary_discussion(
         .map_err(ApiError::internal)
 }
 
+pub(super) async fn retry_temporary_discussion(
+    State(state): State<AppState>,
+) -> Result<Json<EphemeralReply>, ApiError> {
+    if state.conversation.snapshot().await.active {
+        return Err(ApiError::conflict(
+            "Stop the current reply before retrying a temporary discussion.",
+        ));
+    }
+    state.conversation.announce_input();
+    state.continuations.cancel_all().await;
+    state
+        .ephemeral_chat
+        .retry()
+        .await
+        .map(Json)
+        .map_err(ApiError::internal)
+}
+
 pub(super) async fn interrupt_temporary_discussion(
     State(state): State<AppState>,
 ) -> Json<ChatInterruptResponse> {

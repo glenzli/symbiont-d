@@ -52,6 +52,7 @@ pub(crate) struct EphemeralTurn {
     pub(crate) role: EphemeralRole,
     pub(crate) text: String,
     pub(crate) recorded_at: SystemTime,
+    pub(crate) failure: Option<String>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -285,6 +286,7 @@ impl EphemeralSession {
             role,
             text: text.to_owned(),
             recorded_at: now,
+            failure: None,
         });
         self.character_count += character_count;
         self.last_activity_at = now;
@@ -361,17 +363,53 @@ impl EphemeralSessionStore {
         text: &str,
         now: SystemTime,
     ) -> Result<(), EphemeralSessionError> {
-        self.live_session_mut(id, now)?
-            .append(EphemeralRole::Assistant, text, now)
+        let session = self.live_session_mut(id, now)?;
+        session.append(EphemeralRole::Assistant, text, now)?;
+        if let Some(user) = session
+            .turns
+            .iter_mut()
+            .rev()
+            .find(|turn| turn.role == EphemeralRole::User)
+        {
+            user.failure = None;
+        }
+        Ok(())
     }
 
-    /// Removes the unanswered user turn after inference is interrupted or
-    /// fails. The caller may then retry or submit an edited replacement.
-    pub(crate) fn rollback_pending_user(
+    /// Keeps an unanswered user turn visible and records why the host could
+    /// not produce its assistant pair. The same turn can later be retried
+    /// without creating a duplicate user message.
+    pub(crate) fn mark_pending_user_failed(
+        &mut self,
+        id: &EphemeralSessionId,
+        failure: &str,
+        now: SystemTime,
+    ) -> Result<(), EphemeralSessionError> {
+        let session = self.live_session_mut(id, now)?;
+        if session.state != EphemeralSessionState::Open {
+            return Err(EphemeralSessionError::NotOpen);
+        }
+        let Some(turn) = session.turns.last_mut() else {
+            return Err(EphemeralSessionError::UnexpectedRole);
+        };
+        if turn.role != EphemeralRole::User {
+            return Err(EphemeralSessionError::UnexpectedRole);
+        }
+        let failure = failure.trim();
+        turn.failure = Some(if failure.is_empty() {
+            "temporary discussion reply failed".to_owned()
+        } else {
+            failure.chars().take(600).collect()
+        });
+        session.last_activity_at = now;
+        Ok(())
+    }
+
+    pub(crate) fn retry_context(
         &mut self,
         id: &EphemeralSessionId,
         now: SystemTime,
-    ) -> Result<(), EphemeralSessionError> {
+    ) -> Result<EphemeralInferenceContext, EphemeralSessionError> {
         let session = self.live_session_mut(id, now)?;
         if session.state != EphemeralSessionState::Open {
             return Err(EphemeralSessionError::NotOpen);
@@ -379,15 +417,14 @@ impl EphemeralSessionStore {
         let Some(turn) = session.turns.last() else {
             return Err(EphemeralSessionError::UnexpectedRole);
         };
-        if turn.role != EphemeralRole::User {
+        if turn.role != EphemeralRole::User || turn.failure.is_none() {
             return Err(EphemeralSessionError::UnexpectedRole);
         }
-        let removed = session.turns.pop().expect("last turn remains present");
-        session.character_count = session
-            .character_count
-            .saturating_sub(removed.text.chars().count());
-        session.last_activity_at = now;
-        Ok(())
+        Ok(EphemeralInferenceContext {
+            session_id: id.clone(),
+            memory_seed: session.memory_seed.clone(),
+            turns: session.turns.clone(),
+        })
     }
 
     pub(crate) fn hold_for_decision(

@@ -91,23 +91,33 @@ fn hold_blocks_new_turns_until_the_user_resumes() {
 }
 
 #[test]
-fn interrupted_inference_can_roll_back_the_pending_user_turn() {
+fn failed_inference_keeps_the_pending_user_turn_for_retry() {
     let now = SystemTime::UNIX_EPOCH;
     let mut store = EphemeralSessionStore::new(1).unwrap();
     let id = store.start(None, limits(), now).unwrap();
     store.append_user(&id, "写错的问题", now).unwrap();
 
-    store.rollback_pending_user(&id, now).unwrap();
+    store
+        .mark_pending_user_failed(&id, "runtime unavailable", now)
+        .unwrap();
     let transcript = store.transcript(&id, now).unwrap();
-    assert!(transcript.turns.is_empty());
-    assert_eq!(transcript.character_count, 0);
+    assert_eq!(transcript.turns.len(), 1);
+    assert_eq!(transcript.turns[0].text, "写错的问题");
+    assert_eq!(
+        transcript.turns[0].failure.as_deref(),
+        Some("runtime unavailable")
+    );
+    assert_eq!(transcript.character_count, 5);
 
-    store.append_user(&id, "修改后的问题", now).unwrap();
+    let retry = store.retry_context(&id, now).unwrap();
+    assert_eq!(retry.turns.len(), 1);
+    assert_eq!(retry.turns[0].text, "写错的问题");
     store.append_assistant(&id, "新的回答", now).unwrap();
     assert_eq!(
-        store.rollback_pending_user(&id, now),
+        store.retry_context(&id, now),
         Err(EphemeralSessionError::UnexpectedRole)
     );
+    assert_eq!(store.transcript(&id, now).unwrap().turns[0].failure, None);
 }
 
 #[test]

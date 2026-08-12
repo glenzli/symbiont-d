@@ -212,6 +212,7 @@ const ephemeralDiscussionUi = initEphemeralDiscussionUi({
   notify: notifyComposer,
   renderSnapshot: renderTemporaryDiscussionSnapshot,
   renderPending: renderTemporaryDiscussionPending,
+  renderRetrying: renderTemporaryDiscussionRetrying,
   clearMessages: clearTemporaryDiscussionMessages,
   appendPromoted(entry) {
     appendMessage(entry);
@@ -1079,7 +1080,7 @@ function clearTemporaryDiscussionMessages() {
 function renderTemporaryDiscussionSnapshot(snapshot) {
   clearTemporaryDiscussionMessages();
   for (const turn of snapshot?.turns || []) {
-    appendMessage(
+    const message = appendMessage(
       {
         role: turn.role,
         at: turn.at,
@@ -1092,6 +1093,22 @@ function renderTemporaryDiscussionSnapshot(snapshot) {
         container: temporaryDiscussionConversation,
       },
     );
+    if (turn.failure) {
+      message.classList.add("message-failed", "temporary-discussion-failed");
+      const foot = message.querySelector(".message-foot");
+      const state = foot.querySelector(".message-state");
+      const actions = foot.querySelector(".message-actions");
+      state.textContent = "回复失败";
+      state.title = turn.failure;
+      const retry = document.createElement("button");
+      retry.type = "button";
+      retry.className = "temporary-discussion-retry";
+      retry.dataset.temporaryDiscussionRetry = "";
+      retry.textContent = "重试";
+      retry.title = turn.failure;
+      actions.replaceChildren(retry);
+      foot.hidden = false;
+    }
   }
   if (snapshot?.turns?.length) {
     temporaryDiscussionConversation.scrollTop =
@@ -1109,6 +1126,21 @@ function renderTemporaryDiscussionPending(text) {
       role: "assistant",
       at: new Date().toISOString(),
       content: "正在回应独立讨论…",
+    },
+    {
+      temporary: true,
+      pending: true,
+      container: temporaryDiscussionConversation,
+    },
+  );
+}
+
+function renderTemporaryDiscussionRetrying() {
+  appendMessage(
+    {
+      role: "assistant",
+      at: new Date().toISOString(),
+      content: "正在重试独立讨论…",
     },
     {
       temporary: true,

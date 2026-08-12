@@ -14,6 +14,7 @@ use super::{
     prompts::{
         context_fragments, developer_instructions, interaction_reflection_prompt,
         memory_reconciliation_prompt, summary_maintenance_prompt,
+        temporary_discussion_developer_instructions,
     },
     tools::SymbiontTools,
     trace::observable_item_event,
@@ -263,6 +264,15 @@ fn persistent_instructions_define_a_short_unambiguous_pcp_boundary() {
     assert!(instructions.contains("PCP memory operations remain available"));
     assert!(!instructions.contains("do not modify files or attempt side effects"));
     assert!(instructions.chars().count() < 3_500);
+}
+
+#[test]
+fn temporary_discussion_changes_retention_without_changing_identity() {
+    let instructions = temporary_discussion_developer_instructions();
+    assert!(instructions.contains("same conversational quality"));
+    assert!(instructions.contains("will not write this exchange to PCP"));
+    assert!(instructions.contains("No Symbiont dynamic tools are available"));
+    assert!(instructions.contains("Web search may be used"));
 }
 
 #[test]
