@@ -60,7 +60,7 @@ use crate::{
     },
     ephemeral_chat::EphemeralChatService,
     exploration::{ExplorationHandle, ExplorationSnapshot, ManualExplorationRun, today_started_at},
-    identity::{AvatarSlot, IdentitySnapshot, IdentityStore},
+    identity::{AvatarSlot, IdentitySettingsUpdate, IdentitySnapshot, IdentityStore},
     input_roles::{InputRoleSettingsSnapshot, InputRoleSettingsUpdate, InputRoleStore},
     mail_input::{MailInputConfig, MailInputConnectionTest, MailInputSnapshot, MailInputStore},
     memory::{
@@ -98,6 +98,7 @@ const CURIOSITY_UI_JS: &str = include_str!("../web/curiosity-ui.js");
 const IDENTITY_UI_JS: &str = include_str!("../web/identity-ui.js");
 const INPUT_ROLES_JS: &str = include_str!("../web/input-roles.js");
 const INPUT_SIGNAL_GROUPS_JS: &str = include_str!("../web/input-signal-groups.js");
+const INPUT_SIGNAL_RELATIONS_JS: &str = include_str!("../web/input-signal-relations.js");
 const CONVERSATION_FOCUS_UI_JS: &str = include_str!("../web/conversation-focus-ui.js");
 const SETTINGS_JS: &str = include_str!("../web/settings.js");
 const USAGE_UI_JS: &str = include_str!("../web/usage-ui.js");
@@ -132,6 +133,8 @@ const INPUT_ROLE_AVATAR_SEED: &[u8] = include_bytes!("../web/assets/input-role-a
 const INPUT_ROLE_AVATAR_STAR_MAP: &[u8] =
     include_bytes!("../web/assets/input-role-avatars/star-map.png");
 const INPUT_ROLE_AVATAR_ECHO: &[u8] = include_bytes!("../web/assets/input-role-avatars/echo.png");
+const INPUT_ROLE_AVATAR_SYMBIONT_DISSENT: &[u8] =
+    include_bytes!("../web/assets/input-role-avatars/symbiont-dissent.png");
 const MAX_USER_MESSAGE_CHARS: usize = 12_000;
 const MAX_CODEX_TASK_CONTEXTS: usize = 2;
 const MAX_CHAT_BODY_BYTES: usize =
@@ -565,6 +568,7 @@ pub fn router(state: AppState) -> Router {
         .route("/identity-ui.js", get(identity_ui_js))
         .route("/input-roles.js", get(input_roles_js))
         .route("/input-signal-groups.js", get(input_signal_groups_js))
+        .route("/input-signal-relations.js", get(input_signal_relations_js))
         .route("/conversation-focus-ui.js", get(conversation_focus_ui_js))
         .route("/settings.js", get(settings_js))
         .route("/usage-ui.js", get(usage_ui_js))
@@ -628,6 +632,7 @@ pub fn router(state: AppState) -> Router {
             "/api/identity/avatar",
             post(update_identity_avatar).delete(clear_identity_avatar),
         )
+        .route("/api/identity", post(update_identity_settings))
         .route(
             "/api/identity/user-avatar",
             post(update_user_identity_avatar).delete(clear_user_identity_avatar),
@@ -736,6 +741,7 @@ async fn input_role_avatar(
         "seed.png" => INPUT_ROLE_AVATAR_SEED,
         "star-map.png" => INPUT_ROLE_AVATAR_STAR_MAP,
         "echo.png" => INPUT_ROLE_AVATAR_ECHO,
+        "symbiont-dissent.png" => INPUT_ROLE_AVATAR_SYMBIONT_DISSENT,
         _ => return Err(ApiError::not_found("input role avatar not found")),
     };
     Ok((
@@ -828,6 +834,13 @@ async fn input_signal_groups_js() -> impl IntoResponse {
     (
         [(header::CONTENT_TYPE, "text/javascript; charset=utf-8")],
         INPUT_SIGNAL_GROUPS_JS,
+    )
+}
+
+async fn input_signal_relations_js() -> impl IntoResponse {
+    (
+        [(header::CONTENT_TYPE, "text/javascript; charset=utf-8")],
+        INPUT_SIGNAL_RELATIONS_JS,
     )
 }
 
@@ -1015,6 +1028,7 @@ async fn bootstrap(State(state): State<AppState>) -> Result<Json<BootstrapRespon
     let ambient = state.ambient.snapshot().await;
     let drive_input = state.drive_input.snapshot().await;
     let mail_input = state.mail_input.snapshot().await;
+    let identity = state.identity.snapshot().await;
     let input_roles = state
         .input_roles
         .snapshot(
@@ -1022,6 +1036,7 @@ async fn bootstrap(State(state): State<AppState>) -> Result<Json<BootstrapRespon
             &drive_input,
             &mail_input,
             autonomy.attacker_enabled,
+            &identity.display_name,
         )
         .await;
 
@@ -1032,7 +1047,7 @@ async fn bootstrap(State(state): State<AppState>) -> Result<Json<BootstrapRespon
         turn_dispositions,
         memory_chars,
         status: "connected",
-        identity: state.identity.snapshot().await,
+        identity,
         profile,
         autonomy,
         autonomy_permitted,
@@ -1266,6 +1281,7 @@ async fn update_input_roles(
     let ambient = state.ambient.snapshot().await;
     let drive_input = state.drive_input.snapshot().await;
     let mail_input = state.mail_input.snapshot().await;
+    let identity = state.identity.snapshot().await;
     Ok(Json(
         state
             .input_roles
@@ -1274,6 +1290,7 @@ async fn update_input_roles(
                 &drive_input,
                 &mail_input,
                 state.autonomy.snapshot().await.attacker_enabled,
+                &identity.display_name,
             )
             .await,
     ))
@@ -1283,6 +1300,7 @@ async fn input_roles_snapshot(State(state): State<AppState>) -> Json<InputRoleSe
     let ambient = state.ambient.snapshot().await;
     let drive_input = state.drive_input.snapshot().await;
     let mail_input = state.mail_input.snapshot().await;
+    let identity = state.identity.snapshot().await;
     Json(
         state
             .input_roles
@@ -1291,6 +1309,7 @@ async fn input_roles_snapshot(State(state): State<AppState>) -> Json<InputRoleSe
                 &drive_input,
                 &mail_input,
                 state.autonomy.snapshot().await.attacker_enabled,
+                &identity.display_name,
             )
             .await,
     )
@@ -1618,6 +1637,7 @@ async fn runtime(
     let ambient = state.ambient.snapshot().await;
     let drive_input = state.drive_input.snapshot().await;
     let mail_input = state.mail_input.snapshot().await;
+    let identity = state.identity.snapshot().await;
     let input_roles = state
         .input_roles
         .snapshot(
@@ -1625,10 +1645,11 @@ async fn runtime(
             &drive_input,
             &mail_input,
             state.autonomy.snapshot().await.attacker_enabled,
+            &identity.display_name,
         )
         .await;
     Ok(Json(RuntimeResponse {
-        identity: state.identity.snapshot().await,
+        identity,
         usage,
         ambient,
         drive_input,
@@ -2142,6 +2163,18 @@ async fn update_identity_avatar(
     save_identity_avatar(&state, multipart, AvatarSlot::Symbiont).await
 }
 
+async fn update_identity_settings(
+    State(state): State<AppState>,
+    Json(update): Json<IdentitySettingsUpdate>,
+) -> Result<Json<IdentitySnapshot>, ApiError> {
+    state
+        .identity
+        .update(update)
+        .await
+        .map(Json)
+        .map_err(ApiError::bad_request)
+}
+
 async fn update_user_identity_avatar(
     State(state): State<AppState>,
     multipart: Multipart,
@@ -2555,7 +2588,11 @@ async fn prepare_chat_request(
                 .ok_or_else(|| {
                     ApiError::bad_request("This input signal is no longer available.")
                 })?;
-            state.input_roles.apply(&mut signal.actor).await;
+            let display_name = state.identity.snapshot().await.display_name;
+            state
+                .input_roles
+                .apply(&mut signal.actor, &display_name)
+                .await;
             let revision_id = match signal.promoted_revision_id.as_deref() {
                 Some(revision_id) => revision_id.to_owned(),
                 None => {
@@ -3114,8 +3151,12 @@ fn signal_context(signal: &SignalEvent) -> ExternalContext {
 }
 
 async fn apply_input_role_appearances(state: &AppState, signals: &mut [SignalEvent]) {
+    let display_name = state.identity.snapshot().await.display_name;
     for signal in signals {
-        state.input_roles.apply(&mut signal.actor).await;
+        state
+            .input_roles
+            .apply(&mut signal.actor, &display_name)
+            .await;
     }
 }
 

@@ -19,6 +19,8 @@ pub const INPUT_ROLE_AVATARS: [&str; 8] = [
     "star-map",
     "echo",
 ];
+const SYMBIONT_DISSENT_AVATAR: &str = "symbiont-dissent";
+const SYMBIONT_ATTACKER_ID: &str = "symbiont_attacker";
 
 #[derive(Clone, Debug, Default, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -40,7 +42,8 @@ struct InputRoleDocument {
 #[serde(rename_all = "camelCase")]
 pub struct InputRoleAppearanceUpdate {
     pub id: String,
-    pub name: String,
+    #[serde(default)]
+    pub name: Option<String>,
     pub avatar: String,
 }
 
@@ -65,6 +68,7 @@ pub struct InputRoleDescriptor {
     pub source: String,
     pub default_name: String,
     pub name: String,
+    pub custom_name: bool,
     pub avatar: String,
 }
 
@@ -75,7 +79,7 @@ pub struct InputRoleStore {
 
 impl InputRoleStore {
     pub async fn open(path: PathBuf) -> Result<Self> {
-        let document = match fs::read_to_string(&path).await {
+        let mut document = match fs::read_to_string(&path).await {
             Ok(value) => toml::from_str(&value).unwrap_or_else(|error| {
                 tracing::warn!(%error, path = %path.display(), "input role appearance configuration is invalid; using defaults");
                 InputRoleDocument::default()
@@ -87,6 +91,10 @@ impl InputRoleStore {
                 });
             }
         };
+        // The dissent role is a visible posture of Symbiont rather than an
+        // independent external speaker. Drop legacy appearance overrides so
+        // its name and avatar always follow the primary identity.
+        document.roles.remove(SYMBIONT_ATTACKER_ID);
         let store = Self {
             path,
             document: RwLock::new(document),
@@ -101,6 +109,7 @@ impl InputRoleStore {
         drive: &DriveInputSnapshot,
         mail: &MailInputSnapshot,
         attacker_enabled: bool,
+        symbiont_display_name: &str,
     ) -> InputRoleSettingsSnapshot {
         let document = self.document.read().await;
         let mut roles = Vec::new();
@@ -152,41 +161,53 @@ impl InputRoleStore {
         if attacker_enabled {
             roles.push(descriptor(
                 &document,
-                "symbiont_attacker",
+                SYMBIONT_ATTACKER_ID,
                 "reviewer",
-                "Codex · 逆向审视",
-                "逆向审视",
+                "Codex · 异议审阅",
+                &format!("{symbiont_display_name} · 异议"),
             ));
         }
         InputRoleSettingsSnapshot {
             roles,
-            avatar_options: INPUT_ROLE_AVATARS.to_vec(),
+            avatar_options: INPUT_ROLE_AVATARS.into_iter().collect(),
         }
     }
 
     pub async fn update(&self, update: InputRoleSettingsUpdate) -> Result<()> {
         let mut roles = BTreeMap::new();
         for role in update.roles {
+            if role.id == SYMBIONT_ATTACKER_ID {
+                continue;
+            }
             validate_role(&role)?;
             roles.insert(
                 role.id,
                 InputRoleAppearance {
-                    name: Some(role.name.trim().to_owned()),
+                    name: role.name.map(|name| name.trim().to_owned()),
                     avatar: Some(role.avatar),
                 },
             );
         }
         // Keep hidden roles so a temporary disable does not reset their identity.
         let mut document = self.document.write().await;
+        document.roles.remove(SYMBIONT_ATTACKER_ID);
         document.roles.extend(roles);
         drop(document);
         self.persist().await
     }
 
-    pub async fn apply(&self, actor: &mut InputRoleSnapshot) {
+    pub async fn apply(&self, actor: &mut InputRoleSnapshot, symbiont_display_name: &str) {
+        if actor.id == SYMBIONT_ATTACKER_ID {
+            actor.name = format!("{symbiont_display_name} · 异议");
+            actor.avatar_seed = SYMBIONT_DISSENT_AVATAR.to_owned();
+            return;
+        }
         let document = self.document.read().await;
         let appearance = document.roles.get(&actor.id);
-        if let Some(name) = appearance.and_then(|appearance| appearance.name.as_deref()) {
+        if let Some(name) = appearance
+            .and_then(|appearance| appearance.name.as_deref())
+            .filter(|name| custom_name(&actor.id, name))
+        {
             actor.name = name.to_owned();
         }
         actor.avatar_seed = appearance
@@ -232,16 +253,34 @@ fn descriptor(
     source: &str,
     default_name: &str,
 ) -> InputRoleDescriptor {
+    if id == SYMBIONT_ATTACKER_ID {
+        return InputRoleDescriptor {
+            id: id.to_owned(),
+            kind,
+            source: source.to_owned(),
+            default_name: default_name.to_owned(),
+            name: default_name.to_owned(),
+            custom_name: false,
+            avatar: SYMBIONT_DISSENT_AVATAR.to_owned(),
+        };
+    }
     let appearance = document.roles.get(id);
+    let custom_name = appearance
+        .and_then(|appearance| appearance.name.as_deref())
+        .is_some_and(|name| custom_name(id, name));
     InputRoleDescriptor {
         id: id.to_owned(),
         kind,
         source: source.to_owned(),
         default_name: default_name.to_owned(),
-        name: appearance
-            .and_then(|appearance| appearance.name.clone())
-            .filter(|name| !name.trim().is_empty())
-            .unwrap_or_else(|| default_name.to_owned()),
+        name: if custom_name {
+            appearance
+                .and_then(|appearance| appearance.name.clone())
+                .unwrap_or_else(|| default_name.to_owned())
+        } else {
+            default_name.to_owned()
+        },
+        custom_name,
         avatar: appearance
             .and_then(|appearance| appearance.avatar.as_deref())
             .and_then(normalize_avatar)
@@ -250,9 +289,13 @@ fn descriptor(
     }
 }
 
+fn custom_name(id: &str, name: &str) -> bool {
+    !name.trim().is_empty() && id != SYMBIONT_ATTACKER_ID
+}
+
 fn default_avatar(id: &str) -> &'static str {
-    if id == "symbiont_attacker" {
-        return "prism";
+    if id == SYMBIONT_ATTACKER_ID {
+        return SYMBIONT_DISSENT_AVATAR;
     }
     let hash = id.bytes().fold(0usize, |hash, byte| {
         hash.wrapping_mul(31).wrapping_add(byte as usize)
@@ -261,6 +304,9 @@ fn default_avatar(id: &str) -> &'static str {
 }
 
 fn normalize_avatar(avatar: &str) -> Option<&'static str> {
+    if avatar == SYMBIONT_DISSENT_AVATAR {
+        return Some(SYMBIONT_DISSENT_AVATAR);
+    }
     INPUT_ROLE_AVATARS
         .iter()
         .copied()
@@ -280,11 +326,16 @@ fn validate_role(role: &InputRoleAppearanceUpdate) -> Result<()> {
     if role.id.trim().is_empty() || role.id.chars().count() > 160 {
         anyhow::bail!("input role id is invalid");
     }
-    if role.name.trim().is_empty() || role.name.chars().count() > 80 {
-        anyhow::bail!("input role name must contain at most 80 characters");
+    if role.name.as_ref().is_some_and(|name| {
+        name.trim().is_empty() || name.chars().count() > 80 || name.chars().any(char::is_control)
+    }) {
+        anyhow::bail!("input role name must contain between 1 and 80 characters");
     }
     if normalize_avatar(&role.avatar).is_none() {
         anyhow::bail!("input role avatar is unknown");
+    }
+    if role.avatar == SYMBIONT_DISSENT_AVATAR {
+        anyhow::bail!("the Symbiont dissent avatar is not a configurable input role avatar");
     }
     Ok(())
 }
@@ -300,7 +351,7 @@ mod tests {
         let first = default_avatar("ambient_luna");
         assert_eq!(first, default_avatar("ambient_luna"));
         assert!(INPUT_ROLE_AVATARS.contains(&first));
-        assert_eq!(default_avatar("symbiont_attacker"), "prism");
+        assert_eq!(default_avatar("symbiont_attacker"), SYMBIONT_DISSENT_AVATAR);
     }
 
     #[test]
@@ -308,8 +359,20 @@ mod tests {
         assert!(
             validate_role(&InputRoleAppearanceUpdate {
                 id: "ambient_luna".to_owned(),
-                name: "Luna".to_owned(),
+                name: Some("Luna".to_owned()),
                 avatar: "remote-url".to_owned(),
+            })
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn keeps_the_derived_avatar_out_of_configurable_roles() {
+        assert!(
+            validate_role(&InputRoleAppearanceUpdate {
+                id: "ambient_luna".to_owned(),
+                name: None,
+                avatar: SYMBIONT_DISSENT_AVATAR.to_owned(),
             })
             .is_err()
         );
@@ -335,7 +398,7 @@ mod tests {
             .update(InputRoleSettingsUpdate {
                 roles: vec![InputRoleAppearanceUpdate {
                     id: "mail_inbox".to_owned(),
-                    name: "星图信使".to_owned(),
+                    name: Some("星图信使".to_owned()),
                     avatar: "courier".to_owned(),
                 }],
             })
@@ -347,5 +410,60 @@ mod tests {
         assert!(persisted.contains("星图信使"));
         assert!(persisted.contains("courier"));
         let _ = fs::remove_file(path).await;
+    }
+
+    #[test]
+    fn attacker_default_name_follows_the_symbiont_nickname() {
+        let document = InputRoleDocument::default();
+        let role = descriptor(
+            &document,
+            "symbiont_attacker",
+            "reviewer",
+            "Codex · 异议审阅",
+            "小伴 · 异议",
+        );
+        assert_eq!(role.name, "小伴 · 异议");
+    }
+
+    #[test]
+    fn legacy_attacker_name_does_not_freeze_the_derived_default() {
+        let mut document = InputRoleDocument::default();
+        document.roles.insert(
+            "symbiont_attacker".to_owned(),
+            InputRoleAppearance {
+                name: Some("逆向审视".to_owned()),
+                avatar: None,
+            },
+        );
+        let role = descriptor(
+            &document,
+            "symbiont_attacker",
+            "reviewer",
+            "Codex · 异议审阅",
+            "小伴 · 异议",
+        );
+        assert_eq!(role.name, "小伴 · 异议");
+    }
+
+    #[test]
+    fn attacker_appearance_is_always_derived() {
+        let mut document = InputRoleDocument::default();
+        document.roles.insert(
+            "symbiont_attacker".to_owned(),
+            InputRoleAppearance {
+                name: Some("边界检查员".to_owned()),
+                avatar: None,
+            },
+        );
+        let role = descriptor(
+            &document,
+            "symbiont_attacker",
+            "reviewer",
+            "Codex · 异议审阅",
+            "小伴 · 异议",
+        );
+        assert_eq!(role.name, "小伴 · 异议");
+        assert!(!role.custom_name);
+        assert_eq!(role.avatar, SYMBIONT_DISSENT_AVATAR);
     }
 }

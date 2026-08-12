@@ -11,6 +11,12 @@ const AVATAR_LABELS = {
   echo: "回声",
 };
 
+const DERIVED_AVATAR_LABELS = {
+  "symbiont-dissent": "共生体 · 异议",
+};
+
+const INPUT_ROLE_AVATAR_VERSION = "clay-transparent-20260812-v3";
+
 const LEGACY_AVATARS = {
   orbit: "moon-window",
   ripple: "tide",
@@ -22,7 +28,9 @@ const LEGACY_AVATARS = {
 
 export function applyInputRoleAvatar(element, avatar = "moon-window") {
   if (!element) return;
-  const selected = AVATAR_LABELS[avatar] ? avatar : LEGACY_AVATARS[avatar] || "moon-window";
+  const selected = AVATAR_LABELS[avatar] || DERIVED_AVATAR_LABELS[avatar]
+    ? avatar
+    : LEGACY_AVATARS[avatar] || "moon-window";
   element.classList.add("input-role-avatar");
   element.dataset.inputAvatar = selected;
   element.dataset.avatarLoadFailed = "false";
@@ -42,7 +50,7 @@ export function applyInputRoleAvatar(element, avatar = "moon-window") {
     element.replaceChildren(image);
   }
   image.hidden = false;
-  image.src = `/assets/input-role-avatars/${encodeURIComponent(selected)}.png?v=clay-transparent-symmetric-20260810-v1`;
+  image.src = `/assets/input-role-avatars/${encodeURIComponent(selected)}.png?v=${INPUT_ROLE_AVATAR_VERSION}`;
 }
 
 export function initInputRoleUi(state) {
@@ -56,7 +64,9 @@ export function initInputRoleUi(state) {
     if (!list || !template) return;
     if (dirty && !force) return;
     list.replaceChildren();
-    const roles = state.inputRoles?.roles || [];
+    const roles = (state.inputRoles?.roles || []).filter(
+      (role) => role.id !== "symbiont_attacker",
+    );
     empty.hidden = roles.length > 0;
     for (const role of roles) {
       const fragment = template.content.cloneNode(true);
@@ -66,7 +76,7 @@ export function initInputRoleUi(state) {
       applyInputRoleAvatar(preview, role.avatar);
       row.querySelector(".input-role-settings-source").textContent = role.source;
       const name = row.querySelector('[data-input-role-field="name"]');
-      name.value = role.name;
+      name.value = role.customName ? role.name : "";
       name.placeholder = role.defaultName;
       name.setAttribute("aria-label", `${role.source}的昵称`);
       name.addEventListener("input", () => {
@@ -79,7 +89,8 @@ export function initInputRoleUi(state) {
         void saveRoles();
       });
       const choices = row.querySelector(".input-role-avatar-options");
-      for (const avatar of state.inputRoles?.avatarOptions || []) {
+      const avatars = state.inputRoles?.avatarOptions || [];
+      for (const avatar of avatars) {
         const option = document.createElement("button");
         option.type = "button";
         option.className = "input-role-avatar-option";
@@ -108,7 +119,7 @@ export function initInputRoleUi(state) {
     try {
       const roles = [...list.querySelectorAll("[data-input-role]")].map((row) => ({
         id: row.dataset.roleId,
-        name: row.querySelector('[data-input-role-field="name"]').value.trim(),
+        name: row.querySelector('[data-input-role-field="name"]').value.trim() || null,
         avatar: row.dataset.avatar,
       }));
       state.inputRoles = await responseJson(

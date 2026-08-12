@@ -860,9 +860,12 @@ export function initSettings(state, actions = {}) {
   async function saveCurrentSettings() {
     if (activeSettingsTab === "general") {
       settingsSave.disabled = true;
-      const saved = await actions.saveInputRoles?.();
+      const identitySaved = await actions.saveIdentity?.();
+      const rolesSaved = identitySaved === false
+        ? false
+        : await actions.saveInputRoles?.();
       settingsSave.disabled = false;
-      settingsSaveState.textContent = saved === false ? "保存失败" : "已保存";
+      settingsSaveState.textContent = rolesSaved === false ? "保存失败" : "已保存";
       return;
     }
     if (activeSettingsTab === "exploration") {

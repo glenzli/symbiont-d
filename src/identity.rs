@@ -8,15 +8,35 @@ use crate::asset::ImageAttachment;
 
 /// Local presentation preferences. This is deliberately separate from the
 /// model-facing profile and durable conversation memory.
-#[derive(Clone, Debug, Default, Deserialize, Serialize)]
+pub const DEFAULT_SYMBIONT_DISPLAY_NAME: &str = "symbiont-d";
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct IdentitySnapshot {
+    #[serde(default = "default_display_name")]
+    pub display_name: String,
     /// The visible symbiont-d persona. Kept as `avatar` for local backwards
     /// compatibility with the first presentation preference format.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub avatar: Option<ImageAttachment>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub user_avatar: Option<ImageAttachment>,
+}
+
+impl Default for IdentitySnapshot {
+    fn default() -> Self {
+        Self {
+            display_name: default_display_name(),
+            avatar: None,
+            user_avatar: None,
+        }
+    }
+}
+
+#[derive(Clone, Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct IdentitySettingsUpdate {
+    pub display_name: String,
 }
 
 #[derive(Clone, Copy)]
@@ -69,9 +89,34 @@ impl IdentityStore {
         Ok(next)
     }
 
+    pub async fn update(&self, update: IdentitySettingsUpdate) -> Result<IdentitySnapshot> {
+        let display_name = normalize_display_name(&update.display_name)?;
+        let mut snapshot = self.snapshot.write().await;
+        let mut next = snapshot.clone();
+        next.display_name = display_name;
+        persist(&self.path, &next).await?;
+        *snapshot = next.clone();
+        Ok(next)
+    }
+
     async fn persist(&self) -> Result<()> {
         persist(&self.path, &self.snapshot().await).await
     }
+}
+
+fn default_display_name() -> String {
+    DEFAULT_SYMBIONT_DISPLAY_NAME.to_owned()
+}
+
+fn normalize_display_name(value: &str) -> Result<String> {
+    let value = value.trim();
+    if value.is_empty() || value.chars().count() > 40 {
+        anyhow::bail!("symbiont nickname must contain between 1 and 40 characters");
+    }
+    if value.chars().any(char::is_control) {
+        anyhow::bail!("symbiont nickname cannot contain control characters");
+    }
+    Ok(value.to_owned())
 }
 
 async fn persist(path: &PathBuf, snapshot: &IdentitySnapshot) -> Result<()> {
@@ -124,6 +169,16 @@ mod tests {
             .expect("open identity");
 
         assert!(store.snapshot().await.avatar.is_none());
+        assert_eq!(
+            store.snapshot().await.display_name,
+            DEFAULT_SYMBIONT_DISPLAY_NAME
+        );
+        store
+            .update(IdentitySettingsUpdate {
+                display_name: "  小伴  ".to_owned(),
+            })
+            .await
+            .expect("save symbiont nickname");
         store
             .set_avatar(AvatarSlot::Symbiont, Some(avatar()))
             .await
@@ -141,6 +196,7 @@ mod tests {
             reopened.snapshot().await.avatar.expect("avatar").filename,
             "avatar.png"
         );
+        assert_eq!(reopened.snapshot().await.display_name, "小伴");
         assert_eq!(
             reopened
                 .snapshot()
@@ -163,5 +219,12 @@ mod tests {
         assert!(snapshot.user_avatar.is_none());
 
         std::fs::remove_file(path).expect("remove identity settings");
+    }
+
+    #[test]
+    fn rejects_empty_or_oversized_display_names() {
+        assert!(normalize_display_name("  ").is_err());
+        assert!(normalize_display_name(&"a".repeat(41)).is_err());
+        assert!(normalize_display_name("symbiont\nd").is_err());
     }
 }

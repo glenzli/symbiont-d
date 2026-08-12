@@ -265,7 +265,7 @@ impl SignalStore {
             received_text: message.trim().to_owned(),
             presentation: SensingPresentation::Original,
             qualification_note: None,
-            title: "逆向审视".to_owned(),
+            title: "异议".to_owned(),
             summary: message.trim().to_owned(),
             sources,
             source_class: SensingSourceClass::OpenDiscovery,
@@ -835,7 +835,8 @@ mod tests {
             .await
             .unwrap();
         let source = store.visible(10).await.unwrap().remove(0);
-        let actor = InputRoleSnapshot::ambient("attacker", "逆向审视", "gpt-test", "codex");
+        let actor =
+            InputRoleSnapshot::ambient("attacker", "symbiont-d · 异议", "gpt-test", "codex");
 
         let outcome = store
             .publish_attacker_challenge(

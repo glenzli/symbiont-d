@@ -1,0 +1,181 @@
+const SVG_NAMESPACE = "http://www.w3.org/2000/svg";
+const DEFAULT_MAX_CONNECTOR_PX = 300;
+
+export function localRelationGeometry(
+  sourceAvatar,
+  dissentAvatar,
+  viewport,
+  maxConnectorPx = DEFAULT_MAX_CONNECTOR_PX,
+) {
+  if (!sourceAvatar || !dissentAvatar || !viewport) return null;
+  const startX = sourceAvatar.left + sourceAvatar.width / 2 - viewport.left;
+  const startY = sourceAvatar.bottom + 3 - viewport.top;
+  const endX = dissentAvatar.left + dissentAvatar.width / 2 - viewport.left;
+  const endY = dissentAvatar.top - 3 - viewport.top;
+  const length = endY - startY;
+  const visible =
+    sourceAvatar.bottom > viewport.top &&
+    sourceAvatar.top < viewport.bottom &&
+    dissentAvatar.bottom > viewport.top &&
+    dissentAvatar.top < viewport.bottom;
+  if (!visible || length < 12 || length > maxConnectorPx) return null;
+  const middleY = startY + length / 2;
+  return {
+    startX,
+    startY,
+    endX,
+    endY,
+    path: `M ${startX} ${startY} C ${startX - 3} ${middleY}, ${endX + 3} ${middleY}, ${endX} ${endY}`,
+  };
+}
+
+export function initInputSignalRelations(conversation) {
+  const frame = conversation?.closest(".conversation-frame");
+  if (!conversation || !frame) {
+    return {
+      refresh() {},
+      focusSources() {},
+    };
+  }
+
+  const overlay = document.createElementNS(SVG_NAMESPACE, "svg");
+  overlay.classList.add("input-signal-relation-lines");
+  overlay.setAttribute("aria-hidden", "true");
+  frame.append(overlay);
+  let emphasizedIds = new Set();
+  let updateFrame = null;
+
+  function revealGrouped(message) {
+    const group = message.closest(".input-signal-group");
+    if (!group?.classList.contains("is-collapsed")) return;
+    group.classList.remove("is-collapsed");
+    const toggle = group.querySelector(".input-signal-group-toggle");
+    if (toggle) {
+      toggle.setAttribute("aria-expanded", "true");
+      toggle.textContent = "收起";
+    }
+  }
+
+  function highlight(message) {
+    message.classList.remove("quote-source-highlight");
+    window.requestAnimationFrame(() => message.classList.add("quote-source-highlight"));
+    window.setTimeout(() => message.classList.remove("quote-source-highlight"), 1600);
+  }
+
+  function relatedIds(dissent) {
+    try {
+      const ids = JSON.parse(dissent.dataset.relatedSignalIds || "[]");
+      return Array.isArray(ids) ? ids : [];
+    } catch {
+      return [];
+    }
+  }
+
+  function sourceMessage(id) {
+    return conversation.querySelector(
+      `.input-signal[data-signal-id="${CSS.escape(id)}"]`,
+    );
+  }
+
+  function scheduleLines() {
+    if (updateFrame !== null) return;
+    updateFrame = window.requestAnimationFrame(() => {
+      updateFrame = null;
+      renderLines();
+    });
+  }
+
+  function renderLines() {
+    overlay.replaceChildren();
+    const viewport = frame.getBoundingClientRect();
+    overlay.setAttribute("viewBox", `0 0 ${viewport.width} ${viewport.height}`);
+    for (const dissent of conversation.querySelectorAll(
+      '.input-signal.attacker-challenge[data-related-signal-ids]',
+    )) {
+      const dissentAvatar = dissent.querySelector(".message-avatar")?.getBoundingClientRect();
+      if (!dissentAvatar) continue;
+      for (const id of relatedIds(dissent)) {
+        const source = sourceMessage(id);
+        const sourceAvatar = source?.querySelector(".message-avatar")?.getBoundingClientRect();
+        const sourceCard = source?.getBoundingClientRect();
+        const sourceAnchor = sourceAvatar && sourceCard
+          ? {
+              top: sourceAvatar.top,
+              bottom: sourceCard.bottom,
+              left: sourceAvatar.left,
+              width: sourceAvatar.width,
+            }
+          : null;
+        const geometry = localRelationGeometry(sourceAnchor, dissentAvatar, viewport);
+        if (!geometry) continue;
+        const path = document.createElementNS(SVG_NAMESPACE, "path");
+        path.classList.add("input-signal-relation-line");
+        if (emphasizedIds.has(id)) path.classList.add("is-emphasized");
+        path.setAttribute("d", geometry.path);
+        overlay.append(path);
+      }
+    }
+  }
+
+  function emphasize(ids) {
+    emphasizedIds = new Set(ids);
+    scheduleLines();
+    window.setTimeout(() => {
+      emphasizedIds = new Set();
+      scheduleLines();
+    }, 1600);
+  }
+
+  function focusSources(ids, dissent = null) {
+    const sources = ids.map(sourceMessage).filter(Boolean);
+    if (!sources.length) return;
+    for (const source of sources) revealGrouped(source);
+    sources[0].scrollIntoView({ behavior: "smooth", block: "center" });
+    for (const source of sources) highlight(source);
+    if (dissent) highlight(dissent);
+    emphasize(ids);
+    scheduleLines();
+  }
+
+  function refresh() {
+    for (const message of conversation.querySelectorAll(".input-signal.has-dissent-response")) {
+      message.classList.remove("has-dissent-response");
+    }
+    for (const marker of conversation.querySelectorAll(".input-signal-dissent-marker")) {
+      marker.remove();
+    }
+    for (const dissent of conversation.querySelectorAll(
+      '.input-signal.attacker-challenge[data-related-signal-ids]',
+    )) {
+      for (const id of relatedIds(dissent)) {
+        const source = sourceMessage(id);
+        if (!source || source === dissent) continue;
+        source.classList.add("has-dissent-response");
+        const runtime = source.querySelector(".message-runtime");
+        if (!runtime || runtime.querySelector(".input-signal-dissent-marker")) continue;
+        const marker = document.createElement("button");
+        marker.type = "button";
+        marker.className = "input-signal-dissent-marker";
+        marker.textContent = "↗ 有异议";
+        marker.title = "定位到对这条输入的异议";
+        marker.addEventListener("click", () => {
+          revealGrouped(dissent);
+          dissent.scrollIntoView({ behavior: "smooth", block: "center" });
+          highlight(source);
+          highlight(dissent);
+          emphasize([id]);
+          scheduleLines();
+        });
+        runtime.append(" ", marker);
+      }
+    }
+    scheduleLines();
+  }
+
+  conversation.addEventListener("scroll", scheduleLines, { passive: true });
+  conversation.addEventListener("click", () => window.requestAnimationFrame(scheduleLines));
+  window.addEventListener("resize", scheduleLines);
+  new ResizeObserver(scheduleLines).observe(conversation);
+
+  return { refresh, focusSources, scheduleLines };
+}

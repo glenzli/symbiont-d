@@ -410,12 +410,12 @@ fn attacker_actor(invocations: &[InvocationRecord]) -> InputRoleSnapshot {
     let run = invocations.last();
     InputRoleSnapshot {
         id: "symbiont_attacker".to_owned(),
-        name: "逆向审视".to_owned(),
+        name: "symbiont-d · 异议".to_owned(),
         model: run
             .map(|run| run.model_display_name.clone())
             .unwrap_or_else(|| "Codex".to_owned()),
         effort: "adversarial".to_owned(),
-        avatar_seed: "prism".to_owned(),
+        avatar_seed: "symbiont-dissent".to_owned(),
         provider_id: Some("codex".to_owned()),
         channel_id: Some("attacker".to_owned()),
     }

@@ -12,7 +12,7 @@
     <main class="shell">
       <header class="topbar">
         <div class="identity" aria-label="symbiont-d">
-          <h1>symbiont-d</h1>
+          <h1 id="symbiont-display-name-heading">symbiont-d</h1>
           <span class="identity-separator" aria-hidden="true">·</span>
           <p id="connection-status">正在连接</p>
         </div>
@@ -470,8 +470,13 @@
       <section class="tab-panel" data-settings-panel="general" hidden>
         <header class="settings-panel-intro">
           <h3>外观与身份</h3>
-          <p>调整聊天中使用的头像。其他运行策略在主动探索、对话整理与系统中配置。</p>
+          <p>调整聊天中使用的名字和头像。其他运行策略在主动探索、对话整理与系统中配置。</p>
         </header>
+        <label class="field identity-name-field">
+          <span>symbiont-d 昵称</span>
+          <input id="symbiont-display-name" type="text" maxlength="40" placeholder="symbiont-d">
+          <small>用于聊天身份；内置异议角色默认显示为“昵称 · 异议”。</small>
+        </label>
         <div class="avatar-settings">
           <img
             id="avatar-preview"
@@ -480,7 +485,7 @@
             alt="symbiont-d 头像"
           >
           <div class="avatar-settings-actions">
-            <strong>symbiont-d 头像</strong>
+            <strong id="symbiont-avatar-label">symbiont-d 头像</strong>
             <div>
               <button id="choose-avatar" class="secondary-button" type="button">选择头像</button>
               <button id="clear-avatar" class="secondary-button" type="button">还原默认</button>
@@ -533,7 +538,7 @@
             </label>
             <label class="toggle-row">
               <span>
-                <strong>逆向审视外部输入</strong>
+                <strong>对外部输入提出异议</strong>
                 <small>频繁核查新输入，只在存在可证实的关键反例或纠正时发言</small>
               </span>
               <input id="attacker-enabled" type="checkbox">

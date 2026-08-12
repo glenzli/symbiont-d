@@ -388,6 +388,31 @@ html[data-native-shell="macos"] .topbar {
   position: relative;
 }
 
+.input-signal-relation-lines {
+  width: 100%;
+  height: 100%;
+  position: absolute;
+  z-index: 2;
+  inset: 0;
+  overflow: visible;
+  pointer-events: none;
+}
+
+.input-signal-relation-line {
+  fill: none;
+  stroke: color-mix(in srgb, var(--text-faint) 55%, transparent);
+  stroke-dasharray: 2.5 4.5;
+  stroke-linecap: round;
+  stroke-width: 1;
+  vector-effect: non-scaling-stroke;
+  transition: stroke 160ms ease, stroke-width 160ms ease;
+}
+
+.input-signal-relation-line.is-emphasized {
+  stroke: color-mix(in srgb, var(--text-soft) 72%, transparent);
+  stroke-width: 1.5;
+}
+
 .conversation-focus-banner {
   max-width: calc(100% - 36px);
   min-height: 32px;
@@ -864,6 +889,10 @@ html[data-native-shell="macos"] .topbar {
   --input-role-backdrop: #fef6eb;
 }
 
+.input-role-avatar[data-input-avatar="symbiont-dissent"] {
+  --input-role-backdrop: var(--symbiont-avatar-bg);
+}
+
 .input-role-avatar > img {
   grid-area: 1 / 1;
   width: 100%;
@@ -888,6 +917,24 @@ html[data-native-shell="macos"] .topbar {
   font-size: inherit;
 }
 
+.input-signal:not(.attacker-challenge) .message-body {
+  border-color: color-mix(in srgb, var(--border) 74%, transparent);
+  background: color-mix(in srgb, var(--surface-subtle) 72%, var(--surface-raised));
+  opacity: 0.84;
+}
+
+.input-signal:not(.attacker-challenge) .message-avatar {
+  opacity: 0.9;
+}
+
+.input-signal:not(.attacker-challenge) :is(
+  .input-signal-original,
+  .input-signal-qualification,
+  .input-signal-sources
+) {
+  opacity: 0.82;
+}
+
 .input-signal.attacker-challenge .message-body {
   border-left: 2px solid color-mix(in srgb, var(--text-soft) 48%, transparent);
   padding-left: 10px;
@@ -895,8 +942,31 @@ html[data-native-shell="macos"] .topbar {
 
 .attacker-signal-relation {
   margin: 7px 0 0;
+  padding: 0;
+  border: 0;
   color: var(--text-faint);
+  background: transparent;
+  cursor: pointer;
   font-size: 9px;
+  text-align: left;
+}
+
+.attacker-signal-relation:hover,
+.input-signal-dissent-marker:hover {
+  color: var(--text);
+}
+
+.input-signal.has-dissent-response .message-body {
+  border-left-color: color-mix(in srgb, var(--text-soft) 42%, var(--border));
+}
+
+.input-signal-dissent-marker {
+  padding: 0;
+  border: 0;
+  color: var(--text-faint);
+  background: transparent;
+  cursor: pointer;
+  font: inherit;
 }
 
 .input-signal-foot {

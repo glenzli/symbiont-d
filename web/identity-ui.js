@@ -6,6 +6,10 @@ const DEFAULT_SMALL_SYMBIONT_AVATAR_URL =
   "/symbiont-avatar-small.png?v=clay-transparent-20260810-v1";
 
 export function initIdentityUi(state) {
+  const displayNameInput = document.querySelector("#symbiont-display-name");
+  const displayNameHeading = document.querySelector("#symbiont-display-name-heading");
+  const topbarIdentity = displayNameHeading?.closest(".identity");
+  const symbiontAvatarLabel = document.querySelector("#symbiont-avatar-label");
   const symbiontPreview = document.querySelector("#avatar-preview");
   const symbiontChoose = document.querySelector("#choose-avatar");
   const symbiontClear = document.querySelector("#clear-avatar");
@@ -17,6 +21,10 @@ export function initIdentityUi(state) {
   const userClear = document.querySelector("#clear-user-avatar");
   const userInput = document.querySelector("#user-avatar-input");
   const userSaveState = document.querySelector("#user-avatar-save-state");
+
+  function displayName() {
+    return state.identity?.displayName?.trim() || "symbiont-d";
+  }
 
   function avatar(slot) {
     return slot === "user" ? state.identity?.userAvatar : state.identity?.avatar;
@@ -58,6 +66,17 @@ export function initIdentityUi(state) {
   }
 
   function render() {
+    const name = displayName();
+    if (displayNameInput && document.activeElement !== displayNameInput) {
+      displayNameInput.value = name;
+    }
+    if (displayNameHeading) displayNameHeading.textContent = name;
+    if (topbarIdentity) topbarIdentity.setAttribute("aria-label", name);
+    if (symbiontAvatarLabel) symbiontAvatarLabel.textContent = `${name} 头像`;
+    if (symbiontPreview) symbiontPreview.alt = `${name} 头像`;
+    document.querySelectorAll('.message[data-role="assistant"] .speaker').forEach((speaker) => {
+      speaker.textContent = name;
+    });
     document.querySelectorAll(".message-avatar").forEach((container) => {
       const role = container.closest("[data-role]")?.dataset.role;
       applyAvatar(container, role === "user" ? "user" : "symbiont");
@@ -66,6 +85,28 @@ export function initIdentityUi(state) {
     applyImage(userPreview, userFallback, "user");
     symbiontClear.disabled = !avatar("symbiont");
     userClear.disabled = !avatar("user");
+  }
+
+  async function save() {
+    const name = displayNameInput?.value.trim() || "";
+    try {
+      state.identity = await responseJson(
+        await fetch("/api/identity", {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({ displayName: name }),
+        }),
+        "无法保存昵称",
+      );
+      render();
+      window.dispatchEvent(
+        new CustomEvent("identity-updated", { detail: state.identity }),
+      );
+      return true;
+    } catch (error) {
+      symbiontSaveState.textContent = error.message;
+      return false;
+    }
   }
 
   function controls(slot) {
@@ -139,5 +180,5 @@ export function initIdentityUi(state) {
     clearButton.addEventListener("click", () => clear(slot));
   }
 
-  return { applyAvatar, render };
+  return { applyAvatar, displayName, render, save };
 }

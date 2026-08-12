@@ -8,6 +8,7 @@ import { manualCompletionNotice } from "/exploration-receipt.js";
 import { initIdentityUi } from "/identity-ui.js";
 import { applyInputRoleAvatar, initInputRoleUi } from "/input-roles.js";
 import { regroupInputSignals } from "/input-signal-groups.js";
+import { initInputSignalRelations } from "/input-signal-relations.js";
 import { initConversationFocusUi } from "/conversation-focus-ui.js";
 import { initComputeModeUi } from "/compute-mode-ui.js";
 import { initComposerContextUi } from "/composer-context-ui.js";
@@ -34,7 +35,7 @@ const appState = {
   inputRoles: { roles: [], avatarOptions: [] },
   audioTranscription: null,
   computePolicies: [],
-  identity: { avatar: null },
+  identity: { displayName: "symbiont-d", avatar: null },
   profile: { status: "unconfigured", mode: null, orientation: "" },
   autonomy: null,
   autonomyPermitted: false,
@@ -107,6 +108,7 @@ let stoppingResponse = false;
 let selectedSignalId = null;
 const manualExplorationReceiptIds = new Set();
 const displayedSignalIds = new Set();
+const inputSignalRelations = initInputSignalRelations(conversation);
 
 const MAX_IMAGES = 4;
 const MAX_IMAGE_BYTES = 15 * 1024 * 1024;
@@ -119,6 +121,7 @@ const usageUi = initUsageUi(appState);
 const identityUi = initIdentityUi(appState);
 const inputRoleUi = initInputRoleUi(appState);
 const settingsUi = initSettings(appState, {
+  saveIdentity: identityUi.save,
   saveInputRoles: inputRoleUi.save,
   refreshInputRoles: inputRoleUi.refresh,
 });
@@ -282,7 +285,7 @@ function appendMessage(entry, options = {}) {
   if (options.pending) article.classList.add("pending");
   if (options.error) article.classList.add("error");
   if (options.temporary) article.classList.add("temporary-discussion-message");
-  speaker.textContent = role === "user" ? "你" : "symbiont-d";
+  speaker.textContent = role === "user" ? "你" : identityUi.displayName();
   identityUi.applyAvatar(avatar, role === "user" ? "user" : "symbiont");
   time.dateTime = entry.at || new Date().toISOString();
   time.textContent = new Date(time.dateTime).toLocaleTimeString([], {
@@ -347,6 +350,10 @@ function appendInputSignal(signal, options = {}) {
   article.dataset.inputRoleId = signal.actor?.id || "";
   article.dataset.signalKind = signal.kind || "external_input";
   if (signal.kind === "attacker_challenge") article.classList.add("attacker-challenge");
+  const relatedSignalIds = signal.relatedSignalIds || signal.related_signal_ids || [];
+  if (signal.kind === "attacker_challenge" && relatedSignalIds.length) {
+    article.dataset.relatedSignalIds = JSON.stringify(relatedSignalIds);
+  }
   article.dataset.signalObservedAt =
     signal.observedAt || signal.observed_at || new Date().toISOString();
   const layout = document.createElement("div");
@@ -379,7 +386,7 @@ function appendInputSignal(signal, options = {}) {
   const observedLabel = !Number.isNaN(observedAt.getTime())
     ? `采集于 ${observedAt.toLocaleDateString([], { month: "numeric", day: "numeric" })}`
     : null;
-  label.textContent = [signal.kind === "attacker_challenge" ? "逆向审视" : "外部输入", eventLabel, observedLabel].filter(Boolean).join(" · ");
+  label.textContent = [signal.kind === "attacker_challenge" ? "异议" : "外部输入", eventLabel, observedLabel].filter(Boolean).join(" · ");
   meta.append(speaker, label, time);
   const receivedText = signal.receivedText || signal.received_text || signal.summary || "";
   const displayText = signal.content || receivedText || signal.title;
@@ -393,7 +400,7 @@ function appendInputSignal(signal, options = {}) {
   foot.className = "message-foot input-signal-foot";
   const title = document.createElement("span");
   title.className = "message-runtime";
-  title.textContent = signal.title || "外部信号";
+  title.textContent = signal.kind === "attacker_challenge" ? "异议" : signal.title || "外部信号";
   const actions = document.createElement("span");
   actions.className = "message-actions";
   const reply = document.createElement("button");
@@ -433,6 +440,7 @@ function appendInputSignal(signal, options = {}) {
       appState.signals = appState.signals.filter((item) => item.id !== signal.id);
       article.remove();
       regroupInputSignals(conversation);
+      inputSignalRelations.refresh();
       emptyState.hidden = Boolean(conversation.querySelector(".message"));
     } catch (error) {
       dismiss.disabled = false;
@@ -443,10 +451,15 @@ function appendInputSignal(signal, options = {}) {
   renderIcons(actions);
   foot.append(title, actions);
   content.append(meta, body);
-  if (signal.kind === "attacker_challenge" && signal.relatedSignalIds?.length) {
-    const relation = document.createElement("p");
+  if (signal.kind === "attacker_challenge" && relatedSignalIds.length) {
+    const relation = document.createElement("button");
+    relation.type = "button";
     relation.className = "attacker-signal-relation";
-    relation.textContent = `↳ 回应 ${signal.relatedSignalIds.length} 条外部输入`;
+    relation.textContent = `↳ 回应 ${relatedSignalIds.length} 条外部输入 · 定位`;
+    relation.setAttribute("aria-label", `定位这条异议关联的 ${relatedSignalIds.length} 条外部输入`);
+    relation.addEventListener("click", () =>
+      inputSignalRelations.focusSources(relatedSignalIds, article),
+    );
     content.append(relation);
   }
   const isCondensed = signal.presentation === "condensed";
@@ -495,6 +508,7 @@ function appendInputSignal(signal, options = {}) {
   article.append(layout);
   conversation.append(article);
   regroupInputSignals(conversation);
+  inputSignalRelations.refresh();
   if (options.scroll !== false) conversation.scrollTop = conversation.scrollHeight;
   return article;
 }
@@ -736,7 +750,7 @@ function renderRuntimeStatus() {
     );
   } else if (attacker?.phase === "reviewing") {
     setRuntimeStatus(
-      `正在逆向审视 ${attacker.currentBatchSize || 0} 条外部输入`,
+      `正在寻找值得提出的异议 · ${attacker.currentBatchSize || 0} 条外部输入`,
       "working",
     );
   } else if (phase === "quiet_hours") {
@@ -985,7 +999,7 @@ async function sendMessage(
   pending.classList.add("response-placeholder");
   pending
     .querySelector(".message-body")
-    .setAttribute("aria-label", "symbiont-d 正在回应");
+    .setAttribute("aria-label", `${identityUi.displayName()} 正在回应`);
   activePending = pending;
   activityStartedAt = Date.now();
   setBusy(true);
