@@ -5,16 +5,17 @@
 //! infer-runtime instance, and returns editable text to the browser.  The
 //! browser owns recording and discard; PCP only sees text the user sends.
 
-use std::{io::ErrorKind, path::PathBuf, sync::Arc, time::Duration};
+use std::{collections::BTreeMap, io::ErrorKind, path::PathBuf, sync::Arc, time::Duration};
 
 use anyhow::{Context, Result};
-use reqwest::{StatusCode, Url, multipart};
+use infer_runtime_client::{Error as SdkError, TranscriptionFormat};
 use serde::{Deserialize, Serialize};
-use serde_json::{Value, json};
-use tokio::{fs, sync::RwLock};
+use serde_json::Value;
+use tempfile::{NamedTempFile, TempDir};
+use tokio::{fs, sync::RwLock, time};
 
 use crate::{
-    infer_runtime::{InferRuntimeAccess, ResolvedConsumerEndpoint, endpoint_url},
+    infer_runtime::InferRuntimeAccess,
     secrets::{CredentialStatus, CredentialStore},
 };
 
@@ -139,12 +140,9 @@ impl AudioTranscriptionStore {
                 (
                     endpoint.base_url.clone(),
                     endpoint.source.as_str().to_owned(),
-                    endpoint.instance_id.clone(),
-                    endpoint.generation.clone(),
-                    endpoint
-                        .lease_expires_at
-                        .as_ref()
-                        .map(chrono::DateTime::to_rfc3339),
+                    Some(endpoint.instance_id.clone()),
+                    Some(endpoint.generation.clone()),
+                    None,
                 )
             })
             .unwrap_or_else(|_| (String::new(), "unavailable".to_owned(), None, None, None));
@@ -205,67 +203,49 @@ impl AudioTranscriptionStore {
             anyhow::bail!("本地语音转写尚未启用");
         }
         validate_config(&config)?;
-        let connection = self
+        let client = self
             .runtime
-            .connection()
+            .client()
             .await
             .map_err(|_| anyhow::anyhow!("本地语音转写尚未配置访问令牌或服务不可用"))?;
-        let selected = connection.endpoint;
-        let token = connection.token;
         let file_name = filename
             .filter(|value| !value.trim().is_empty())
             .unwrap_or("voice-input.webm");
-        let response = match self
-            .send_transcription(
-                &selected,
-                &token,
-                file_name,
-                mime_type,
-                &config.language,
-                &audio,
-            )
-            .await
-        {
-            Ok(response) => response,
-            Err(first_error) => {
-                let refreshed = self.runtime.resolve_endpoint()?;
-                if refreshed == selected {
-                    return Err(first_error).context("contact local infer-runtime");
-                }
-                self.send_transcription(
-                    &refreshed,
-                    &token,
-                    file_name,
-                    mime_type,
-                    &config.language,
-                    &audio,
-                )
-                .await
-                .context("contact rediscovered local infer-runtime")?
-            }
-        };
-        let status = response.status();
-        let payload = response
-            .json::<Value>()
-            .await
-            .context("decode infer-runtime response")?;
-        if !status.is_success() {
-            anyhow::bail!(runtime_error(status, &payload));
+        let content_type = transcription_content_type(mime_type, file_name)?;
+        let staged = StagedAudio::write(file_name, content_type, &audio).await?;
+        let metadata = BTreeMap::from([
+            ("infer.priority".to_owned(), "interactive".to_owned()),
+            ("infer.placement".to_owned(), "local_only".to_owned()),
+            ("infer.prefer".to_owned(), "local".to_owned()),
+            ("infer.offline_required".to_owned(), "true".to_owned()),
+            ("infer.fallback".to_owned(), "none".to_owned()),
+        ]);
+        let payload = time::timeout(
+            REQUEST_TIMEOUT,
+            client.sdk().transcribe_file(
+                &staged.path,
+                content_type,
+                Some(&config.language),
+                TranscriptionFormat::VerboseJson,
+                &metadata,
+            ),
+        )
+        .await
+        .map_err(|_| anyhow::anyhow!("本地转写超时，请缩短录音后重试"))?
+        .map_err(|error| anyhow::anyhow!(transcription_error(&error)))?;
+        let text = payload.text.trim().to_owned();
+        if text.is_empty() {
+            anyhow::bail!("本地转写没有返回可用文本");
         }
-        let text = payload
-            .get("text")
-            .and_then(Value::as_str)
-            .map(str::trim)
-            .filter(|value| !value.is_empty())
-            .ok_or_else(|| anyhow::anyhow!("本地转写没有返回可用文本"))?
-            .to_owned();
         let result = TranscriptionResult {
             id: payload
+                .extra
                 .get("id")
                 .and_then(Value::as_str)
                 .unwrap_or("local-transcription")
                 .to_owned(),
             model: payload
+                .extra
                 .get("model")
                 .and_then(Value::as_str)
                 .unwrap_or("audio.transcribe")
@@ -280,50 +260,119 @@ impl AudioTranscriptionStore {
         );
         Ok(result)
     }
+}
 
-    async fn send_transcription(
-        &self,
-        selected: &ResolvedConsumerEndpoint,
-        token: &str,
-        file_name: &str,
-        mime_type: Option<&str>,
-        language: &str,
-        audio: &[u8],
-    ) -> Result<reqwest::Response> {
-        let mut part = multipart::Part::bytes(audio.to_vec()).file_name(file_name.to_owned());
-        if let Some(mime_type) = mime_type.filter(|value| !value.trim().is_empty()) {
-            part = part
-                .mime_str(mime_type)
-                .context("invalid audio MIME type")?;
-        }
-        let metadata = json!({
-            "infer.priority": "interactive",
-            "infer.placement": "local_only",
-            "infer.prefer": "local",
-            "infer.offline_required": "true",
-            "infer.fallback": "none",
-        });
-        let form = multipart::Form::new()
-            .text("model", "audio.transcribe")
-            .part("file", part)
-            .text("language", language.to_owned())
-            .text("response_format", "verbose_json")
-            .text("metadata", metadata.to_string());
-        self.runtime
-            .client()
-            .post(transcription_endpoint(&selected.base_url)?)
-            .bearer_auth(token)
-            .multipart(form)
-            .timeout(REQUEST_TIMEOUT)
-            .send()
+struct StagedAudio {
+    path: PathBuf,
+    _file: NamedTempFile,
+    _directory: TempDir,
+}
+
+impl StagedAudio {
+    async fn write(file_name: &str, content_type: &'static str, audio: &[u8]) -> Result<Self> {
+        let directory = tempfile::Builder::new()
+            .prefix("symbiont-audio-sdk-")
+            .tempdir()
+            .context("create private transient audio directory")?;
+        restrict_transient_directory(directory.path())?;
+        let suffix = audio_suffix(file_name, content_type);
+        let file = tempfile::Builder::new()
+            .prefix("voice-")
+            .suffix(suffix)
+            .tempfile_in(directory.path())
+            .context("create private transient audio file")?;
+        let path = file.path().to_path_buf();
+        fs::write(&path, audio)
             .await
-            .context("send infer-runtime transcription request")
+            .context("stage transient audio for official Infer Runtime SDK")?;
+        Ok(Self {
+            path,
+            _file: file,
+            _directory: directory,
+        })
     }
 }
 
-fn transcription_endpoint(base_url: &str) -> Result<Url> {
-    endpoint_url(base_url, "/v1/audio/transcriptions")
-        .context("build infer-runtime transcription endpoint")
+#[cfg(unix)]
+fn restrict_transient_directory(path: &std::path::Path) -> Result<()> {
+    use std::os::unix::fs::PermissionsExt;
+
+    std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o700))
+        .with_context(|| format!("restrict transient audio directory {}", path.display()))
+}
+
+#[cfg(not(unix))]
+fn restrict_transient_directory(_path: &std::path::Path) -> Result<()> {
+    anyhow::bail!("private transient audio files require Unix owner-only permissions")
+}
+
+fn transcription_content_type(mime_type: Option<&str>, file_name: &str) -> Result<&'static str> {
+    let mime_type = mime_type.map(str::trim).filter(|value| !value.is_empty());
+    let content_type = match mime_type {
+        Some("audio/webm") | Some("audio/webm;codecs=opus") => "audio/webm",
+        Some("audio/ogg") | Some("audio/ogg;codecs=opus") => "audio/ogg",
+        Some("audio/mp4") => "audio/mp4",
+        Some("audio/mpeg") => "audio/mpeg",
+        Some("audio/wav") | Some("audio/x-wav") => "audio/wav",
+        Some("audio/flac") => "audio/flac",
+        Some(value) => anyhow::bail!("不支持的录音格式：{value}"),
+        None => match file_name
+            .rsplit_once('.')
+            .map(|(_, extension)| extension.to_ascii_lowercase())
+            .as_deref()
+        {
+            Some("webm") => "audio/webm",
+            Some("ogg" | "opus") => "audio/ogg",
+            Some("m4a" | "mp4") => "audio/mp4",
+            Some("mp3" | "mpeg") => "audio/mpeg",
+            Some("wav") => "audio/wav",
+            Some("flac") => "audio/flac",
+            _ => "application/octet-stream",
+        },
+    };
+    Ok(content_type)
+}
+
+fn audio_suffix(file_name: &str, content_type: &str) -> &'static str {
+    match content_type {
+        "audio/webm" => ".webm",
+        "audio/ogg" => ".ogg",
+        "audio/mp4" => ".m4a",
+        "audio/mpeg" => ".mp3",
+        "audio/wav" => ".wav",
+        "audio/flac" => ".flac",
+        _ if file_name.ends_with(".bin") => ".bin",
+        _ => ".audio",
+    }
+}
+
+fn transcription_error(error: &SdkError) -> String {
+    match error {
+        SdkError::Api { status, code, .. } => transcription_api_error(status.as_u16(), code),
+        SdkError::ContractMismatch => "本地转写服务合同尚未切换到正式版本".to_owned(),
+        SdkError::Credential(_) => "本地转写令牌不可用".to_owned(),
+        SdkError::Discovery(_) | SdkError::Transport(_) => "本地转写服务暂不可用".to_owned(),
+        SdkError::Input(_) => "录音请求格式不受支持".to_owned(),
+        SdkError::MalformedResponse(_) => "本地转写返回了无效结果".to_owned(),
+    }
+}
+
+fn transcription_api_error(status: u16, code: &str) -> String {
+    match (status, code) {
+        (401, _) => "本地转写令牌无效或已失效".to_owned(),
+        (429, "queue_full" | "app_queue_full") => "本地转写队列繁忙，请稍后重试".to_owned(),
+        (503, "provider_unavailable") => "本地转写模型暂不可用".to_owned(),
+        (504, "deadline_exceeded") => "本地转写超时，请缩短录音后重试".to_owned(),
+        (_, "cancelled") => "本地转写已取消".to_owned(),
+        _ => format!(
+            "本地转写失败（HTTP {status}{}）",
+            if code.is_empty() {
+                String::new()
+            } else {
+                format!(" · {code}")
+            }
+        ),
+    }
 }
 
 fn validate_config(config: &AudioTranscriptionConfig) -> Result<()> {
@@ -361,29 +410,6 @@ fn availability(
     }
 }
 
-fn runtime_error(status: StatusCode, payload: &Value) -> String {
-    let code = payload
-        .pointer("/error/code")
-        .and_then(Value::as_str)
-        .unwrap_or_default();
-    match (status.as_u16(), code) {
-        (401, _) => "本地转写令牌无效或已失效".to_owned(),
-        (429, "queue_full" | "app_queue_full") => "本地转写队列繁忙，请稍后重试".to_owned(),
-        (503, "provider_unavailable") => "本地转写模型暂不可用".to_owned(),
-        (504, "deadline_exceeded") => "本地转写超时，请缩短录音后重试".to_owned(),
-        (_, "cancelled") => "本地转写已取消".to_owned(),
-        _ => format!(
-            "本地转写失败（HTTP {}{}）",
-            status.as_u16(),
-            if code.is_empty() {
-                "".to_owned()
-            } else {
-                format!(" · {code}")
-            }
-        ),
-    }
-}
-
 async fn persist_config(path: &PathBuf, config: &AudioTranscriptionConfig) -> Result<()> {
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent).await.with_context(|| {
@@ -408,31 +434,124 @@ async fn persist_config(path: &PathBuf, config: &AudioTranscriptionConfig) -> Re
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::infer_runtime::sdk_fixture::{CapturedBody, spawn};
 
     #[test]
-    fn only_accepts_loopback_infer_runtime_addresses() {
-        assert!(transcription_endpoint("http://127.0.0.1:8787").is_ok());
-        assert!(transcription_endpoint("http://localhost:8787").is_err());
-        assert!(transcription_endpoint("http://127.0.0.1:8787/api").is_err());
-        assert!(transcription_endpoint("https://example.com").is_err());
+    fn accepts_browser_audio_types_and_rejects_arbitrary_multipart_types() {
+        assert_eq!(
+            transcription_content_type(Some("audio/webm;codecs=opus"), "voice.webm").unwrap(),
+            "audio/webm"
+        );
+        assert_eq!(
+            transcription_content_type(None, "voice.m4a").unwrap(),
+            "audio/mp4"
+        );
+        assert!(transcription_content_type(Some("text/plain"), "voice.webm").is_err());
     }
 
     #[test]
     fn keeps_error_messages_actionable_without_provider_text() {
         assert_eq!(
-            runtime_error(
-                StatusCode::TOO_MANY_REQUESTS,
-                &json!({"error": {"code": "queue_full"}})
-            ),
+            transcription_api_error(429, "queue_full"),
             "本地转写队列繁忙，请稍后重试"
         );
-        assert_eq!(
-            runtime_error(
-                StatusCode::UNAUTHORIZED,
-                &json!({"error": {"message": "secret"}})
-            ),
-            "本地转写令牌无效或已失效"
+        assert_eq!(transcription_api_error(401, ""), "本地转写令牌无效或已失效");
+    }
+
+    #[tokio::test]
+    async fn transient_sdk_audio_file_is_private_and_removed_on_drop() {
+        let staged = StagedAudio::write("voice.webm", "audio/webm", b"fixture")
+            .await
+            .unwrap();
+        let path = staged.path.clone();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            assert_eq!(
+                std::fs::metadata(staged._directory.path())
+                    .unwrap()
+                    .permissions()
+                    .mode()
+                    & 0o777,
+                0o700
+            );
+            assert_eq!(
+                std::fs::metadata(&path).unwrap().permissions().mode() & 0o777,
+                0o600
+            );
+        }
+        drop(staged);
+        assert!(!path.exists());
+    }
+
+    #[tokio::test]
+    async fn official_sdk_fake_runtime_preserves_audio_constraints_without_daemon() {
+        let fake = spawn().await;
+        let temporary = tempfile::tempdir().unwrap();
+        let runtime = Arc::new(
+            InferRuntimeAccess::open_for_test(
+                temporary.path().join("infer-runtime-secrets.toml"),
+                &fake.endpoint,
+            )
+            .await
+            .unwrap(),
         );
+        let store =
+            AudioTranscriptionStore::open(temporary.path().join("infer-runtime.toml"), runtime)
+                .await
+                .unwrap();
+        store
+            .update(AudioTranscriptionConfig {
+                enabled: true,
+                credential_store: CredentialStore::ConfigFile,
+                credential_value: Some("fixture-token".to_owned()),
+                language: "zh".to_owned(),
+                ..AudioTranscriptionConfig::default()
+            })
+            .await
+            .unwrap();
+
+        let result = store
+            .transcribe(
+                Some("voice.webm"),
+                Some("audio/webm;codecs=opus"),
+                b"bounded-audio-fixture".to_vec(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(result.id, "transcription_fixture");
+        assert_eq!(result.model, "audio.transcribe");
+        assert_eq!(result.text, "fixture transcript");
+        let observations = fake.observations();
+        assert!(observations.iter().all(|observation| {
+            observation.core_contract.as_deref() == Some(infer_runtime_client::CONSUMER_CORE)
+        }));
+        let transcription = observations
+            .iter()
+            .find(|observation| observation.path == "/v1/audio/transcriptions")
+            .unwrap();
+        assert_eq!(
+            transcription.capability_contract.as_deref(),
+            Some("infer.audio.transcription@20260811.1")
+        );
+        assert!(transcription.authorized);
+        let CapturedBody::Multipart(multipart) = &transcription.body else {
+            panic!("audio fixture did not capture multipart")
+        };
+        for expected in [
+            "audio.transcribe",
+            "verbose_json",
+            "infer.priority",
+            "interactive",
+            "infer.placement",
+            "local_only",
+            "infer.offline_required",
+            "infer.fallback",
+            "none",
+        ] {
+            assert!(multipart.contains(expected), "missing {expected}");
+        }
     }
 
     #[test]

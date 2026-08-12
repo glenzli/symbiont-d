@@ -13,6 +13,7 @@ futures = "0.3"
 getrandom = "0.4"
 imagesize = "0.14"
 infer = "0.19"
+infer-runtime-client = { git = "https://github.com/glenzli/infer-runtime.git", rev = "8588a945047cedaea62035969e479e7fb7ff795c" }
 mail-parser = "0.11"
 pcp-client = { path = "../paged-context-protocol/crates/pcp-client" }
 pcp-core = { path = "../paged-context-protocol/crates/pcp-core" }
@@ -39,9 +40,11 @@ tokio-stream = "0.1"
 tokio-rustls = { version = "0.26", features = ["ring"] }
 toml = "1.1"
 tower = "0.5"
+tempfile = "3.20"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 webpki-roots = "1"
+zeroize = "1.9"
 
 [target.'cfg(target_os = "macos")'.dependencies]
 security-framework = "3.7"
