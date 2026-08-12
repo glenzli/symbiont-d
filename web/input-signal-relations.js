@@ -1,5 +1,5 @@
 const SVG_NAMESPACE = "http://www.w3.org/2000/svg";
-const DEFAULT_MAX_CONNECTOR_PX = 300;
+const DEFAULT_MAX_CONNECTOR_PX = 1200;
 
 export function localRelationGeometry(
   sourceAvatar,
@@ -8,10 +8,12 @@ export function localRelationGeometry(
   maxConnectorPx = DEFAULT_MAX_CONNECTOR_PX,
 ) {
   if (!sourceAvatar || !dissentAvatar || !viewport) return null;
-  const startX = sourceAvatar.left + sourceAvatar.width / 2 - viewport.left;
-  const startY = sourceAvatar.bottom + 3 - viewport.top;
-  const endX = dissentAvatar.left + dissentAvatar.width / 2 - viewport.left;
-  const endY = dissentAvatar.top - 3 - viewport.top;
+  const sourceHeight = sourceAvatar.height ?? sourceAvatar.bottom - sourceAvatar.top;
+  const dissentHeight = dissentAvatar.height ?? dissentAvatar.bottom - dissentAvatar.top;
+  const startX = sourceAvatar.left - viewport.left - 1;
+  const startY = sourceAvatar.top + sourceHeight / 2 - viewport.top;
+  const endX = dissentAvatar.left - viewport.left - 1;
+  const endY = dissentAvatar.top + dissentHeight / 2 - viewport.top;
   const length = endY - startY;
   const visible =
     sourceAvatar.bottom > viewport.top &&
@@ -19,13 +21,27 @@ export function localRelationGeometry(
     dissentAvatar.bottom > viewport.top &&
     dissentAvatar.top < viewport.bottom;
   if (!visible || length < 12 || length > maxConnectorPx) return null;
-  const middleY = startY + length / 2;
+  const gutterX = Math.max(
+    12,
+    Math.min(sourceAvatar.left, dissentAvatar.left) - viewport.left - 4,
+  );
+  const horizontalSpan = Math.min(startX - gutterX, endX - gutterX);
+  if (horizontalSpan < 2) return null;
+  const radius = Math.min(6, horizontalSpan / 2, length / 4);
   return {
     startX,
     startY,
     endX,
     endY,
-    path: `M ${startX} ${startY} C ${startX - 3} ${middleY}, ${endX + 3} ${middleY}, ${endX} ${endY}`,
+    gutterX,
+    path: [
+      `M ${startX} ${startY}`,
+      `H ${gutterX + radius}`,
+      `Q ${gutterX} ${startY} ${gutterX} ${startY + radius}`,
+      `V ${endY - radius}`,
+      `Q ${gutterX} ${endY} ${gutterX + radius} ${endY}`,
+      `H ${endX}`,
+    ].join(" "),
   };
 }
 
@@ -44,6 +60,7 @@ export function initInputSignalRelations(conversation) {
   frame.append(overlay);
   let emphasizedIds = new Set();
   let updateFrame = null;
+  const layoutObserver = new ResizeObserver(scheduleLines);
 
   function revealGrouped(message) {
     const group = message.closest(".input-signal-group");
@@ -92,21 +109,16 @@ export function initInputSignalRelations(conversation) {
     for (const dissent of conversation.querySelectorAll(
       '.input-signal.attacker-challenge[data-related-signal-ids]',
     )) {
+      if (dissent.getClientRects().length === 0) continue;
       const dissentAvatar = dissent.querySelector(".message-avatar")?.getBoundingClientRect();
       if (!dissentAvatar) continue;
       for (const id of relatedIds(dissent)) {
         const source = sourceMessage(id);
-        const sourceAvatar = source?.querySelector(".message-avatar")?.getBoundingClientRect();
-        const sourceCard = source?.getBoundingClientRect();
-        const sourceAnchor = sourceAvatar && sourceCard
-          ? {
-              top: sourceAvatar.top,
-              bottom: sourceCard.bottom,
-              left: sourceAvatar.left,
-              width: sourceAvatar.width,
-            }
-          : null;
-        const geometry = localRelationGeometry(sourceAnchor, dissentAvatar, viewport);
+        if (!source || source.getClientRects().length === 0) continue;
+        const sourceAvatar = source
+          ?.querySelector(".message-avatar")
+          ?.getBoundingClientRect();
+        const geometry = localRelationGeometry(sourceAvatar, dissentAvatar, viewport);
         if (!geometry) continue;
         const path = document.createElementNS(SVG_NAMESPACE, "path");
         path.classList.add("input-signal-relation-line");
@@ -138,6 +150,8 @@ export function initInputSignalRelations(conversation) {
   }
 
   function refresh() {
+    layoutObserver.disconnect();
+    layoutObserver.observe(conversation);
     for (const message of conversation.querySelectorAll(".input-signal.has-dissent-response")) {
       message.classList.remove("has-dissent-response");
     }
@@ -147,10 +161,12 @@ export function initInputSignalRelations(conversation) {
     for (const dissent of conversation.querySelectorAll(
       '.input-signal.attacker-challenge[data-related-signal-ids]',
     )) {
+      layoutObserver.observe(dissent);
       for (const id of relatedIds(dissent)) {
         const source = sourceMessage(id);
         if (!source || source === dissent) continue;
         source.classList.add("has-dissent-response");
+        layoutObserver.observe(source);
         const runtime = source.querySelector(".message-runtime");
         if (!runtime || runtime.querySelector(".input-signal-dissent-marker")) continue;
         const marker = document.createElement("button");
@@ -174,8 +190,9 @@ export function initInputSignalRelations(conversation) {
 
   conversation.addEventListener("scroll", scheduleLines, { passive: true });
   conversation.addEventListener("click", () => window.requestAnimationFrame(scheduleLines));
+  conversation.addEventListener("load", scheduleLines, true);
   window.addEventListener("resize", scheduleLines);
-  new ResizeObserver(scheduleLines).observe(conversation);
+  document.addEventListener("visibilitychange", scheduleLines);
 
   return { refresh, focusSources, scheduleLines };
 }

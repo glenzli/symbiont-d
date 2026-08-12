@@ -7,8 +7,8 @@ export function normalizeConversationFocus(value) {
 export function conversationFocusPresentation(focused, hiddenCount = 0) {
   return focused
     ? {
-        label: "显示全部外部输入",
-        tooltip: "显示外部输入",
+        label: "显示全部外部输入与异议",
+        tooltip: "显示外部输入与异议",
         icon: "eye-off",
         visibleLabel: `聚焦中 · 隐藏 ${hiddenCount} 条`,
       }
@@ -34,6 +34,7 @@ export function initConversationFocusUi({
   renderIcons,
   storage = window.localStorage,
   notify = () => {},
+  onChange = () => {},
 }) {
   let focused = normalizeConversationFocus(storage.getItem(STORAGE_KEY));
 
@@ -61,9 +62,14 @@ export function initConversationFocusUi({
     focused = Boolean(next);
     storage.setItem(STORAGE_KEY, focused ? "focused" : "all");
     render();
+    onChange(focused);
     if (announce) {
       const count = countConversationExternalInputs(conversation);
-      notify(focused ? `已隐藏 ${count} 条独立外部输入` : "已显示全部外部输入");
+      notify(
+        focused
+          ? `已隐藏 ${count} 条外部输入与异议`
+          : "已显示全部外部输入与异议",
+      );
     }
   }
 

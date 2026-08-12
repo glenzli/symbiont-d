@@ -379,6 +379,10 @@ html[data-native-shell="macos"] .topbar {
   display: none;
 }
 
+.conversation.is-conversation-focused ~ .input-signal-relation-lines {
+  display: none;
+}
+
 .conversation.is-conversation-focused {
   padding-top: 58px;
 }
@@ -400,10 +404,11 @@ html[data-native-shell="macos"] .topbar {
 
 .input-signal-relation-line {
   fill: none;
-  stroke: color-mix(in srgb, var(--text-faint) 55%, transparent);
-  stroke-dasharray: 2.5 4.5;
+  stroke: color-mix(in srgb, var(--text-faint) 68%, transparent);
+  stroke-dasharray: 3 4;
   stroke-linecap: round;
-  stroke-width: 1;
+  stroke-linejoin: round;
+  stroke-width: 1.15;
   vector-effect: non-scaling-stroke;
   transition: stroke 160ms ease, stroke-width 160ms ease;
 }
@@ -795,7 +800,9 @@ html[data-native-shell="macos"] .topbar {
   width: 100%;
 }
 
-.input-signal-group.is-collapsed .input-signal-group-items > .input-signal:not(:first-child) {
+.input-signal-group.is-collapsed
+  .input-signal-group-items
+  > .input-signal:not(:first-child):not(.has-dissent-response) {
   display: none;
 }
 

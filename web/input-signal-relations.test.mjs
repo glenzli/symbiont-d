@@ -12,25 +12,32 @@ test("connects two visible nearby avatars", () => {
     viewport,
   );
   assert.ok(relation);
-  assert.match(relation.path, /^M 40 123 C /);
+  assert.equal(relation.gutterX, 16);
+  assert.equal(
+    relation.path,
+    "M 19 100 H 17.5 Q 16 100 16 101.5 V 238.5 Q 16 240 17.5 240 H 19",
+  );
 });
 
-test("uses the source card bottom so long content does not create a false long span", () => {
+test("anchors the route to both avatar centers across a tall source card", () => {
   const relation = localRelationGeometry(
-    { top: 180, bottom: 420, left: 40, width: 40 },
+    { top: 180, bottom: 220, left: 40, width: 40 },
     { top: 580, bottom: 620, left: 40, width: 40 },
     viewport,
   );
   assert.ok(relation);
-  assert.match(relation.path, /^M 40 323 C /);
+  assert.match(relation.path, /^M 19 100 H 17\.5 Q 16 100 16 101\.5 V /);
+  assert.equal(relation.startY, 100);
+  assert.equal(relation.endX, 19);
+  assert.equal(relation.endY, 500);
 });
 
 test("does not draw a connector across a distant conversation span", () => {
   assert.equal(
     localRelationGeometry(
       { top: 120, bottom: 160, left: 40, width: 40 },
-      { top: 620, bottom: 660, left: 40, width: 40 },
-      viewport,
+      { top: 1720, bottom: 1760, left: 40, width: 40 },
+      { ...viewport, bottom: 1900 },
     ),
     null,
   );

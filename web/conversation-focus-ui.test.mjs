@@ -22,8 +22,8 @@ test("focus presentation explains the inverse action and active count", () => {
     visibleLabel: "聚焦",
   });
   assert.deepEqual(conversationFocusPresentation(true, 8), {
-    label: "显示全部外部输入",
-    tooltip: "显示外部输入",
+    label: "显示全部外部输入与异议",
+    tooltip: "显示外部输入与异议",
     icon: "eye-off",
     visibleLabel: "聚焦中 · 隐藏 8 条",
   });

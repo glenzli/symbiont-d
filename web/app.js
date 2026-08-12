@@ -162,6 +162,7 @@ initConversationFocusUi({
   showAllButton: conversationFocusShowAll,
   renderIcons,
   notify: notifyComposer,
+  onChange: () => inputSignalRelations.scheduleLines(),
 });
 
 function updateScrollToLatestControl() {
@@ -440,8 +441,9 @@ function appendInputSignal(signal, options = {}) {
       }
       appState.signals = appState.signals.filter((item) => item.id !== signal.id);
       article.remove();
-      regroupInputSignals(conversation);
       inputSignalRelations.refresh();
+      regroupInputSignals(conversation);
+      inputSignalRelations.scheduleLines();
       emptyState.hidden = Boolean(conversation.querySelector(".message"));
     } catch (error) {
       dismiss.disabled = false;
@@ -508,8 +510,9 @@ function appendInputSignal(signal, options = {}) {
   layout.append(avatar, content);
   article.append(layout);
   conversation.append(article);
-  regroupInputSignals(conversation);
   inputSignalRelations.refresh();
+  regroupInputSignals(conversation);
+  inputSignalRelations.scheduleLines();
   if (options.scroll !== false) conversation.scrollTop = conversation.scrollHeight;
   return article;
 }
@@ -523,7 +526,9 @@ window.addEventListener("input-roles-updated", (event) => {
       applyInputRoleAvatar(message.querySelector(".message-avatar"), role.avatar);
     }
   }
+  inputSignalRelations.refresh();
   regroupInputSignals(conversation);
+  inputSignalRelations.scheduleLines();
 });
 
 function appendManualExplorationReceipt(receipt) {

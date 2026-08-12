@@ -1,6 +1,12 @@
 const DEFAULT_MAX_GAP_MS = 20 * 60 * 1000;
 const MIN_GROUP_SIZE = 2;
 
+export function collapsedInputSignalCount(items) {
+  return items
+    .slice(1)
+    .filter((item) => !item.hasDissentResponse).length;
+}
+
 export function inputSignalGroupRuns(items, maxGapMs = DEFAULT_MAX_GAP_MS) {
   const runs = [];
   let start = 0;
@@ -57,9 +63,15 @@ function groupHeader(messages) {
   toggle.type = "button";
   toggle.className = "input-signal-group-toggle";
   toggle.setAttribute("aria-expanded", "false");
-  toggle.textContent = `展开其余 ${messages.length - 1} 条`;
+  const hiddenCount = collapsedInputSignalCount(
+    messages.map((message) => ({
+      hasDissentResponse: message.classList.contains("has-dissent-response"),
+    })),
+  );
+  toggle.hidden = hiddenCount === 0;
+  toggle.textContent = `展开其余 ${hiddenCount} 条`;
   header.append(summary, toggle);
-  return { header, toggle };
+  return { header, toggle, hiddenCount };
 }
 
 export function regroupInputSignals(container) {
@@ -76,13 +88,13 @@ export function regroupInputSignals(container) {
     const messages = children.slice(run.start, run.end);
     const group = document.createElement("section");
     group.className = "input-signal-group is-collapsed";
-    const { header, toggle } = groupHeader(messages);
+    const { header, toggle, hiddenCount } = groupHeader(messages);
     const body = document.createElement("div");
     body.className = "input-signal-group-items";
     toggle.addEventListener("click", () => {
       const collapsed = group.classList.toggle("is-collapsed");
       toggle.setAttribute("aria-expanded", String(!collapsed));
-      toggle.textContent = collapsed ? `展开其余 ${messages.length - 1} 条` : "收起";
+      toggle.textContent = collapsed ? `展开其余 ${hiddenCount} 条` : "收起";
     });
     group.append(header, body);
     children[run.start].replaceWith(group);
