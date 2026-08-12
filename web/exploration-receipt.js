@@ -9,7 +9,7 @@ export function manualCompletionSince(exploration, requestId) {
   ) {
     return null;
   }
-  return completionFrom(run);
+  return completionFrom(run, exploration);
 }
 
 export function unpresentedManualCompletions(exploration) {
@@ -26,7 +26,7 @@ export function unpresentedManualCompletions(exploration) {
       continue;
     }
     seen.add(run.id);
-    completions.push(completionFrom(run));
+    completions.push(completionFrom(run, exploration));
   }
   return completions;
 }
@@ -48,6 +48,16 @@ export function manualRunLabel(run) {
 }
 
 export function manualCompletionNotice(receipt) {
+  if (receipt?.outcome === "ambient_review_deferred") {
+    const pendingCount = Number(receipt?.pendingCandidateCount) || 0;
+    return {
+      label: "候选审核未完成",
+      message: pendingCount
+        ? `Infer Runtime 暂时不可用，仍有 ${pendingCount} 条候选等待处理；候选没有丢失。`
+        : "Infer Runtime 暂时不可用，候选已保留，等待稍后继续处理。",
+      retryable: true,
+    };
+  }
   const notExecuted =
     receipt?.outcome === "failed" ||
     ["no_input_channel", "input_cooldown", "drive_empty", "mailbox_empty", "channel_failed"].includes(
@@ -69,18 +79,24 @@ export function manualCompletionNotice(receipt) {
     (receipt?.outcome?.startsWith("messaged")
       ? "已带回一条值得讨论的情报。"
       : "本次没有发现值得打扰你的新情报。");
+  const pendingCount = Number(receipt?.pendingCandidateCount) || 0;
   return {
     label: notExecuted ? "探索未实际执行" : "探索完成",
-    message,
+    message: pendingCount
+      ? `${message} 候选池仍有 ${pendingCount} 条，将在后续轮次继续处理。`
+      : message,
+    ...(pendingCount ? { retryable: true } : {}),
   };
 }
 
-function completionFrom(run) {
+function completionFrom(run, exploration) {
   return {
     id: run.id,
     completedAt: run.completedAt,
     outcome: run.outcome || run.status,
     reason: run.reason || null,
     resultRevisionId: run.resultRevisionId || null,
+    pendingCandidateCount:
+      run.pendingCandidateCount ?? exploration?.pendingCandidateCount ?? 0,
   };
 }

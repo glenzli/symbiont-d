@@ -564,6 +564,12 @@ function currentStatus(exploration) {
     const attempt = exploration.lastSkippedAttempt;
     return `上次未实际执行于 ${new Date(attempt.at).toLocaleString()} · ${skippedAttemptLabel(attempt.reason)}`;
   }
+  if (exploration.lastOutcome === "ambient_review_deferred") {
+    const pending = exploration.pendingCandidateCount
+      ? ` · 仍有 ${exploration.pendingCandidateCount} 条待处理`
+      : " · 候选已保留";
+    return `上次候选审核未完成 · Infer Runtime 暂时不可用${pending}`;
+  }
   if (exploration.lastRunAt) {
     const trigger = triggerLabel(exploration.lastTrigger);
     const pending = exploration.pendingCandidateCount

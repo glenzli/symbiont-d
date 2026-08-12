@@ -1344,7 +1344,12 @@ async fn run_once(
                 .iter()
                 .map(|candidate| candidate.id.clone())
                 .collect();
-            if reviewed_candidates.is_empty() && (scheduled || published_input_count > 0) {
+            if should_settle_after_sensing_review(
+                reviewed_candidates.is_empty(),
+                scheduled,
+                published_input_count,
+                review_deferred_reason.is_some(),
+            ) {
                 let pending_candidate_count = sensing.count().await?;
                 let review_deferred = review_deferred_reason.is_some();
                 let outcome = if review_deferred {
@@ -1574,6 +1579,7 @@ async fn run_once(
     let result_revision_id = published
         .as_ref()
         .and_then(|message| message.revision_id.clone());
+    let pending_candidate_count = sensing.count().await?;
     let retry_reason = (status == ExplorationIntentStatus::Superseded).then(|| {
         if outcome.interrupted {
             "newer_user_input".to_owned()
@@ -1602,12 +1608,12 @@ async fn run_once(
                     completed_at.clone(),
                     outcome_label.clone(),
                     result_revision_id.clone(),
+                    pending_candidate_count,
                 )
                 .await?;
         }
         refresh_manual_projection(&state, &manual_runs).await;
     }
-    let pending_candidate_count = sensing.count().await?;
     let mut snapshot = state.write().await;
     if status != ExplorationIntentStatus::Superseded {
         snapshot.last_run_at = Some(completed_at.clone());
@@ -1810,6 +1816,15 @@ fn trigger_runs_intake(trigger: Option<&ExplorationTrigger>) -> bool {
     trigger.is_none() || matches!(trigger, Some(ExplorationTrigger::Manual { .. }))
 }
 
+fn should_settle_after_sensing_review(
+    deep_candidates_empty: bool,
+    scheduled: bool,
+    published_input_count: usize,
+    review_deferred: bool,
+) -> bool {
+    deep_candidates_empty && (scheduled || published_input_count > 0 || review_deferred)
+}
+
 async fn settle_sensing_only(
     state: &RwLock<ExplorationSnapshot>,
     manual_runs: &ManualExplorationStore,
@@ -1847,6 +1862,7 @@ async fn settle_sensing_only(
                     completed_at.clone(),
                     outcome.to_owned(),
                     None,
+                    pending_candidate_count,
                 )
                 .await?;
             tracing::info!(
@@ -2099,7 +2115,8 @@ mod tests {
         ManualExplorationStatus, ManualExplorationStore, ambient_sensing_context,
         bounded_message_excerpt, conversation_edge, evaluate_gate, exploration_working_context,
         observation_is_current, quiet_end, refresh_manual_projection, set_error,
-        settle_sensing_only, today_started_at, trigger_runs_intake,
+        settle_sensing_only, should_settle_after_sensing_review, today_started_at,
+        trigger_runs_intake,
     };
     use crate::{
         autonomy::{AutonomyConfig, QuietHours},
@@ -2125,6 +2142,13 @@ mod tests {
             requested_at
         ));
         assert!(!observation_is_current("not-a-time", requested_at));
+    }
+
+    #[test]
+    fn a_deferred_manual_review_settles_before_an_empty_codex_exploration() {
+        assert!(should_settle_after_sensing_review(true, false, 0, true));
+        assert!(!should_settle_after_sensing_review(false, false, 0, true));
+        assert!(!should_settle_after_sensing_review(true, false, 0, false));
     }
 
     #[test]

@@ -554,6 +554,30 @@ function appendManualExplorationReceipt(receipt) {
     minute: "2-digit",
   });
   notice.append(label, message, time);
+  if (completionNotice.retryable) {
+    const retry = document.createElement("button");
+    retry.type = "button";
+    retry.className = "exploration-receipt-retry";
+    retry.textContent = "重试";
+    retry.addEventListener("click", async () => {
+      retry.disabled = true;
+      retry.textContent = "正在重试";
+      try {
+        const result = await explorationUi.trigger();
+        if (!result.accepted) {
+          retry.textContent = result.alreadyQueued ? "已在队列中" : "稍后重试";
+          retry.disabled = Boolean(result.alreadyQueued);
+        } else {
+          retry.textContent = "已加入队列";
+        }
+      } catch (error) {
+        retry.textContent = "重试失败";
+        retry.title = error.message || "无法重新开始探索";
+        retry.disabled = false;
+      }
+    });
+    notice.append(retry);
+  }
   conversation.append(notice);
   conversation.scrollTop = conversation.scrollHeight;
   return true;

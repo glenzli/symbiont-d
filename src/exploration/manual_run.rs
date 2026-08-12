@@ -36,6 +36,8 @@ pub struct ManualExplorationRun {
     pub outcome: Option<String>,
     pub result_revision_id: Option<String>,
     #[serde(default)]
+    pub pending_candidate_count: usize,
+    #[serde(default)]
     pub presented_at: Option<String>,
 }
 
@@ -51,6 +53,7 @@ impl ManualExplorationRun {
             reason: None,
             outcome: None,
             result_revision_id: None,
+            pending_candidate_count: 0,
             presented_at: None,
         }
     }
@@ -191,6 +194,7 @@ impl ManualExplorationStore {
         completed_at: String,
         outcome: String,
         result_revision_id: Option<String>,
+        pending_candidate_count: usize,
     ) -> Result<Option<ManualExplorationRun>> {
         if !status.is_terminal() {
             anyhow::bail!("manual exploration completion requires a terminal status");
@@ -201,6 +205,7 @@ impl ManualExplorationStore {
             run.reason = None;
             run.outcome = Some(outcome);
             run.result_revision_id = result_revision_id;
+            run.pending_candidate_count = pending_candidate_count;
             run.presented_at = None;
         })
         .await
@@ -326,6 +331,7 @@ mod tests {
                 "2026-08-06T00:00:03Z".to_owned(),
                 "silent".to_owned(),
                 None,
+                12,
             )
             .await
             .expect("complete");
@@ -337,6 +343,7 @@ mod tests {
         let projection = reopened.projection().await;
         assert_eq!(projection.unpresented.len(), 1);
         assert_eq!(projection.unpresented[0].attempts, 2);
+        assert_eq!(projection.unpresented[0].pending_candidate_count, 12);
         reopened
             .acknowledge("explore_1")
             .await

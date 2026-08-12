@@ -1075,6 +1075,25 @@ html[data-native-shell="macos"] .topbar {
   font-size: 9px;
 }
 
+.exploration-receipt-retry {
+  flex: 0 0 auto;
+  border: 0;
+  padding: 2px 5px;
+  background: transparent;
+  color: var(--text-soft);
+  font: inherit;
+  cursor: pointer;
+}
+
+.exploration-receipt-retry:hover {
+  color: var(--text);
+}
+
+.exploration-receipt-retry:disabled {
+  color: var(--text-faint);
+  cursor: default;
+}
+
 .conversation-notice.connection-recovery {
   min-height: 44px;
   align-items: center;

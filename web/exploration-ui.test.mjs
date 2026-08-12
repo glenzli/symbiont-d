@@ -39,6 +39,7 @@ test("returns a receipt only for a newer completed manual exploration", () => {
     outcome: "silent",
     reason: null,
     resultRevisionId: null,
+    pendingCandidateCount: 0,
   });
 });
 
@@ -145,4 +146,40 @@ test("projects queued manual work consistently across exploration surfaces", () 
     "已优先处理新消息，稍后继续探索",
   );
   assert.equal(manualRunPending({ manualRun: { status: "silent" } }), false);
+});
+
+test("explains deferred candidate review instead of claiming that exploration was silent", () => {
+  const completion = manualCompletionSince(
+    {
+      pendingCandidateCount: 24,
+      manualRun: {
+        id: "explore_deferred",
+        status: "silent",
+        completedAt: "2026-08-13T00:08:49Z",
+        outcome: "ambient_review_deferred",
+      },
+    },
+    "explore_deferred",
+  );
+
+  assert.deepEqual(manualCompletionNotice(completion), {
+    label: "候选审核未完成",
+    message: "Infer Runtime 暂时不可用，仍有 24 条候选等待处理；候选没有丢失。",
+    retryable: true,
+  });
+});
+
+test("a completed bounded pass still reports candidates left for later rounds", () => {
+  assert.deepEqual(
+    manualCompletionNotice({
+      outcome: "silent",
+      pendingCandidateCount: 12,
+    }),
+    {
+      label: "探索完成",
+      message:
+        "本次没有发现值得打扰你的新情报。 候选池仍有 12 条，将在后续轮次继续处理。",
+      retryable: true,
+    },
+  );
 });
