@@ -41,6 +41,7 @@ mod rollover;
 mod runtime_log;
 mod secrets;
 mod sensing;
+mod signal_retention;
 mod signals;
 mod startup;
 mod symbiont_context;
@@ -89,6 +90,7 @@ use profile::ProfileStore;
 use reconciliation::{ReconciliationDependencies, ReconciliationHandle, ReconciliationStore};
 use reflection::{ReflectionHandle, ReflectionStore};
 use sensing::SensingStore;
+use signal_retention::{SignalRetentionStore, start_cleanup as start_signal_cleanup};
 use signals::SignalStore;
 use symbiont_context::SymbiontContextStore;
 use tokio::{
@@ -363,6 +365,15 @@ async fn main() -> Result<()> {
         ))
         .await?,
     );
+    let signal_retention = Arc::new(
+        SignalRetentionStore::open(resolve_data_path(
+            &workspace,
+            "SYMBIONT_SIGNAL_RETENTION_PATH",
+            "input-signal-retention.toml",
+        ))
+        .await?,
+    );
+    start_signal_cleanup(Arc::clone(&signals), Arc::clone(&signal_retention));
     let input_roles = Arc::new(
         InputRoleStore::open(resolve_data_path(
             &workspace,
@@ -526,6 +537,7 @@ async fn main() -> Result<()> {
         exploration,
         attacker,
         signals,
+        signal_retention,
         input_roles,
         reflection,
         reconciliation,
