@@ -19,7 +19,9 @@ use crate::{
     autonomy::AutonomyStore,
     codex::{CodexClient, RuntimeEvent},
     compute::ComputeStore,
+    continuity::ContinuityHost,
     conversation::ConversationCoordinator,
+    memory::{MemoryEntry, MemoryRole},
     profile::{ProfileStore, SetupStatus},
     sensing::{InputRoleSnapshot, SensingSource},
     signals::{SignalEvent, SignalPublishOutcome, SignalStore},
@@ -31,6 +33,9 @@ const CHECK_INTERVAL: Duration = Duration::from_secs(30);
 const MIN_BATCH_SIZE: usize = 2;
 const MAX_BATCH_SIZE: usize = 6;
 const MAX_WAIT_MINUTES: i64 = 15;
+/// A challenge needs to arrive beside its source rather than unexpectedly
+/// resurfacing an old card after the conversation has moved on.
+const MAX_INTERVENING_CONVERSATION_MESSAGES: usize = 4;
 const MAX_TRACKED_IDS: usize = 240;
 const ISSUE_COOLDOWN_DAYS: i64 = 7;
 
@@ -72,6 +77,11 @@ struct PublishedIssue {
     published_at: String,
 }
 
+struct PendingSignals {
+    review: Vec<SignalEvent>,
+    skipped: Vec<SignalEvent>,
+}
+
 struct AttackerStore {
     path: PathBuf,
     document: RwLock<AttackerDocument>,
@@ -103,6 +113,7 @@ impl AttackerHandle {
         compute: Arc<ComputeStore>,
         signals: Arc<SignalStore>,
         usage: Arc<UsageStore>,
+        continuity: Arc<ContinuityHost>,
         conversation: ConversationCoordinator,
     ) -> Result<Self> {
         let store = Arc::new(AttackerStore::open(path).await?);
@@ -116,6 +127,7 @@ impl AttackerHandle {
             compute,
             signals,
             usage,
+            continuity,
             conversation,
         ));
         Ok(Self { runtime })
@@ -158,19 +170,32 @@ impl AttackerStore {
         Ok(true)
     }
 
-    async fn pending(&self, signals: &[SignalEvent]) -> Vec<SignalEvent> {
+    async fn pending(
+        &self,
+        signals: &[SignalEvent],
+        conversation: &[MemoryEntry],
+    ) -> PendingSignals {
         let document = self.document.read().await;
         let reviewed = document
             .reviewed_signal_ids
             .iter()
             .map(String::as_str)
             .collect::<HashSet<_>>();
-        signals
+        let mut review = Vec::new();
+        let mut skipped = Vec::new();
+        for signal in signals
             .iter()
             .filter(|signal| !reviewed.contains(signal.id.as_str()))
-            .take(MAX_BATCH_SIZE)
-            .cloned()
-            .collect()
+        {
+            if is_near_current_conversation(signal, conversation) {
+                if review.len() < MAX_BATCH_SIZE {
+                    review.push(signal.clone());
+                }
+            } else {
+                skipped.push(signal.clone());
+            }
+        }
+        PendingSignals { review, skipped }
     }
 
     async fn complete(&self, batch: &[SignalEvent], issue_key: Option<&str>) -> Result<()> {
@@ -230,6 +255,7 @@ async fn run(
     compute: Arc<ComputeStore>,
     signals: Arc<SignalStore>,
     usage: Arc<UsageStore>,
+    continuity: Arc<ContinuityHost>,
     conversation: ConversationCoordinator,
 ) {
     let mut changes = signals.subscribe();
@@ -251,6 +277,7 @@ async fn run(
             &compute,
             &signals,
             &usage,
+            &continuity,
             &conversation,
         )
         .await
@@ -274,6 +301,7 @@ async fn run_once(
     compute: &ComputeStore,
     signals: &SignalStore,
     usage: &UsageStore,
+    continuity: &ContinuityHost,
     conversation: &ConversationCoordinator,
 ) -> Result<()> {
     let config = autonomy.snapshot().await;
@@ -302,7 +330,16 @@ async fn run_once(
         runtime.write().await.phase = "waiting";
         return Ok(());
     }
-    let batch = store.pending(&inputs).await;
+    let conversation_messages = continuity
+        .recent_messages(MAX_INTERVENING_CONVERSATION_MESSAGES + 1)
+        .await?;
+    let pending = store.pending(&inputs, &conversation_messages).await;
+    if !pending.skipped.is_empty() {
+        // A source that has fallen behind the active dialogue must not remain
+        // pending and surface after a later restart.
+        store.complete(&pending.skipped, None).await?;
+    }
+    let batch = pending.review;
     let oldest_wait = batch
         .first()
         .and_then(|signal| DateTime::parse_from_rfc3339(&signal.observed_at).ok())
@@ -491,6 +528,20 @@ fn issue_is_in_cooldown(issue: &PublishedIssue, now: DateTime<Utc>) -> bool {
         .unwrap_or(false)
 }
 
+fn is_near_current_conversation(signal: &SignalEvent, conversation: &[MemoryEntry]) -> bool {
+    let Ok(signal_at) = DateTime::parse_from_rfc3339(&signal.observed_at) else {
+        return false;
+    };
+    conversation
+        .iter()
+        .filter(|entry| matches!(entry.role, MemoryRole::User | MemoryRole::Assistant))
+        .filter_map(|entry| DateTime::parse_from_rfc3339(&entry.at).ok())
+        .filter(|entry_at| *entry_at > signal_at)
+        .take(MAX_INTERVENING_CONVERSATION_MESSAGES + 1)
+        .count()
+        <= MAX_INTERVENING_CONVERSATION_MESSAGES
+}
+
 fn timestamp(value: DateTime<Utc>) -> String {
     value.to_rfc3339_opts(SecondsFormat::Millis, true)
 }
@@ -524,6 +575,51 @@ mod tests {
         assert!(!issue_is_in_cooldown(&old, Utc::now()));
     }
 
+    #[test]
+    fn attacker_requires_the_source_to_remain_near_the_current_conversation() {
+        let now = Utc::now();
+        let signal = SignalEvent {
+            id: "signal_conversation_distance".to_owned(),
+            kind: crate::signals::SignalKind::ExternalInput,
+            candidate_id: "candidate_conversation_distance".to_owned(),
+            fingerprint: "fingerprint-conversation-distance".to_owned(),
+            actor: InputRoleSnapshot::ambient("luna", "Luna", "gpt-test", "codex"),
+            content: "A source input".to_owned(),
+            received_text: "A source input".to_owned(),
+            presentation: crate::sensing::SensingPresentation::Original,
+            qualification_note: None,
+            title: "An external source".to_owned(),
+            summary: "An external source".to_owned(),
+            sources: vec![],
+            source_class: crate::sensing::SensingSourceClass::OpenDiscovery,
+            event_at: Some(timestamp(now - chrono::Duration::days(12))),
+            observed_at: timestamp(now - chrono::Duration::minutes(10)),
+            review_reason: "visible in the chat".to_owned(),
+            related_signal_ids: vec![],
+            promoted_revision_id: None,
+            hidden: false,
+            dismissed: false,
+        };
+
+        let message = |offset: i64| MemoryEntry {
+            role: MemoryRole::User,
+            at: timestamp(now - chrono::Duration::minutes(offset)),
+            content: "later chat".to_owned(),
+            revision_id: None,
+            parts: Vec::new(),
+            metadata: None,
+            delivery_state: None,
+        };
+        assert!(is_near_current_conversation(
+            &signal,
+            &[message(1), message(2)]
+        ));
+        assert!(!is_near_current_conversation(
+            &signal,
+            &[message(1), message(2), message(3), message(4), message(5)],
+        ));
+    }
+
     #[tokio::test]
     async fn first_start_marks_existing_inputs_reviewed_without_replaying_history() {
         let nonce = SystemTime::now()
@@ -552,10 +648,11 @@ mod tests {
             related_signal_ids: vec![],
             promoted_revision_id: None,
             hidden: false,
+            dismissed: false,
         }];
 
         assert!(store.initialize_existing(&inputs).await.unwrap());
-        assert!(store.pending(&inputs).await.is_empty());
+        assert!(store.pending(&inputs, &[]).await.review.is_empty());
         assert!(!store.initialize_existing(&inputs).await.unwrap());
         let _ = tokio::fs::remove_file(path).await;
     }

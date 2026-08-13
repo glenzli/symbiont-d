@@ -135,6 +135,7 @@ async fn replied_external_signal_becomes_a_visible_pcp_source_reference() {
         related_signal_ids: Vec::new(),
         promoted_revision_id: None,
         hidden: false,
+        dismissed: false,
     };
     let source = continuity
         .ingest_external_signal(&signal)
