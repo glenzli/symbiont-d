@@ -6,84 +6,70 @@
   <a href="#zh">中文</a> · <a href="#en">English</a>
 </p>
 
-> A local information companion for sustained thinking — not a task executor.
+> A local companion for turning outside signals into better conversations — not another task executor.
 
 <a id="zh"></a>
 
 ## 中文
 
-**symbiont-d** 是一个本地运行的信息陪伴层：它帮助人把外部信息、正在进行的讨论和长期问题放进同一个可继续思考的空间。
+**symbiont-d** 是一个本地运行的信息陪伴层。它把外部输入、正在进行的对话与长期问题放进同一个可继续思考的空间，帮助你决定什么值得讨论、什么值得保留，以及什么只该经过而不留下。
 
-它不是 Jarvis，也不试图成为另一个任务系统。具体执行、审批、进度和任务历史仍属于 Codex；Symbiont-d 的职责是帮助你理解信息、发现真正值得进入对话的信号，并在需要时把恰当的上下文带给 Codex。
+它不是 Jarvis，也不试图成为另一个任务系统。具体执行、审批、进度和任务历史仍属于 Codex；Symbiont-d 的职责是让信息抵达得更自然，让讨论拥有连续性，并在需要时把恰当的上下文带给 Codex。
 
-### 设计
+### 一眼看见它如何工作
 
-- **信息入口，而非信息流。** 它可以主动感知研究、工具、项目生态、产业与文化的变化，但不会把结果做成需要不停消费的 feed。
-- **自然对话，而非强制轮次。** 用户可以停止、撤回、编辑并从任意位置重新发送；模型也可以在没有增量时不回答。主动探索没有新情报时会给出清楚的结果提示，不会假装仍在工作。
-- **记忆是可复核的工作，而不是自动归档。** 临时候选池不等于记忆；只有经过更强判断、保留来源和替代解释的信息才会进入长期上下文。假设和主题都会被定期复核、过期或降级。
-- **连续性比完美聚类更重要。** 系统允许主题重叠、修正和渐进收束，不把每一句自然语言拆成无穷的 component，也不承诺“绝对正确”的关联。
-- **人始终保有边界。** 权限、探索节奏、打扰频率和可见工作状态都可检查、可调整；后台行为默认克制。
+下面是完全虚构的数据：外部输入以轻量消息出现，保留原文、来源与可展开的说明；用户真正接住它时，才把它带入主对话与长期上下文。
 
-### 它如何协作
+![使用虚构数据的 symbiont-d 对话与外部输入简报界面](docs/images/conversation-briefing-demo.svg)
+
+### 设计原则
+
+- **信息入口，不是信息流。** Luna、邮箱、Drive 与其他输入通道可以带来研究、工具、项目生态、产业和文化中的变化；它们不是需要不停消费的 feed。
+- **外部信息先可见，后决定。** 外部输入默认不写入 PCP。它保留摘要、原文入口与来源，允许回复、引用、删除，或在过期后静默离开；聚焦模式可暂时隐藏尚未接住的输入。
+- **自然对话，而非强制轮次。** 可以停止、撤回、编辑并从任意位置重发；模型也可以没有增量时不回答。临时讨论沿用已有认识，却不会自动进入记忆，只有在你决定后才会沉淀。
+- **记忆是可复核的工作。** 候选池不是记忆。只有保留来源、修正与替代解释的信息才会进入长期上下文；旧主题、假设和关联可以被复核、修订或撤回。
+- **连续性优先于完美聚类。** 允许主题重叠、纠正和渐进收束，而不把每一句自然语言拆成无穷组件，也不承诺绝对正确的关联。
+- **克制的主动性。** 广域探索可带回有趣的输入；对于值得认真质疑的说法，系统可以以派生的“异议”消息补充反证或边界，但是否说话始终比是否分析更严格。
+
+### 协作边界
 
 ```text
 外部世界 / 你的对话 / 你选择的 Codex 上下文
                     ↓
               symbiont-d
-    感知 · 讨论 · 当前地图 · 未决问题 · 反思
+   感知 · 输入简报 · 讨论 · 临时探索 · 当前地图
                     ↓
-       值得保留的 Pages、来源与关系
+      值得保留的 Pages、来源、修订与关系
                     ↓
                PCP Runtime
 ```
 
-- **与 Codex：** Symbiont-d 可以把选定的 Codex 对话作为一次性、只读的自然上下文，也可以按当前用途召回相关主题的现有认识、用户确认与来源证据，供你带到 Codex。需要核验时再展开原始讨论。它不替你派发、接管或伪造 Codex 任务。
-- **与长期上下文 Runtime：** Symbiont-d 是 Host，负责判断何时写入、复核、修订或撤回记忆，并通过 [Paged Context Protocol (PCP)](https://github.com/glenzli/paged-context-protocol) 使用持久的 Pages、不可变 Revision、来源、关系和检索能力。开发环境可以使用内嵌本地存储，常驻服务则可以连接兼容的本机 Runtime。
-- **与本地数据：** 数据默认留在本机。PCP Console 是独立的只读观察界面；Symbiont-d 自身只呈现与当前协作有关的工作状态。
+- **与 Codex：** 可以把相关的 Symbiont 认识、用户确认和来源证据带入 Codex，也可以把选定的 Codex 对话作为一次性只读上下文拉回。Symbiont-d 不替你派发、接管或伪造 Codex 任务。
+- **与长期上下文：** Symbiont-d 作为 Host，决定何时写入、复核、修订或撤回，并通过 [Paged Context Protocol (PCP)](https://github.com/glenzli/paged-context-protocol) 使用 Pages、不可变 Revision、来源、关系和检索能力。
+- **与本地数据：** 数据默认留在本机。PCP Console 是独立的只读观察界面；账号凭据、邮箱地址、文件夹标识和运行记录都不属于仓库内容。
 
-### 输入渠道
+### 输入与体验
 
-- **Luna 与广域输入：** 用于主动感知外部变化；候选内容会经过统一复核，只有值得打扰的信号才进入对话。
-- **Google Drive：** 可从用户指定的文件夹增量读取已经完整写入的文本或 Markdown 文件，并支持读取全部文件或按文件名模式筛选。文件夹、账号授权和读取游标只保存在本地配置中。
-- **邮箱 Inbox：** 保留为可选的只读备用渠道，适合只能通过邮件送达的来源；未启用时不会参与探索。
-
-外部输入不会直接写入长期记忆。账号凭据、文件夹标识、邮箱地址和本地运行记录都不属于仓库内容。
-
-### 外部运行依赖
-
-- **长期上下文：[Paged Context Protocol](https://github.com/glenzli/paged-context-protocol)。** 当前源码构建使用该仓库中的客户端与存储组件；常驻安装也可以从同级 checkout 构建并启动本地 Runtime 和只读 Console。
-- **通用推理与语音输入：[infer-runtime](https://github.com/glenzli/infer-runtime)。** 这是可选的本机路由层。Symbiont-d 将无状态、无工具调用的后台语义判断逐步交给它路由，并用它完成用户授权的本地语音转写；对话线程、Codex 任务、搜索与工具执行仍由 Codex 原生边界负责。未配置时，已迁移的后台判断会安全回退到 Codex，语音输入保持不可用，其他输入渠道不受影响。
-
-两项集成都只在这里说明能力边界；具体连接信息和本机配置由运行环境管理。
+- **广域输入与角色简报：** 每个启用的输入通道可拥有自己的昵称和头像。相邻输入会轻量组合，仍可逐条展开、回复或删除；原文与来源不被“摘要的摘要”替代。
+- **研究收件箱与 Drive：** 可选的只读渠道，适合把 Scholar、Spark、GitHub 或人工转发的资料汇入同一个候选入口。已读游标与凭据只保留在本地。
+- **语音输入：** 通过可选的本地 [infer-runtime](https://github.com/glenzli/infer-runtime) 完成授权转写，录音时显示实际音量波形；语音文件本身不会成为 PCP 记忆。
+- **可见的状态：** 探索、转写、重连和失败都会在界面中留下简洁的状态与重试入口，而不是让聊天看起来像卡住了。
 
 ### 运行
 
-此仓库目前是早期原型，需要：
-
-- Rust 1.88+；
-- 已登录的 Codex CLI；
-- [Paged Context Protocol](https://github.com/glenzli/paged-context-protocol) 仓库的同级 checkout，供当前源码依赖与本地 Runtime 使用；
-- 若要使用语音输入或通用推理路由，需要另行运行并授权 [infer-runtime](https://github.com/glenzli/infer-runtime)。
-
-本地开发：
+当前原型需要：Rust 1.88+、已登录的 Codex CLI，以及同级 checkout 的 [PCP 仓库](https://github.com/glenzli/paged-context-protocol)。语音输入和部分无状态后台判断可选用 [infer-runtime](https://github.com/glenzli/infer-runtime)。
 
 ```bash
 cargo run
 ```
 
-然后打开 <http://127.0.0.1:4317>。
-
-若希望作为常驻本地服务运行：
+然后打开 <http://127.0.0.1:4317>。若希望作为本地常驻服务运行：
 
 ```bash
 ./scripts/service-install.sh
 ```
 
-安装脚本会配置身份绑定的 PCP Runtime、只读 PCP Console 与 symbiont-d。重新运行该脚本可更新本地服务；卸载不会删除你的本地数据。
-
-### 现状
-
-Symbiont-d 正在以真实的长期使用场景校准探索、记忆整理和主动交流的边界。它宁可遗漏弱信号，也不应把噪声、猜测或内部工作过程伪装成值得打扰你的信息。
+安装脚本会配置身份绑定的 PCP Runtime、只读 PCP Console 与 symbiont-d；卸载不会删除本地数据。
 
 <p align="right"><a href="#en">English ↓</a></p>
 
@@ -93,77 +79,63 @@ Symbiont-d 正在以真实的长期使用场景校准探索、记忆整理和主
 
 ## English
 
-**symbiont-d** is a local information companion: a place where outside signals, an ongoing conversation, and long-running questions can remain available for thought.
+**symbiont-d** is a local information companion. It keeps outside input, an ongoing conversation, and long-running questions in one place where they can remain available for thought — helping you decide what deserves a conversation, what deserves memory, and what should simply pass by.
 
-It is not Jarvis, and it is not another task system. Execution, approvals, progress, and task history remain with Codex. Symbiont-d helps you understand information, notice signals that genuinely belong in the conversation, and carry the right context into Codex when useful.
+It is not Jarvis, and it is not another task system. Execution, approvals, progress, and task history remain with Codex. Symbiont-d makes information arrive more naturally, gives discussion continuity, and carries the right context into Codex when useful.
 
-### Design
+### See the interaction model
 
-- **An information doorway, not a feed.** It can attend to changes in research, tools, project ecosystems, industry, and culture without turning your attention into an endless stream to consume.
-- **Natural conversation, not forced turn-taking.** A message can be stopped, retracted, edited, and resent from that point. The model may also remain silent when there is no meaningful addition. A manual exploration that finds nothing notable reports that outcome clearly instead of appearing stuck.
-- **Memory is reviewable work, not automatic filing.** A temporary candidate pool is not memory. Only information that survives stronger judgment with sources and alternatives enters durable context. Topics and hypotheses are revisited, aged, or retired over time.
-- **Continuity over perfect clustering.** Topics may overlap, be corrected, and converge gradually. The system does not try to split every sentence into infinite components or promise perfectly correct associations.
-- **The person keeps the boundary.** Permissions, exploration pace, interruption limits, and visible working state remain inspectable and adjustable. Background behavior is intentionally restrained.
+The image below uses entirely fictional data. External input arrives as a lightweight message with source material still available; it becomes part of the main conversation and durable context only when a person actually takes it up.
 
-### How the pieces work together
+![A synthetic symbiont-d conversation and external-input briefing](docs/images/conversation-briefing-demo.svg)
+
+### Principles
+
+- **An information doorway, not a feed.** Luna, mail, Drive, and other channels can bring in change across research, tools, project ecosystems, industry, and culture without becoming an endless stream to consume.
+- **External input is visible before it is decided.** It does not enter PCP by default. A source card keeps its summary, original material, and provenance available to reply to, quote, dismiss, or let expire; focus mode can temporarily hide input that has not been taken up.
+- **Natural conversation, not forced turns.** A message can be stopped, retracted, edited, and resent. The model may remain silent when there is no meaningful addition. Temporary discussion carries current understanding forward without automatically entering memory.
+- **Memory is reviewable work.** A candidate pool is not memory. Only information that retains sources, corrections, and alternatives enters durable context; old topics, hypotheses, and links can be reviewed, revised, or retracted.
+- **Continuity over perfect clustering.** Topics may overlap, be corrected, and converge gradually. The system does not split every sentence into infinite components or promise perfectly correct associations.
+- **Deliberate initiative.** Broad exploration can surface interesting input. When a claim deserves careful challenge, a derived dissent message may add counter-evidence or a boundary — but speaking has a higher bar than analysing.
+
+### Boundaries
 
 ```text
 outside world / your conversation / selected Codex context
                           ↓
                     symbiont-d
-  sensing · discussion · current map · open loops · reflection
+  sensing · input briefing · discussion · temporary inquiry · current map
                           ↓
-       Pages, sources, and relations worth retaining
+       Pages, sources, revisions, and relations worth retaining
                           ↓
                      PCP Runtime
 ```
 
-- **With Codex:** Symbiont-d can attach a selected Codex conversation as bounded, read-only context for one turn, or recall the current understanding, user confirmations, and source evidence for a topic according to the work at hand. The original exchange is expanded only when verification needs it. It does not dispatch, take over, or impersonate Codex tasks.
-- **With a durable-context runtime:** Symbiont-d is the Host. It decides when memory is written, reviewed, revised, or retracted, and uses the [Paged Context Protocol (PCP)](https://github.com/glenzli/paged-context-protocol) boundary for durable Pages, immutable Revisions, provenance, relations, and retrieval. Development can use embedded local storage, while the resident service can connect to a compatible local Runtime.
-- **With local data:** Data stays local by default. PCP Console is a separate read-only observation surface; Symbiont-d presents only the working state relevant to the current collaboration.
+- **With Codex:** Symbiont-d can carry relevant understanding, user confirmations, and source evidence into Codex, or bring a selected Codex conversation back as bounded read-only context. It does not dispatch, take over, or impersonate Codex tasks.
+- **With durable context:** Symbiont-d is the Host. It decides when memory is written, reviewed, revised, or retracted, using [Paged Context Protocol (PCP)](https://github.com/glenzli/paged-context-protocol) for Pages, immutable Revisions, provenance, relations, and retrieval.
+- **With local data:** Data stays local by default. PCP Console is a separate read-only observation surface; credentials, mail addresses, folder identifiers, and runtime records are never repository content.
 
-### Input channels
+### Inputs and experience
 
-- **Luna and broad input:** Attend to outside changes proactively. Candidates pass through a shared review step, and only signals worth interrupting the conversation are surfaced.
-- **Google Drive:** Incrementally read complete text or Markdown files from a user-selected folder, either all readable files or names matching a pattern. Folder selection, account authorization, and read cursors remain in local configuration.
-- **Mail Inbox:** Remains available as an optional read-only fallback for sources that can only arrive by email. It does not participate when disabled.
-
-External input does not enter durable memory directly. Account credentials, folder identifiers, email addresses, and local runtime records are not repository content.
-
-### External runtime dependencies
-
-- **Durable context: [Paged Context Protocol](https://github.com/glenzli/paged-context-protocol).** The current source build uses client and storage components from that repository. The resident installer can also build and launch its local Runtime and read-only Console from a sibling checkout.
-- **Generic inference and voice input: [infer-runtime](https://github.com/glenzli/infer-runtime).** This is an optional local routing layer. Symbiont-d is moving stateless, tool-free background judgments behind its routing boundary and also uses it for user-authorized local speech transcription. Conversation threads, Codex tasks, search, and tool execution remain on the Codex-native boundary. When it is unavailable, migrated background judgments safely fall back to Codex, voice input stays unavailable, and the other input channels continue to work.
-
-These integrations are documented at the capability boundary; concrete connection details and machine-specific configuration remain with the local runtime environment.
+- **Broad input and role briefings:** Every enabled channel can have its own name and avatar. Nearby entries are grouped lightly but remain individually expandable, replyable, and dismissible; a summary never replaces access to source material.
+- **Research inbox and Drive:** Optional read-only paths for bringing Scholar, Spark, GitHub, and human-forwarded material into one candidate inlet. Read cursors and credentials stay local.
+- **Voice input:** User-authorized local transcription runs through optional [infer-runtime](https://github.com/glenzli/infer-runtime), with a live amplitude waveform while recording. The audio file itself is not PCP memory.
+- **Visible state:** Exploration, transcription, reconnection, and failures have compact status and retry affordances rather than making the chat feel stalled.
 
 ### Run it
 
-This early prototype needs:
-
-- Rust 1.88+;
-- a logged-in Codex CLI;
-- a sibling checkout of the [Paged Context Protocol repository](https://github.com/glenzli/paged-context-protocol) for the current source dependencies and local Runtime;
-- a separately running and authorized [infer-runtime](https://github.com/glenzli/infer-runtime) when voice input or generic inference routing is needed.
-
-For local development:
+This prototype needs Rust 1.88+, a signed-in Codex CLI, and a sibling checkout of the [PCP repository](https://github.com/glenzli/paged-context-protocol). Voice input and some stateless background judgments can additionally use [infer-runtime](https://github.com/glenzli/infer-runtime).
 
 ```bash
 cargo run
 ```
 
-Then open <http://127.0.0.1:4317>.
-
-To keep it running as a local service:
+Then open <http://127.0.0.1:4317>. To keep it running as a local service:
 
 ```bash
 ./scripts/service-install.sh
 ```
 
-The installer configures an identity-bound PCP Runtime, a read-only PCP Console, and symbiont-d. Re-run it to update local services; uninstalling preserves local data.
-
-### Status
-
-Symbiont-d is an early prototype being calibrated through real long-term use. It should prefer missing a weak signal over presenting noise, speculation, or invisible internal work as something worth interrupting you for.
+The installer configures an identity-bound PCP Runtime, a read-only PCP Console, and symbiont-d. Removing the service preserves local data.
 
 <p align="right"><a href="#zh">中文 ↑</a></p>
