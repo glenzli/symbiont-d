@@ -77,6 +77,10 @@ pub struct SignalEvent {
     pub promoted_revision_id: Option<String>,
     #[serde(default)]
     pub hidden: bool,
+    /// Explicit user dismissal is distinct from the legacy promotion path,
+    /// which used `hidden` to suppress a source card after writing it to PCP.
+    #[serde(default)]
+    pub dismissed: bool,
 }
 
 #[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
@@ -218,6 +222,7 @@ impl SignalStore {
             related_signal_ids: Vec::new(),
             promoted_revision_id: None,
             hidden: false,
+            dismissed: false,
         };
         document.signals.push(event.clone());
         normalize_and_prune(&mut document, now);
@@ -287,6 +292,7 @@ impl SignalStore {
             related_signal_ids: related,
             promoted_revision_id: None,
             hidden: false,
+            dismissed: false,
         };
         document.signals.push(event);
         normalize_and_prune(&mut document, now);
@@ -440,6 +446,7 @@ impl SignalStore {
             .find(|signal| signal.id == id)
             .map(|signal| {
                 signal.hidden = true;
+                signal.dismissed = true;
             })
             .is_some();
         drop(document);
@@ -464,10 +471,10 @@ impl SignalStore {
                 if signal.promoted_revision_id.is_none() {
                     signal.promoted_revision_id = Some(revision_id);
                 }
-                // A signal is only a temporary input-role message. Once the user
-                // chooses to discuss it, its immutable source page and the
-                // ensuing conversation carry the context instead.
-                signal.hidden = true;
+                // Promotion makes the source durable, but must not remove its
+                // visible card from the conversation. The card is the readable
+                // provenance anchor for the user's reply and any linked dissent;
+                // only an explicit dismissal may hide it.
                 signal.clone()
             });
         drop(document);
@@ -506,6 +513,13 @@ impl SignalStore {
 fn normalize_and_prune(document: &mut SignalDocument, now: DateTime<Utc>) -> bool {
     let mut changed = false;
     for signal in &mut document.signals {
+        // Before source cards became the visible provenance anchor, promotion
+        // reused `hidden` to remove them from the chat stream. Recover those
+        // legacy records, but never override an explicit user dismissal.
+        if signal.promoted_revision_id.is_some() && signal.hidden && !signal.dismissed {
+            signal.hidden = false;
+            changed = true;
+        }
         if signal.fingerprint.trim().is_empty() {
             signal.fingerprint = signal_fingerprint(
                 &signal.title,
@@ -1021,6 +1035,68 @@ mod tests {
         assert!(!store.expire_unadopted(7).await.unwrap().changed());
         let stored = store.get(&source.id).await.unwrap().unwrap();
         assert_eq!(stored.promoted_revision_id.as_deref(), Some("rev_durable"));
+        assert!(!stored.hidden);
+        assert!(
+            store
+                .visible(10)
+                .await
+                .unwrap()
+                .iter()
+                .any(|signal| signal.id == source.id),
+            "promotion keeps the source card visible as the conversation's provenance anchor"
+        );
+        let _ = tokio::fs::remove_file(path).await;
+    }
+
+    #[tokio::test]
+    async fn opening_the_store_recovers_legacy_promoted_source_cards_but_not_dismissals() {
+        let nonce = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let path =
+            std::env::temp_dir().join(format!("symbiont-signals-promotion-migration-{nonce}.json"));
+        let store = SignalStore::open(path.clone()).await.unwrap();
+
+        store
+            .publish_with_content(
+                &candidate("legacy-promoted"),
+                "A durable source.".to_owned(),
+                "credible".to_owned(),
+            )
+            .await
+            .unwrap();
+        let legacy = store.visible(10).await.unwrap().remove(0);
+        store
+            .mark_promoted(&legacy.id, "rev_legacy".to_owned())
+            .await
+            .unwrap();
+        {
+            let mut document = store.document.write().await;
+            document
+                .signals
+                .iter_mut()
+                .find(|signal| signal.id == legacy.id)
+                .unwrap()
+                .hidden = true;
+        }
+        store.persist().await.unwrap();
+        drop(store);
+
+        let reopened = SignalStore::open(path.clone()).await.unwrap();
+        assert!(
+            reopened
+                .visible(10)
+                .await
+                .unwrap()
+                .iter()
+                .any(|signal| signal.id == legacy.id)
+        );
+        assert!(reopened.dismiss(&legacy.id).await.unwrap());
+        drop(reopened);
+
+        let reopened = SignalStore::open(path.clone()).await.unwrap();
+        assert!(reopened.visible(10).await.unwrap().is_empty());
         let _ = tokio::fs::remove_file(path).await;
     }
 }
