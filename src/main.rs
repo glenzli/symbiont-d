@@ -450,6 +450,7 @@ async fn main() -> Result<()> {
         Arc::clone(&compute),
         Arc::clone(&signals),
         Arc::clone(&usage),
+        Arc::clone(&continuity),
         conversation.clone(),
     )
     .await?;
