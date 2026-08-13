@@ -1,10 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import {
-  collapsedInputSignalCount,
-  inputSignalGroupRuns,
-} from "./input-signal-groups.js";
+import { inputSignalGroupRuns } from "./input-signal-groups.js";
 
 const signal = (roleId, minute) => ({
   isSignal: true,
@@ -41,13 +38,9 @@ test("does not combine different roles or distant inputs", () => {
   );
 });
 
-test("keeps related sources outside the collapsed remainder", () => {
-  assert.equal(
-    collapsedInputSignalCount([
-      { hasDissentResponse: false },
-      { hasDissentResponse: true },
-      { hasDissentResponse: false },
-    ]),
-    1,
+test("retains every input in a continuous group", () => {
+  assert.deepEqual(
+    inputSignalGroupRuns([signal("mail", 0), signal("mail", 5), signal("mail", 9)]),
+    [{ start: 0, end: 3 }],
   );
 });

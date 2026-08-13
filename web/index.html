@@ -161,6 +161,15 @@
             hidden
           ><i data-lucide="eye" aria-hidden="true"></i><span id="conversation-focus-label" class="conversation-focus-label">聚焦</span></button>
           <button
+            id="open-input-briefing"
+            class="conversation-input-briefing-toggle"
+            type="button"
+            title="查看外部输入简报"
+            aria-label="查看外部输入简报"
+            data-tooltip="输入简报"
+            hidden
+          ><i data-lucide="inbox" aria-hidden="true"></i></button>
+          <button
             id="scroll-to-latest"
             class="scroll-to-latest"
             type="button"
@@ -472,11 +481,6 @@
           <h3>外观与身份</h3>
           <p>调整聊天中使用的名字和头像。其他运行策略在主动探索、对话整理与系统中配置。</p>
         </header>
-        <label class="field identity-name-field">
-          <span>symbiont-d 昵称</span>
-          <input id="symbiont-display-name" type="text" maxlength="40" placeholder="symbiont-d">
-          <small>用于聊天身份；内置异议角色默认显示为“昵称 · 异议”。</small>
-        </label>
         <div class="avatar-settings">
           <img
             id="avatar-preview"
@@ -486,6 +490,10 @@
           >
           <div class="avatar-settings-actions">
             <strong id="symbiont-avatar-label">symbiont-d 头像</strong>
+            <label class="identity-name-field">
+              <span>昵称</span>
+              <input id="symbiont-display-name" type="text" maxlength="40" placeholder="symbiont-d">
+            </label>
             <div>
               <button id="choose-avatar" class="secondary-button" type="button">选择头像</button>
               <button id="clear-avatar" class="secondary-button" type="button">还原默认</button>
@@ -562,6 +570,17 @@
               <span>每轮广域输入上限</span>
               <input id="max-input-parallelism" type="number" min="1" max="4" step="1">
               <small>按最久未使用优先；同一优先层会随机打散。</small>
+            </label>
+            <label class="field">
+              <span>外部输入保留</span>
+              <select id="signal-retention-days">
+                <option value="3">3 天</option>
+                <option value="7">7 天</option>
+                <option value="14">14 天</option>
+                <option value="30">30 天</option>
+                <option value="0">不自动清理</option>
+              </select>
+              <small>未回应的外部输入到期后从聊天与简报清除。</small>
             </label>
             <label class="field">
               <span>每日介入上限</span>
@@ -932,6 +951,23 @@
         <span id="quota-state">正在读取</span>
       </div>
       <div id="stats-content" class="stats-content" aria-live="polite"></div>
+    </dialog>
+
+    <dialog id="input-briefing-dialog" class="panel-dialog input-briefing-dialog">
+      <header class="dialog-header">
+        <div>
+          <h2>输入简报</h2>
+          <p>外部角色带回的内容与关联异议；不会写入 PCP。</p>
+        </div>
+        <button class="icon-button" data-close="input-briefing-dialog" type="button" aria-label="关闭">×</button>
+      </header>
+      <div class="input-briefing-shell">
+        <nav id="input-briefing-roles" class="input-briefing-roles" aria-label="外部输入角色"></nav>
+        <section class="input-briefing-feed">
+          <header id="input-briefing-feed-header" class="input-briefing-feed-header"></header>
+          <div id="input-briefing-content" class="input-briefing-content" aria-live="polite"></div>
+        </section>
+      </div>
     </dialog>
 
     <dialog id="archive-dialog" class="panel-dialog">

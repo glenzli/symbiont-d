@@ -1,12 +1,6 @@
 const DEFAULT_MAX_GAP_MS = 20 * 60 * 1000;
 const MIN_GROUP_SIZE = 2;
 
-export function collapsedInputSignalCount(items) {
-  return items
-    .slice(1)
-    .filter((item) => !item.hasDissentResponse).length;
-}
-
 export function inputSignalGroupRuns(items, maxGapMs = DEFAULT_MAX_GAP_MS) {
   const runs = [];
   let start = 0;
@@ -49,29 +43,24 @@ function unwrapGroups(container) {
 function groupHeader(messages) {
   const header = document.createElement("header");
   header.className = "input-signal-group-header";
+  const avatar = messages[0].querySelector(".message-avatar")?.cloneNode(true);
+  if (avatar) {
+    avatar.classList.add("input-signal-group-avatar");
+    avatar.setAttribute("aria-hidden", "true");
+    header.append(avatar);
+  }
   const summary = document.createElement("div");
   const speaker = messages[0].querySelector(".speaker")?.textContent || "外部输入";
   const title = document.createElement("strong");
-  title.textContent = `${speaker} · ${messages.length} 条临近输入`;
+  title.textContent = `${speaker} · ${messages.length} 条连续输入`;
   const range = document.createElement("small");
   const firstAt = new Date(messages[0].dataset.signalObservedAt);
   const lastAt = new Date(messages.at(-1).dataset.signalObservedAt);
   range.textContent = `${firstAt.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}–${lastAt.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}`;
   summary.append(title, range);
 
-  const toggle = document.createElement("button");
-  toggle.type = "button";
-  toggle.className = "input-signal-group-toggle";
-  toggle.setAttribute("aria-expanded", "false");
-  const hiddenCount = collapsedInputSignalCount(
-    messages.map((message) => ({
-      hasDissentResponse: message.classList.contains("has-dissent-response"),
-    })),
-  );
-  toggle.hidden = hiddenCount === 0;
-  toggle.textContent = `展开其余 ${hiddenCount} 条`;
-  header.append(summary, toggle);
-  return { header, toggle, hiddenCount };
+  header.append(summary);
+  return header;
 }
 
 export function regroupInputSignals(container) {
@@ -87,15 +76,10 @@ export function regroupInputSignals(container) {
   for (const run of [...runs].reverse()) {
     const messages = children.slice(run.start, run.end);
     const group = document.createElement("section");
-    group.className = "input-signal-group is-collapsed";
-    const { header, toggle, hiddenCount } = groupHeader(messages);
+    group.className = "input-signal-group";
+    const header = groupHeader(messages);
     const body = document.createElement("div");
     body.className = "input-signal-group-items";
-    toggle.addEventListener("click", () => {
-      const collapsed = group.classList.toggle("is-collapsed");
-      toggle.setAttribute("aria-expanded", String(!collapsed));
-      toggle.textContent = collapsed ? `展开其余 ${hiddenCount} 条` : "收起";
-    });
     group.append(header, body);
     children[run.start].replaceWith(group);
     body.append(...messages);

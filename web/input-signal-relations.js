@@ -45,6 +45,47 @@ export function localRelationGeometry(
   };
 }
 
+function isVisibleInViewport(rect, viewport) {
+  return Boolean(
+    rect &&
+      rect.bottom > viewport.top &&
+      rect.top < viewport.bottom &&
+      rect.right > viewport.left &&
+      rect.left < viewport.right,
+  );
+}
+
+export function relationAnchorGeometry(messageRect, groupRect, avatarRect, viewport) {
+  if (!messageRect || !viewport) return null;
+  if (isVisibleInViewport(avatarRect, viewport)) return avatarRect;
+
+  // A grouped run has one shared avatar in its header. Once that header has
+  // scrolled away, retain the same visual lane beside the still-visible card
+  // instead of letting the connector lose its endpoint.
+  const groupInset = groupRect ? Math.min(28, Math.max(16, groupRect.width * 0.06)) : 0;
+  const left = groupRect
+    ? groupRect.left + groupInset
+    : Math.max(viewport.left + 24, messageRect.left - 24);
+  const height = Math.min(40, Math.max(28, messageRect.height));
+  const top = Math.max(messageRect.top, viewport.top);
+  return {
+    left,
+    top,
+    right: left + 1,
+    bottom: top + height,
+    width: 1,
+    height,
+  };
+}
+
+export function dissentPreview(message, maxLength = 86) {
+  const text = `${message?.querySelector?.(".message-body")?.textContent || ""}`
+    .replace(/\s+/g, " ")
+    .trim();
+  if (!text) return "查看这条异议";
+  return text.length > maxLength ? `${text.slice(0, maxLength).trimEnd()}…` : text;
+}
+
 export function initInputSignalRelations(conversation) {
   const frame = conversation?.closest(".conversation-frame");
   if (!conversation || !frame) {
@@ -94,6 +135,25 @@ export function initInputSignalRelations(conversation) {
     );
   }
 
+  function relationAvatar(message) {
+    const groupAvatar = message
+      ?.closest(".input-signal-group")
+      ?.querySelector(".input-signal-group-avatar");
+    return groupAvatar || message?.querySelector(".message-avatar");
+  }
+
+  function relationAnchor(message, viewport) {
+    const messageRect = message?.getBoundingClientRect();
+    if (!messageRect || !isVisibleInViewport(messageRect, viewport)) return null;
+    const groupRect = message.closest(".input-signal-group")?.getBoundingClientRect();
+    return relationAnchorGeometry(
+      messageRect,
+      groupRect,
+      relationAvatar(message)?.getBoundingClientRect(),
+      viewport,
+    );
+  }
+
   function scheduleLines() {
     if (updateFrame !== null) return;
     updateFrame = window.requestAnimationFrame(() => {
@@ -110,15 +170,13 @@ export function initInputSignalRelations(conversation) {
       '.input-signal.attacker-challenge[data-related-signal-ids]',
     )) {
       if (dissent.getClientRects().length === 0) continue;
-      const dissentAvatar = dissent.querySelector(".message-avatar")?.getBoundingClientRect();
-      if (!dissentAvatar) continue;
+      const dissentAnchor = relationAnchor(dissent, viewport);
+      if (!dissentAnchor) continue;
       for (const id of relatedIds(dissent)) {
         const source = sourceMessage(id);
         if (!source || source.getClientRects().length === 0) continue;
-        const sourceAvatar = source
-          ?.querySelector(".message-avatar")
-          ?.getBoundingClientRect();
-        const geometry = localRelationGeometry(sourceAvatar, dissentAvatar, viewport);
+        const sourceAnchor = relationAnchor(source, viewport);
+        const geometry = localRelationGeometry(sourceAnchor, dissentAnchor, viewport);
         if (!geometry) continue;
         const path = document.createElementNS(SVG_NAMESPACE, "path");
         path.classList.add("input-signal-relation-line");
@@ -158,6 +216,7 @@ export function initInputSignalRelations(conversation) {
     for (const marker of conversation.querySelectorAll(".input-signal-dissent-marker")) {
       marker.remove();
     }
+    const dissentBySourceId = new Map();
     for (const dissent of conversation.querySelectorAll(
       '.input-signal.attacker-challenge[data-related-signal-ids]',
     )) {
@@ -167,14 +226,31 @@ export function initInputSignalRelations(conversation) {
         if (!source || source === dissent) continue;
         source.classList.add("has-dissent-response");
         layoutObserver.observe(source);
-        const runtime = source.querySelector(".message-runtime");
-        if (!runtime || runtime.querySelector(".input-signal-dissent-marker")) continue;
-        const marker = document.createElement("button");
-        marker.type = "button";
-        marker.className = "input-signal-dissent-marker";
-        marker.textContent = "↗ 有异议";
-        marker.title = "定位到对这条输入的异议";
-        marker.addEventListener("click", () => {
+        const related = dissentBySourceId.get(id) || [];
+        related.push(dissent);
+        dissentBySourceId.set(id, related);
+      }
+    }
+
+    for (const [id, dissents] of dissentBySourceId) {
+      const source = sourceMessage(id);
+      const runtime = source?.querySelector(".message-runtime");
+      if (!source || !runtime || runtime.querySelector(".input-signal-dissent-marker")) continue;
+      const marker = document.createElement("details");
+      marker.className = "input-signal-dissent-marker";
+      const summary = document.createElement("summary");
+      summary.textContent = `↗ ${dissents.length > 1 ? `${dissents.length} 条异议` : "有异议"}`;
+      summary.title = "展开关联异议";
+      const panel = document.createElement("div");
+      panel.className = "input-signal-dissent-panel";
+      for (const dissent of dissents) {
+        const jump = document.createElement("button");
+        jump.type = "button";
+        jump.className = "input-signal-dissent-link";
+        jump.textContent = dissentPreview(dissent);
+        jump.title = "定位到这条异议";
+        jump.addEventListener("click", () => {
+          marker.open = false;
           revealGrouped(dissent);
           dissent.scrollIntoView({ behavior: "smooth", block: "center" });
           highlight(source);
@@ -182,8 +258,10 @@ export function initInputSignalRelations(conversation) {
           emphasize([id]);
           scheduleLines();
         });
-        runtime.append(" ", marker);
+        panel.append(jump);
       }
+      marker.append(summary, panel);
+      runtime.append(" ", marker);
     }
     scheduleLines();
   }

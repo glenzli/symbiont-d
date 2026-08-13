@@ -73,6 +73,7 @@ export function initSettings(state, actions = {}) {
   const attackerEnabled = document.querySelector("#attacker-enabled");
   const autonomyInterval = document.querySelector("#autonomy-interval");
   const maxInputParallelism = document.querySelector("#max-input-parallelism");
+  const signalRetentionDays = document.querySelector("#signal-retention-days");
   const dailyInterruptLimit = document.querySelector("#daily-interrupt-limit");
   const dailyNoteLimit = document.querySelector("#daily-note-limit");
   const dailyTokenLimit = document.querySelector("#daily-token-limit");
@@ -372,6 +373,7 @@ export function initSettings(state, actions = {}) {
     attackerEnabled.checked = state.autonomy.attackerEnabled !== false;
     autonomyInterval.value = String(state.autonomy.intervalMinutes);
     maxInputParallelism.value = String(state.autonomy.maxInputParallelism || 1);
+    signalRetentionDays.value = String(state.signalRetention?.retentionDays ?? 7);
     dailyInterruptLimit.value = String(state.autonomy.dailyInterruptLimit);
     dailyNoteLimit.value = String(state.autonomy.dailyNoteLimit ?? 4);
     dailyTokenLimit.value = tokensToMillions(
@@ -815,14 +817,28 @@ export function initSettings(state, actions = {}) {
       },
     };
     try {
-      state.autonomy = await responseJson(
-        await fetch("/api/autonomy", {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify(config),
-        }),
-        "保存失败",
-      );
+      const [autonomy, signalRetention] = await Promise.all([
+        responseJson(
+          await fetch("/api/autonomy", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify(config),
+          }),
+          "保存失败",
+        ),
+        responseJson(
+          await fetch("/api/signal-retention", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({
+              retentionDays: Number(signalRetentionDays.value),
+            }),
+          }),
+          "保存外部输入保留期失败",
+        ),
+      ]);
+      state.autonomy = autonomy;
+      state.signalRetention = signalRetention;
       state.autonomyPermitted =
         state.profile.status === "ready" && state.autonomy.enabled;
       autonomySaveState.textContent = "已保存";

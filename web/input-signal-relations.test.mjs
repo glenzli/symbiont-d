@@ -1,7 +1,11 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { localRelationGeometry } from "./input-signal-relations.js";
+import {
+  dissentPreview,
+  localRelationGeometry,
+  relationAnchorGeometry,
+} from "./input-signal-relations.js";
 
 const viewport = { top: 100, bottom: 700, left: 20 };
 
@@ -59,5 +63,37 @@ test("does not connect hidden or reverse-ordered messages", () => {
       viewport,
     ),
     null,
+  );
+});
+
+test("keeps a grouped message in the shared relation lane after its header scrolls away", () => {
+  const anchor = relationAnchorGeometry(
+    { top: 180, bottom: 300, left: 120, right: 720, width: 600, height: 120 },
+    { top: -220, bottom: 480, left: 48, right: 760, width: 712, height: 700 },
+    { top: -220, bottom: -180, left: 50, right: 90, width: 40, height: 40 },
+    { top: 100, bottom: 700, left: 20, right: 820 },
+  );
+
+  assert.deepEqual(anchor, {
+    left: 76,
+    top: 180,
+    right: 77,
+    bottom: 220,
+    width: 1,
+    height: 40,
+  });
+});
+
+test("keeps an unopened dissent summary compact", () => {
+  assert.equal(dissentPreview(null), "查看这条异议");
+  assert.equal(
+    dissentPreview({
+      querySelector: () => ({ textContent: "  这是一段\n\n应当被压缩展示的异议摘要。  " }),
+    }),
+    "这是一段 应当被压缩展示的异议摘要。",
+  );
+  assert.equal(
+    dissentPreview({ querySelector: () => ({ textContent: "a".repeat(90) }) }, 12),
+    "aaaaaaaaaaaa…",
   );
 });

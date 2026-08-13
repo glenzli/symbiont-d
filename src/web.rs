@@ -77,6 +77,7 @@ use crate::{
         ReflectionSnapshot, TurnDisposition,
     },
     sensing::{SensingCandidate, SensingSource},
+    signal_retention::{SignalRetentionConfig, SignalRetentionStore},
     signals::{SignalEvent, SignalStore},
     symbiont_context::{
         ContextAuthor, ContextDocumentKind, SymbiontContextSnapshot, SymbiontContextStore,
@@ -97,6 +98,7 @@ const PROFILE_UI_JS: &str = include_str!("../web/profile-ui.js");
 const CURIOSITY_UI_JS: &str = include_str!("../web/curiosity-ui.js");
 const IDENTITY_UI_JS: &str = include_str!("../web/identity-ui.js");
 const INPUT_ROLES_JS: &str = include_str!("../web/input-roles.js");
+const INPUT_BRIEFING_UI_JS: &str = include_str!("../web/input-briefing-ui.js");
 const INPUT_SIGNAL_GROUPS_JS: &str = include_str!("../web/input-signal-groups.js");
 const INPUT_SIGNAL_RELATIONS_JS: &str = include_str!("../web/input-signal-relations.js");
 const CONVERSATION_FOCUS_UI_JS: &str = include_str!("../web/conversation-focus-ui.js");
@@ -161,6 +163,7 @@ pub struct AppState {
     exploration: ExplorationHandle,
     attacker: AttackerHandle,
     signals: Arc<SignalStore>,
+    signal_retention: Arc<SignalRetentionStore>,
     input_roles: Arc<InputRoleStore>,
     reflection: ReflectionHandle,
     reconciliation: ReconciliationHandle,
@@ -194,6 +197,7 @@ impl AppState {
         exploration: ExplorationHandle,
         attacker: AttackerHandle,
         signals: Arc<SignalStore>,
+        signal_retention: Arc<SignalRetentionStore>,
         input_roles: Arc<InputRoleStore>,
         reflection: ReflectionHandle,
         reconciliation: ReconciliationHandle,
@@ -228,6 +232,7 @@ impl AppState {
             exploration,
             attacker,
             signals,
+            signal_retention,
             input_roles,
             reflection,
             reconciliation,
@@ -281,6 +286,7 @@ struct BootstrapResponse {
     identity: IdentitySnapshot,
     profile: ProfileSnapshot,
     autonomy: AutonomyConfig,
+    signal_retention: SignalRetentionConfig,
     autonomy_permitted: bool,
     models: Vec<ModelInfo>,
     compute: ComputeConfig,
@@ -327,6 +333,7 @@ struct RuntimeResponse {
     compute_policies: Vec<ComputeTopicPolicy>,
     messages: Vec<MemoryEntry>,
     signals: Vec<SignalEvent>,
+    signal_retention: SignalRetentionConfig,
     input_roles: InputRoleSettingsSnapshot,
     turn_dispositions: Vec<TurnDisposition>,
     permissions: Vec<PermissionRequestView>,
@@ -567,6 +574,7 @@ pub fn router(state: AppState) -> Router {
         .route("/curiosity-ui.js", get(curiosity_ui_js))
         .route("/identity-ui.js", get(identity_ui_js))
         .route("/input-roles.js", get(input_roles_js))
+        .route("/input-briefing-ui.js", get(input_briefing_ui_js))
         .route("/input-signal-groups.js", get(input_signal_groups_js))
         .route("/input-signal-relations.js", get(input_signal_relations_js))
         .route("/conversation-focus-ui.js", get(conversation_focus_ui_js))
@@ -646,6 +654,7 @@ pub fn router(state: AppState) -> Router {
         .route("/api/profile/orientation", post(update_orientation))
         .route("/api/context/{kind}", post(update_context_document))
         .route("/api/autonomy", post(update_autonomy))
+        .route("/api/signal-retention", post(update_signal_retention))
         .route("/api/exploration/run", post(trigger_exploration))
         .route("/api/exploration/recent", get(recent_explorations))
         .route(
@@ -834,6 +843,13 @@ async fn input_roles_js() -> impl IntoResponse {
     )
 }
 
+async fn input_briefing_ui_js() -> impl IntoResponse {
+    (
+        [(header::CONTENT_TYPE, "text/javascript; charset=utf-8")],
+        INPUT_BRIEFING_UI_JS,
+    )
+}
+
 async fn input_signal_groups_js() -> impl IntoResponse {
     (
         [(header::CONTENT_TYPE, "text/javascript; charset=utf-8")],
@@ -1019,6 +1035,7 @@ async fn bootstrap(State(state): State<AppState>) -> Result<Json<BootstrapRespon
         .map_err(ApiError::internal)?;
     let profile = state.profile.snapshot().await;
     let autonomy = state.autonomy.snapshot().await;
+    let signal_retention = state.signal_retention.snapshot().await;
     let autonomy_permitted = state
         .autonomy
         .permitted(profile.status == SetupStatus::Ready)
@@ -1054,6 +1071,7 @@ async fn bootstrap(State(state): State<AppState>) -> Result<Json<BootstrapRespon
         identity,
         profile,
         autonomy,
+        signal_retention,
         autonomy_permitted,
         models: state.compute.catalog().to_vec(),
         compute: state.compute.snapshot().await,
@@ -1240,6 +1258,33 @@ async fn update_autonomy(
         .await
         .map(Json)
         .map_err(ApiError::bad_request)
+}
+
+async fn update_signal_retention(
+    State(state): State<AppState>,
+    Json(config): Json<SignalRetentionConfig>,
+) -> Result<Json<SignalRetentionConfig>, ApiError> {
+    let config = state
+        .signal_retention
+        .update(config)
+        .await
+        .map_err(ApiError::bad_request)?;
+    let summary = state
+        .signals
+        .expire_unadopted(config.retention_days)
+        .await
+        .map_err(ApiError::internal)?;
+    if summary.changed() {
+        tracing::info!(
+            target: crate::runtime_log::TARGET,
+            event = "external_input_expired",
+            expired_external_inputs = summary.expired_external_inputs,
+            expired_attacker_challenges = summary.expired_attacker_challenges,
+            retention_days = config.retention_days,
+            "expired unadopted external inputs after retention update"
+        );
+    }
+    Ok(Json(config))
 }
 
 async fn update_compute(
@@ -1668,6 +1713,7 @@ async fn runtime(
         compute_policies: state.compute_policies.snapshot().await,
         messages,
         signals,
+        signal_retention: state.signal_retention.snapshot().await,
         input_roles,
         turn_dispositions,
         permissions: state.permissions.snapshot().await,

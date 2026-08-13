@@ -9,6 +9,7 @@ import { initIdentityUi } from "/identity-ui.js";
 import { applyInputRoleAvatar, initInputRoleUi } from "/input-roles.js";
 import { regroupInputSignals } from "/input-signal-groups.js";
 import { initInputSignalRelations } from "/input-signal-relations.js";
+import { initInputBriefingUi } from "/input-briefing-ui.js";
 import { initConversationFocusUi } from "/conversation-focus-ui.js";
 import { initComputeModeUi } from "/compute-mode-ui.js";
 import { initComposerContextUi } from "/composer-context-ui.js";
@@ -109,6 +110,18 @@ let selectedSignalId = null;
 const manualExplorationReceiptIds = new Set();
 const displayedSignalIds = new Set();
 const inputSignalRelations = initInputSignalRelations(conversation);
+const inputBriefingUi = initInputBriefingUi({
+  state: appState,
+  renderMessageContent,
+  applyAvatar: applyInputRoleAvatar,
+  renderIcons,
+  onReply: (signal) => {
+    selectedSignalId = signal.id;
+    document.querySelector("#input-briefing-dialog")?.close();
+    input.focus();
+    composerState.textContent = "已附上这条观察、发生时间和来源";
+  },
+});
 
 const MAX_IMAGES = 4;
 const MAX_IMAGE_BYTES = 15 * 1024 * 1024;
@@ -400,7 +413,9 @@ function appendInputSignal(signal, options = {}) {
   });
   const foot = document.createElement("div");
   foot.className = "message-foot input-signal-foot";
-  const title = document.createElement("span");
+  const footInfo = document.createElement("div");
+  footInfo.className = "input-signal-foot-info";
+  const title = document.createElement("div");
   title.className = "message-runtime";
   title.textContent = signal.kind === "attacker_challenge" ? "异议" : signal.title || "外部信号";
   const actions = document.createElement("span");
@@ -444,6 +459,7 @@ function appendInputSignal(signal, options = {}) {
       inputSignalRelations.refresh();
       regroupInputSignals(conversation);
       inputSignalRelations.scheduleLines();
+      inputBriefingUi.render();
       emptyState.hidden = Boolean(conversation.querySelector(".message"));
     } catch (error) {
       dismiss.disabled = false;
@@ -452,7 +468,6 @@ function appendInputSignal(signal, options = {}) {
   });
   actions.append(reply, dismiss);
   renderIcons(actions);
-  foot.append(title, actions);
   content.append(meta, body);
   if (signal.kind === "attacker_challenge" && relatedSignalIds.length) {
     const relation = document.createElement("button");
@@ -465,12 +480,14 @@ function appendInputSignal(signal, options = {}) {
     );
     content.append(relation);
   }
+  const detailsBar = document.createElement("div");
+  detailsBar.className = "input-signal-details";
   const isCondensed = signal.presentation === "condensed";
   if (isCondensed && receivedText && receivedText.trim() !== displayText.trim()) {
     const original = document.createElement("details");
-    original.className = "input-signal-original";
+    original.className = "input-signal-detail input-signal-original";
     const originalLabel = document.createElement("summary");
-    originalLabel.textContent = "展开收到的原文";
+    originalLabel.textContent = "原文";
     const originalBody = document.createElement("div");
     originalBody.className = "input-signal-original-body";
     renderMessageContent(originalBody, {
@@ -478,18 +495,22 @@ function appendInputSignal(signal, options = {}) {
       parts: [{ type: "markdown", text: receivedText }],
     });
     original.append(originalLabel, originalBody);
-    content.append(original);
+    detailsBar.append(original);
   }
   const qualification = signal.qualificationNote || signal.qualification_note;
   if (qualification) {
-    const note = document.createElement("p");
-    note.className = "input-signal-qualification";
-    note.textContent = qualification;
-    content.append(note);
+    const note = document.createElement("details");
+    note.className = "input-signal-detail input-signal-qualification";
+    const summary = document.createElement("summary");
+    summary.textContent = "说明";
+    const body = document.createElement("p");
+    body.textContent = qualification;
+    note.append(summary, body);
+    detailsBar.append(note);
   }
   if (signal.sources?.length) {
     const sources = document.createElement("details");
-    sources.className = "input-signal-sources";
+    sources.className = "input-signal-detail input-signal-sources";
     const summary = document.createElement("summary");
     summary.textContent = `${signal.sources.length} 个来源`;
     const list = document.createElement("ul");
@@ -504,8 +525,11 @@ function appendInputSignal(signal, options = {}) {
       list.append(item);
     }
     sources.append(summary, list);
-    content.append(sources);
+    detailsBar.append(sources);
   }
+  footInfo.append(title);
+  if (detailsBar.childElementCount) footInfo.append(detailsBar);
+  foot.append(footInfo, actions);
   content.append(foot);
   layout.append(avatar, content);
   article.append(layout);
@@ -513,6 +537,7 @@ function appendInputSignal(signal, options = {}) {
   inputSignalRelations.refresh();
   regroupInputSignals(conversation);
   inputSignalRelations.scheduleLines();
+  inputBriefingUi.render();
   if (options.scroll !== false) conversation.scrollTop = conversation.scrollHeight;
   return article;
 }
@@ -529,6 +554,7 @@ window.addEventListener("input-roles-updated", (event) => {
   inputSignalRelations.refresh();
   regroupInputSignals(conversation);
   inputSignalRelations.scheduleLines();
+  inputBriefingUi.render();
 });
 
 function appendManualExplorationReceipt(receipt) {
@@ -844,10 +870,22 @@ function applyRuntime(payload) {
     payload.computePolicies || appState.computePolicies;
   appState.permissions = payload.permissions || appState.permissions;
   appState.bridge = payload.bridge || appState.bridge;
+  appState.signalRetention = payload.signalRetention || appState.signalRetention;
   if (payload.signals) {
     appState.signals = payload.signals;
+    const liveSignalIds = new Set(payload.signals.map((signal) => signal.id));
+    for (const article of conversation.querySelectorAll(".input-signal[data-signal-id]")) {
+      if (!liveSignalIds.has(article.dataset.signalId)) {
+        displayedSignalIds.delete(article.dataset.signalId);
+        article.remove();
+      }
+    }
     for (const signal of payload.signals) appendInputSignal(signal, { scroll: false });
+    inputSignalRelations.refresh();
+    regroupInputSignals(conversation);
+    inputSignalRelations.scheduleLines();
   }
+  inputBriefingUi.render();
   renderUsage();
   renderRuntimeStatus();
   identityUi.render();
@@ -879,6 +917,7 @@ async function bootstrap() {
       if (item.kind === "signal") appendInputSignal(item.value, { scroll: false });
       else appendMessage(item.value, { scroll: false });
     });
+    inputBriefingUi.render();
     turnDispositionUi.applyAll(state.turnDispositions);
     messageSync.completeBootstrap(state.messages);
     try {
