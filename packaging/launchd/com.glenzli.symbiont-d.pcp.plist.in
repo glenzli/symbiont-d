@@ -22,6 +22,8 @@
     <string>@HOME@</string>
     <key>PATH</key>
     <string>@PATH@</string>
+    <key>PCP_OBSERVER_CONSOLE_URL</key>
+    <string>http://127.0.0.1:4318/</string>
   </dict>
 
   <key>RunAtLoad</key>
