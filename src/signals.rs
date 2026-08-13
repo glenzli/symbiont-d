@@ -19,6 +19,18 @@ const MAX_RETAINED_SIGNALS: usize = 100;
 const MAX_DEDUPLICATION_REFERENCES: usize = 24;
 const MAX_DEDUPLICATION_EXCERPT_CHARS: usize = 480;
 
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct SignalExpirySummary {
+    pub expired_external_inputs: usize,
+    pub expired_attacker_challenges: usize,
+}
+
+impl SignalExpirySummary {
+    pub const fn changed(self) -> bool {
+        self.expired_external_inputs != 0 || self.expired_attacker_challenges != 0
+    }
+}
+
 /// A visible but non-durable input from an auxiliary model role.
 ///
 /// Signals deliberately live outside PCP. They become durable source material only
@@ -303,6 +315,61 @@ impl SignalStore {
         Ok(signals.into_iter().rev().collect())
     }
 
+    /// Removes unadopted external inputs after the user-selected lifetime.
+    /// Signals promoted into PCP are kept outside this transient cleanup; their
+    /// visible source is already represented by the durable conversation.
+    pub async fn expire_unadopted(&self, retention_days: u16) -> Result<SignalExpirySummary> {
+        if retention_days == 0 {
+            return Ok(SignalExpirySummary::default());
+        }
+        let now = Utc::now();
+        let cutoff = now - Duration::days(i64::from(retention_days));
+        let mut document = self.document.write().await;
+        let expired_ids = document
+            .signals
+            .iter()
+            .filter(|signal| {
+                signal.kind == SignalKind::ExternalInput
+                    && signal.promoted_revision_id.is_none()
+                    && observed_before(signal, cutoff)
+            })
+            .map(|signal| signal.id.clone())
+            .collect::<std::collections::HashSet<_>>();
+        if expired_ids.is_empty() {
+            return Ok(SignalExpirySummary::default());
+        }
+
+        let before = document.signals.len();
+        document
+            .signals
+            .retain(|signal| !expired_ids.contains(&signal.id));
+        let expired_external_inputs = before - document.signals.len();
+        let remaining_ids = document
+            .signals
+            .iter()
+            .map(|signal| signal.id.clone())
+            .collect::<std::collections::HashSet<_>>();
+        for signal in &mut document.signals {
+            if signal.kind == SignalKind::AttackerChallenge {
+                signal
+                    .related_signal_ids
+                    .retain(|id| remaining_ids.contains(id));
+            }
+        }
+        let before_challenges = document.signals.len();
+        document.signals.retain(|signal| {
+            signal.kind != SignalKind::AttackerChallenge || !signal.related_signal_ids.is_empty()
+        });
+        let summary = SignalExpirySummary {
+            expired_external_inputs,
+            expired_attacker_challenges: before_challenges - document.signals.len(),
+        };
+        drop(document);
+        self.persist().await?;
+        self.notify_changed();
+        Ok(summary)
+    }
+
     pub async fn get(&self, id: &str) -> Result<Option<SignalEvent>> {
         let document = self.document.read().await;
         Ok(document
@@ -490,6 +557,12 @@ fn normalize_and_prune(document: &mut SignalDocument, now: DateTime<Utc>) -> boo
     changed || before != document.signals.len()
 }
 
+fn observed_before(signal: &SignalEvent, cutoff: DateTime<Utc>) -> bool {
+    DateTime::parse_from_rfc3339(&signal.observed_at)
+        .map(|observed_at| observed_at.with_timezone(&Utc) < cutoff)
+        .unwrap_or(true)
+}
+
 fn event_is_too_old(event_at: Option<&str>, now: DateTime<Utc>) -> bool {
     let Some(event_at) = event_at else {
         return false;
@@ -550,10 +623,11 @@ fn timestamp(value: DateTime<Utc>) -> String {
 mod tests {
     use std::time::{SystemTime, UNIX_EPOCH};
 
-    use super::{SignalPublishOutcome, SignalStore};
+    use super::{SignalPublishOutcome, SignalStore, timestamp};
     use crate::sensing::{
         InputRoleSnapshot, SensingCandidate, SensingPresentation, SensingSource, SensingSourceClass,
     };
+    use chrono::{Duration, Utc};
 
     fn candidate(id: &str) -> SensingCandidate {
         SensingCandidate {
@@ -861,6 +935,92 @@ mod tests {
         let references = store.deduplication_references().await;
         assert_eq!(references.len(), 1);
         assert_eq!(references[0].signal_id, visible[0].id);
+        let _ = tokio::fs::remove_file(path).await;
+    }
+
+    #[tokio::test]
+    async fn expiring_unadopted_sources_removes_orphaned_attacker_challenges() {
+        let nonce = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let path = std::env::temp_dir().join(format!("symbiont-signals-expiry-{nonce}.json"));
+        let store = SignalStore::open(path.clone()).await.unwrap();
+        let original = candidate("sense_expiry");
+        store
+            .publish_with_content(
+                &original,
+                original.proposed_input.clone(),
+                "credible".to_owned(),
+            )
+            .await
+            .unwrap();
+        let source = store.visible(10).await.unwrap().remove(0);
+        store
+            .publish_attacker_challenge(
+                InputRoleSnapshot::ambient("attacker", "symbiont-d · 异议", "gpt-test", "codex"),
+                "expiry-check",
+                "This needs a qualification.".to_owned(),
+                "A source is about to expire.".to_owned(),
+                vec![source.id.clone()],
+                vec![],
+            )
+            .await
+            .unwrap();
+        {
+            let mut document = store.document.write().await;
+            let source = document
+                .signals
+                .iter_mut()
+                .find(|signal| signal.id == source.id)
+                .unwrap();
+            source.observed_at = timestamp(Utc::now() - Duration::days(8));
+        }
+
+        let summary = store.expire_unadopted(7).await.unwrap();
+        assert_eq!(summary.expired_external_inputs, 1);
+        assert_eq!(summary.expired_attacker_challenges, 1);
+        assert!(store.visible(10).await.unwrap().is_empty());
+        assert!(store.get(&source.id).await.unwrap().is_none());
+        let _ = tokio::fs::remove_file(path).await;
+    }
+
+    #[tokio::test]
+    async fn expiring_inputs_keeps_promoted_context_out_of_the_transient_cleanup() {
+        let nonce = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let path =
+            std::env::temp_dir().join(format!("symbiont-signals-promoted-expiry-{nonce}.json"));
+        let store = SignalStore::open(path.clone()).await.unwrap();
+        let original = candidate("sense_promoted_expiry");
+        store
+            .publish_with_content(
+                &original,
+                original.proposed_input.clone(),
+                "credible".to_owned(),
+            )
+            .await
+            .unwrap();
+        let source = store.visible(10).await.unwrap().remove(0);
+        store
+            .mark_promoted(&source.id, "rev_durable".to_owned())
+            .await
+            .unwrap();
+        {
+            let mut document = store.document.write().await;
+            document
+                .signals
+                .iter_mut()
+                .find(|signal| signal.id == source.id)
+                .unwrap()
+                .observed_at = timestamp(Utc::now() - Duration::days(8));
+        }
+
+        assert!(!store.expire_unadopted(7).await.unwrap().changed());
+        let stored = store.get(&source.id).await.unwrap().unwrap();
+        assert_eq!(stored.promoted_revision_id.as_deref(), Some("rev_durable"));
         let _ = tokio::fs::remove_file(path).await;
     }
 }
