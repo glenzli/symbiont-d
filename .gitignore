@@ -32,6 +32,7 @@
 /data/exploration-attempts.json
 /data/sensing-candidates.json
 /data/input-signals.json
+/data/input-signal-retention.toml
 /data/attacker.json
 /data/*.sqlite3
 /data/*.sqlite3-shm
