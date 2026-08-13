@@ -3,7 +3,7 @@ import katex from "katex";
 import "katex/dist/katex.min.css";
 import { marked } from "marked";
 
-import { protectMath } from "./math-delimiters.mjs";
+import { protectMath, repairLeakedMathPlaceholders } from "./math-delimiters.mjs";
 
 marked.setOptions({
   breaks: true,
@@ -11,7 +11,7 @@ marked.setOptions({
 });
 
 export function renderRichText(target, source, options = {}) {
-  const markdown = String(source || "");
+  const markdown = repairLeakedMathPlaceholders(source);
   const { protectedMarkdown, math } = protectMath(markdown);
   const rendered = marked.parse(protectedMarkdown);
   target.innerHTML = DOMPurify.sanitize(rendered, {

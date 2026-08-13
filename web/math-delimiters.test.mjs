@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { protectMath } from "./math-delimiters.mjs";
+import { protectMath, repairLeakedMathPlaceholders } from "./math-delimiters.mjs";
 
 test("protects dollar and LaTeX math delimiters", () => {
   const source = String.raw`
@@ -47,4 +47,24 @@ test("does not treat multiline single-dollar content as inline math", () => {
 
   assert.deepEqual(result.math, []);
   assert.equal(result.protectedMarkdown, source);
+});
+
+test("keeps currency amounts out of inline math while preserving nearby formulas", () => {
+  const source =
+    "V4 Flash is $0.14 / $0.007 / $0.66, while $J_t$ and $1 + 1$ remain formulas.";
+  const result = protectMath(source);
+
+  assert.deepEqual(result.math, [
+    { expression: "1 + 1", display: false },
+    { expression: "J_t", display: false },
+  ]);
+  assert.match(result.protectedMarkdown, /\$0\.14 \/ \$0\.007 \/ \$0\.66/);
+  assert.match(result.protectedMarkdown, /data-symbiont-math="1"/);
+});
+
+test("repairs leaked currency placeholders and removes expressionless markers", () => {
+  const source =
+    'Prices: <span data-symbiont-math="0"></span>0.14 / <span data-symbiont-math="1"></span>0.007; <span data-symbiont-math="2"></span>done.';
+
+  assert.equal(repairLeakedMathPlaceholders(source), "Prices: $0.14 / $0.007; done.");
 });
