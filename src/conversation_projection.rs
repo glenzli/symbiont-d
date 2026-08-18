@@ -1,6 +1,6 @@
 use std::collections::{HashSet, VecDeque};
 
-use tokio::sync::RwLock;
+use tokio::sync::{RwLock, watch};
 
 use crate::memory::MemoryEntry;
 
@@ -12,12 +12,15 @@ const LIVE_MESSAGE_LIMIT: usize = 256;
 /// not rescan that history while checking for newly published messages.
 pub struct ConversationProjection {
     messages: RwLock<VecDeque<MemoryEntry>>,
+    changes: watch::Sender<u64>,
 }
 
 impl ConversationProjection {
     pub fn new() -> Self {
+        let (changes, _) = watch::channel(0);
         Self {
             messages: RwLock::new(VecDeque::with_capacity(LIVE_MESSAGE_LIMIT)),
+            changes,
         }
     }
 
@@ -27,6 +30,7 @@ impl ConversationProjection {
         while messages.len() > LIVE_MESSAGE_LIMIT {
             messages.pop_front();
         }
+        self.notify_changed();
     }
 
     pub async fn after(&self, revision_id: Option<&str>, limit: usize) -> Vec<MemoryEntry> {
@@ -55,12 +59,26 @@ impl ConversationProjection {
             .iter()
             .map(String::as_str)
             .collect::<HashSet<_>>();
-        self.messages.write().await.retain(|message| {
+        let mut messages = self.messages.write().await;
+        let before = messages.len();
+        messages.retain(|message| {
             message
                 .revision_id
                 .as_deref()
                 .is_none_or(|revision_id| !revision_ids.contains(revision_id))
         });
+        if messages.len() != before {
+            self.notify_changed();
+        }
+    }
+
+    pub fn subscribe(&self) -> watch::Receiver<u64> {
+        self.changes.subscribe()
+    }
+
+    fn notify_changed(&self) {
+        let next = self.changes.borrow().wrapping_add(1);
+        self.changes.send_replace(next);
     }
 }
 
@@ -120,5 +138,17 @@ mod tests {
         let messages = projection.after(None, 20).await;
         assert_eq!(messages.len(), 1);
         assert_eq!(messages[0].revision_id.as_deref(), Some("rev-2"));
+    }
+
+    #[tokio::test]
+    async fn notifies_subscribers_when_the_live_projection_changes() {
+        let projection = ConversationProjection::new();
+        let mut updates = projection.subscribe();
+
+        projection.publish(message("rev-1")).await;
+        updates.changed().await.expect("publish notification");
+
+        projection.remove(&["rev-1".to_owned()]).await;
+        updates.changed().await.expect("retraction notification");
     }
 }

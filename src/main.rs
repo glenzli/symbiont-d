@@ -45,7 +45,9 @@ mod signal_retention;
 mod signals;
 mod startup;
 mod symbiont_context;
+mod symbiont_state;
 mod topics;
+mod transcript;
 mod usage;
 mod web;
 mod web_fetch;
@@ -83,7 +85,6 @@ use inference::InferenceExecutor;
 use input_roles::InputRoleStore;
 use luna_input::LunaInput;
 use mail_input::MailInputStore;
-use memory::MemoryStore;
 use pcp_index::PcpIndex;
 use permission::PermissionBroker;
 use profile::ProfileStore;
@@ -93,11 +94,13 @@ use sensing::SensingStore;
 use signal_retention::{SignalRetentionStore, start_cleanup as start_signal_cleanup};
 use signals::SignalStore;
 use symbiont_context::SymbiontContextStore;
+use symbiont_state::SymbiontStateStore;
 use tokio::{
     sync::Mutex,
     time::{Duration, sleep},
 };
 use tracing::info;
+use transcript::TranscriptStore;
 use usage::UsageStore;
 use web::AppState;
 use web_fetch::WebFetcher;
@@ -117,8 +120,6 @@ async fn main() -> Result<()> {
         event = "service_starting",
         "symbiont-d is starting"
     );
-    let memory_path = resolve_memory_path(&workspace);
-    let memory = Arc::new(MemoryStore::open(memory_path).await?);
     let profile = Arc::new(
         ProfileStore::open(
             resolve_data_path(&workspace, "SYMBIONT_PROFILE_PATH", "profile.toml"),
@@ -150,18 +151,56 @@ async fn main() -> Result<()> {
         ))
         .await?,
     );
+    let (transcript, transcript_restore) = TranscriptStore::open(
+        resolve_data_path(&workspace, "SYMBIONT_TRANSCRIPT_PATH", "transcript.sqlite3"),
+        default_legacy_snapshot_source(),
+    )
+    .await?;
+    if transcript_restore.imported_messages > 0 {
+        info!(
+            imported_messages = transcript_restore.imported_messages,
+            source_snapshot = ?transcript_restore.source_snapshot,
+            "restored archived chat transcript into local storage"
+        );
+    }
+    let transcript = Arc::new(transcript);
+    let (symbiont_state, state_restore) = SymbiontStateStore::open(
+        resolve_data_path(&workspace, "SYMBIONT_STATE_PATH", "symbiont-state.sqlite3"),
+        default_legacy_snapshot_source(),
+    )
+    .await?;
+    if state_restore.imported_records > 0
+        || state_restore.imported_relations > 0
+        || state_restore.imported_provenance > 0
+    {
+        info!(
+            imported_records = state_restore.imported_records,
+            imported_relations = state_restore.imported_relations,
+            imported_provenance = state_restore.imported_provenance,
+            source_snapshot = ?state_restore.source_snapshot,
+            "restored archived Symbiont state into local storage"
+        );
+    }
+    let symbiont_state = Arc::new(symbiont_state);
     let pcp = pcp_connection::open(&workspace).await?;
-    let continuity = Arc::new(ContinuityHost::open(pcp).await?);
-    let context = Arc::new(SymbiontContextStore::new(Arc::clone(&continuity)));
+    let continuity = Arc::new(
+        ContinuityHost::open_at(
+            pcp,
+            Arc::clone(&transcript),
+            resolve_data_path(
+                &workspace,
+                "SYMBIONT_PCP_SOURCE_SEQUENCE_PATH",
+                "pcp-source-sequence.json",
+            ),
+        )
+        .await?,
+    );
+    let context = Arc::new(SymbiontContextStore::from_state(Arc::clone(
+        &symbiont_state,
+    )));
     let curiosity = Arc::new(CuriosityStore::new(Arc::clone(&continuity)));
-    let migration = continuity
-        .migrate_legacy(&memory, &profile.snapshot().await)
-        .await
-        .context("migrate legacy symbiont context into PCP")?;
     info!(
-        migrated_messages = migration.migrated_messages,
-        orientation_ready = migration.orientation.is_some(),
-        "PCP continuity store is ready"
+        "local chat transcript and PCP recall client are ready; semantic maintenance is disabled"
     );
     let reflection_store = Arc::new(
         ReflectionStore::open(
@@ -182,17 +221,7 @@ async fn main() -> Result<()> {
         Arc::clone(&continuity),
         Arc::clone(&reflection_store),
     ));
-    let index_calibration = pcp_index
-        .sync_all()
-        .await
-        .context("calibrate the PCP model-written index")?;
-    info!(
-        episode_pages = index_calibration.episode_pages,
-        created_pages = index_calibration.created_pages,
-        revised_pages = index_calibration.revised_pages,
-        unchanged_pages = index_calibration.unchanged_pages,
-        "PCP model-written index is calibrated"
-    );
+    info!("PCP tenant semantic index is disabled; no historical projection will be rebuilt");
     let compute_policies = Arc::new(
         ComputePolicyStore::open(resolve_data_path(
             &workspace,
@@ -474,7 +503,7 @@ async fn main() -> Result<()> {
             autonomy: Arc::clone(&autonomy),
             profile: Arc::clone(&profile),
             codex: Arc::clone(&codex),
-            inference,
+            inference: Arc::clone(&inference),
             compute: Arc::clone(&compute),
             continuity: Arc::clone(&continuity),
             reflection: Arc::clone(&reflection_store),
@@ -528,6 +557,7 @@ async fn main() -> Result<()> {
         autonomy,
         codex,
         compute,
+        Arc::clone(&inference),
         ambient_provider,
         drive_input,
         mail_input,
@@ -560,14 +590,23 @@ async fn main() -> Result<()> {
     Ok(())
 }
 
-fn resolve_memory_path(workspace: &Path) -> PathBuf {
-    env::var_os("SYMBIONT_MEMORY_PATH")
-        .map(PathBuf::from)
-        .unwrap_or_else(|| workspace.join("data/memory.md"))
-}
-
 fn resolve_data_path(workspace: &Path, variable: &str, filename: &str) -> PathBuf {
     env::var_os(variable)
         .map(PathBuf::from)
         .unwrap_or_else(|| workspace.join("data").join(filename))
+}
+
+/// The last pre-semantic PCP snapshot is a one-time recovery source only.
+/// New transcript and Symbiont state are written locally; neither is rebuilt
+/// from live PCP.
+fn default_legacy_snapshot_source() -> Option<PathBuf> {
+    env::var_os("SYMBIONT_TRANSCRIPT_IMPORT_SOURCE")
+        .map(PathBuf::from)
+        .or_else(|| {
+            env::var_os("HOME").map(|home| {
+                PathBuf::from(home)
+                    .join("Library/Application Support/PCP/data")
+                    .join("context-v0.8-pre-semantic-20260815.sqlite3")
+            })
+        })
 }

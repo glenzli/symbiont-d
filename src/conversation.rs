@@ -350,10 +350,9 @@ fn matching_active_mut(
 mod tests {
     use super::*;
     use crate::{
-        continuity::StoredMessage,
+        continuity::{LocalMessageRecord, StoredMessage},
         memory::{MemoryEntry, MemoryRole},
     };
-    use pcp_core::WriteResult;
 
     fn message(revision: &str) -> QueuedUserMessage {
         QueuedUserMessage {
@@ -369,10 +368,9 @@ mod tests {
                     metadata: None,
                     delivery_state: None,
                 },
-                page: WriteResult {
+                page: LocalMessageRecord {
                     page_id: format!("page-{revision}"),
                     revision_id: revision.to_owned(),
-                    created: true,
                 },
                 attachment_revision_ids: Vec::new(),
             },

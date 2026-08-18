@@ -24,10 +24,6 @@
     <string>@PATH@</string>
     <key>RUST_LOG</key>
     <string>symbiont_d=info</string>
-    <key>SYMBIONT_PCP_CONNECT_TIMEOUT_MS</key>
-    <string>30000</string>
-    <key>SYMBIONT_PCP_RUNTIME_SOCKET</key>
-    <string>@PCP_SOCKET@</string>
   </dict>
 
   <key>RunAtLoad</key>

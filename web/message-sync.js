@@ -6,6 +6,7 @@ export function initMessageSync({
   appendMessage,
   applyRuntime,
   shouldDeferMessages,
+  runtimeQuery = () => ({}),
 }) {
   const persisted = loadState();
   const knownRevisionIds = new Set();
@@ -19,8 +20,9 @@ export function initMessageSync({
   let observedAt = persisted?.observedAt || null;
   let cursor = null;
   let bootstrapped = false;
-  let pollTimer = null;
+  let eventSource = null;
   let refreshing = false;
+  let refreshQueued = false;
   let seenTimer = null;
   let reportedConnection = null;
 
@@ -29,7 +31,7 @@ export function initMessageSync({
       if (!canRead()) return;
       for (const entry of entries) {
         if (entry.isIntersecting && entry.intersectionRatio >= 0.55) {
-          markRead(entry.target.dataset.revisionId);
+          markRead(entry.target.dataset.readId);
         }
       }
     },
@@ -39,28 +41,42 @@ export function initMessageSync({
   function track(element, message, options = {}) {
     const revisionId = message.revisionId;
     if (!revisionId) return;
-    knownRevisionIds.add(revisionId);
-    if (message.role === "assistant") assistantRevisionIds.add(revisionId);
-    cursor = revisionId;
-    observer.observe(element);
+    const isAssistant = message.role === "assistant";
+    trackIncoming(element, revisionId, message.at, isAssistant, isAssistant, options);
+    if (!options.history) cursor = revisionId;
+  }
 
-    const arrivedAfterLastVisit =
-      persisted && message.at && (!observedAt || message.at > observedAt);
+  function trackSignal(element, signal, options = {}) {
+    if (!signal?.id) return;
+    trackIncoming(
+      element,
+      `signal:${signal.id}`,
+      signal.observedAt || signal.observed_at,
+      true,
+      false,
+      options,
+    );
+  }
+
+  function trackIncoming(element, readId, at, unreadEligible, recordsSeen, options) {
+    knownRevisionIds.add(readId);
+    element.dataset.readId = readId;
+    if (recordsSeen) assistantRevisionIds.add(readId);
+    observer.observe(element);
+    const arrivedAfterLastVisit = persisted && at && (!observedAt || at > observedAt);
     if (
-      isIncomingAssistant(message) &&
+      unreadEligible &&
       !options.interactive &&
-      (unreadRevisionIds.has(revisionId) ||
-        options.incoming ||
-        arrivedAfterLastVisit)
+      (unreadRevisionIds.has(readId) || options.incoming || arrivedAfterLastVisit)
     ) {
-      markUnread(element, revisionId);
+      markUnread(element, readId);
     }
-    observeTimestamp(message.at);
+    observeTimestamp(at);
     persist();
     scheduleReadCheck();
   }
 
-  function completeBootstrap(messages) {
+  function completeBootstrap(messages, signals = []) {
     if (!persisted) {
       unreadRevisionIds.clear();
       unreadElements.clear();
@@ -73,6 +89,7 @@ export function initMessageSync({
       }
     }
     for (const message of messages) observeTimestamp(message.at);
+    for (const signal of signals) observeTimestamp(signal.observedAt || signal.observed_at);
     bootstrapped = true;
     persist();
     renderUnread();
@@ -80,13 +97,21 @@ export function initMessageSync({
   }
 
   async function refresh() {
-    if (refreshing) return;
+    if (refreshing) {
+      // SSE notifications can arrive while a bounded snapshot is in flight.
+      // Preserve one follow-up pass so the event is never silently dropped.
+      refreshQueued = true;
+      return;
+    }
     refreshing = true;
     try {
-      const query = cursor
-        ? `?afterRevisionId=${encodeURIComponent(cursor)}`
-        : "";
-      const response = await fetch(`/api/runtime${query}`, {
+      const query = new URLSearchParams();
+      if (cursor) query.set("afterRevisionId", cursor);
+      for (const [name, value] of Object.entries(runtimeQuery())) {
+        if (value !== undefined && value !== null) query.set(name, String(value));
+      }
+      const queryString = query.toString();
+      const response = await fetch(`/api/runtime${queryString ? `?${queryString}` : ""}`, {
         cache: "no-store",
       });
       if (!response.ok) {
@@ -114,16 +139,32 @@ export function initMessageSync({
       persist();
     } catch {
       reportConnection(false);
-      // A later poll recovers after a daemon restart or brief disconnect.
+      // The event stream's next open event retries this cursor-based recovery.
     } finally {
       refreshing = false;
+      if (refreshQueued) {
+        refreshQueued = false;
+        void refresh();
+      }
     }
   }
 
   function start() {
-    clearInterval(pollTimer);
+    eventSource?.close();
+    eventSource = new EventSource("/api/events");
+    eventSource.addEventListener("open", () => {
+      reportConnection(true);
+      void refresh();
+    });
+    eventSource.addEventListener("runtime", () => {
+      void refresh();
+    });
+    eventSource.addEventListener("error", () => {
+      reportConnection(false);
+      // EventSource reconnects with browser-managed backoff. An `open` event
+      // always follows with one cursor-based refresh to close any gap.
+    });
     refresh();
-    pollTimer = setInterval(refresh, 2500);
   }
 
   function remove(revisionIds) {
@@ -233,6 +274,18 @@ export function initMessageSync({
     );
     document.title = count ? `(${count}) ${BASE_TITLE}` : BASE_TITLE;
     notifyNative({ type: "unread", count });
+    renderUnreadDivider();
+  }
+
+  function renderUnreadDivider() {
+    conversation.querySelector(".conversation-unread-divider")?.remove();
+    const firstUnread = [...unreadElements.values()].find((element) => element.isConnected);
+    if (!firstUnread) return;
+    const divider = document.createElement("div");
+    divider.className = "conversation-unread-divider";
+    divider.setAttribute("role", "separator");
+    divider.textContent = "上次读到这里 · 以下为新内容";
+    firstUnread.before(divider);
   }
 
   function reportConnection(connected) {
@@ -285,7 +338,15 @@ export function initMessageSync({
   document.addEventListener("visibilitychange", scheduleReadCheck);
 
   renderUnread();
-  return { completeBootstrap, remove, start, track, refresh };
+  return {
+    completeBootstrap,
+    refresh,
+    refreshUnreadPresentation: renderUnreadDivider,
+    remove,
+    start,
+    track,
+    trackSignal,
+  };
 }
 
 function notifyNative(payload) {

@@ -101,6 +101,12 @@
           aria-live="polite"
           aria-label="Conversation"
         >
+          <button
+            id="load-earlier-messages"
+            class="load-earlier-messages"
+            type="button"
+            hidden
+          >加载更早消息</button>
           <section id="onboarding" class="onboarding" hidden>
             <header>
               <p class="section-label">INITIAL ORIENTATION</p>
@@ -957,13 +963,32 @@
       <header class="dialog-header">
         <div>
           <h2>输入简报</h2>
-          <p>外部角色带回的内容与关联异议；不会写入 PCP。</p>
+          <p>按角色或主题与日期浏览外部输入。</p>
         </div>
         <button class="icon-button" data-close="input-briefing-dialog" type="button" aria-label="关闭">×</button>
       </header>
       <div class="input-briefing-shell">
         <nav id="input-briefing-roles" class="input-briefing-roles" aria-label="外部输入角色"></nav>
         <section class="input-briefing-feed">
+          <div class="input-briefing-controls">
+            <nav class="input-briefing-view-tabs" aria-label="简报浏览方式">
+              <button id="input-briefing-view-roles" type="button" aria-label="按角色浏览" title="按角色浏览" aria-pressed="true">◎</button>
+              <button id="input-briefing-view-topics" type="button" aria-label="按主题浏览" title="按主题浏览" aria-pressed="false">#</button>
+            </nav>
+            <div id="input-briefing-topic-actions" class="input-briefing-topic-actions" hidden>
+              <button id="input-briefing-organize-date" class="input-briefing-topic-action" type="button" aria-label="整理当天未归类输入" title="整理当天未归类输入">✦</button>
+              <button id="input-briefing-reclassify-date" class="input-briefing-topic-action" type="button" aria-label="重新整理当天全部输入" title="重新整理当天全部输入">↻</button>
+            </div>
+            <p id="input-briefing-organize-status" class="input-briefing-organize-status" aria-live="polite" hidden></p>
+            <div class="input-briefing-date-controls" aria-label="输入日期">
+              <button id="input-briefing-previous-date" type="button" aria-label="前一天">‹</button>
+              <label>
+                <span>日期</span>
+                <input id="input-briefing-date" type="date" aria-label="选择输入日期">
+              </label>
+              <button id="input-briefing-next-date" type="button" aria-label="后一天">›</button>
+            </div>
+          </div>
           <header id="input-briefing-feed-header" class="input-briefing-feed-header"></header>
           <div id="input-briefing-content" class="input-briefing-content" aria-live="polite"></div>
         </section>

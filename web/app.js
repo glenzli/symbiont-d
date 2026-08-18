@@ -16,6 +16,7 @@ import { initComposerContextUi } from "/composer-context-ui.js";
 import { initVoiceInput } from "/voice-input.js";
 import { initMessageActions } from "/message-actions.js";
 import { initMessageSync } from "/message-sync.js";
+import { initMessageHistory } from "/message-history.js";
 import { initPermissionUi } from "/permission-ui.js";
 import { initQuoteUi, quoteDraft } from "/quote-ui.js";
 import { initSettings } from "/settings.js";
@@ -56,6 +57,7 @@ const appState = {
     codexTaskAccess: false,
   },
   signals: [],
+  signalsVersion: 0,
   permissions: [],
 };
 
@@ -86,6 +88,7 @@ const connectionStatus = document.querySelector("#connection-status");
 const memorySize = document.querySelector("#memory-size");
 const tokenTotal = document.querySelector("#token-total");
 const messageTemplate = document.querySelector("#message-template");
+const loadEarlierMessagesButton = document.querySelector("#load-earlier-messages");
 const scrollToLatestButton = document.querySelector("#scroll-to-latest");
 const conversationFocusButton = document.querySelector("#toggle-conversation-focus");
 const conversationFocusLabel = document.querySelector("#conversation-focus-label");
@@ -102,6 +105,8 @@ let selectedImages = [];
 let activeOutgoing = [];
 let activePending = null;
 let typingSignalTimer = null;
+let typingActive = false;
+let composerResizeFrame = null;
 let composerNoticeTimer = null;
 let responseWaitTimer = null;
 let responseDelayTimer = null;
@@ -121,6 +126,8 @@ const inputBriefingUi = initInputBriefingUi({
     input.focus();
     composerState.textContent = "已附上这条观察、发生时间和来源";
   },
+  refreshRuntime: () => messageSync.refresh(),
+  notify: notifyComposer,
 });
 
 const MAX_IMAGES = 4;
@@ -154,6 +161,17 @@ const messageSync = initMessageSync({
   appendMessage,
   applyRuntime,
   shouldDeferMessages: () => busy,
+  runtimeQuery: () => ({ signalsVersion: appState.signalsVersion }),
+});
+const messageHistory = initMessageHistory({
+  conversation,
+  button: loadEarlierMessagesButton,
+  prependMessages(messages) {
+    for (const message of [...messages].reverse()) {
+      appendMessage(message, { history: true, prepend: true, scroll: false });
+    }
+  },
+  notify: notifyComposer,
 });
 const messageActions = initMessageActions({
   conversation,
@@ -314,8 +332,15 @@ function appendMessage(entry, options = {}) {
     foot.querySelector(".message-runtime").textContent = "临时";
     foot.hidden = false;
   }
-  target.append(fragment);
-  const element = target.lastElementChild;
+  if (options.prepend && target === conversation) {
+    const firstTimelineItem = target.querySelector(
+      ":scope > .message, :scope > .input-signal, :scope > .input-signal-group, :scope > .conversation-notice",
+    );
+    target.insertBefore(fragment, firstTimelineItem);
+  } else {
+    target.append(fragment);
+  }
+  const element = article;
   if (target === conversation && !options.temporary) {
     messageSync.track(element, entry, options);
     messageActions.track(element, entry, {
@@ -455,6 +480,7 @@ function appendInputSignal(signal, options = {}) {
         composerState.textContent = "";
       }
       appState.signals = appState.signals.filter((item) => item.id !== signal.id);
+      messageSync.remove([`signal:${signal.id}`]);
       article.remove();
       inputSignalRelations.refresh();
       regroupInputSignals(conversation);
@@ -529,11 +555,13 @@ function appendInputSignal(signal, options = {}) {
   }
   footInfo.append(title);
   if (detailsBar.childElementCount) footInfo.append(detailsBar);
+  enableExclusiveInputSignalDetails(detailsBar);
   foot.append(footInfo, actions);
   content.append(foot);
   layout.append(avatar, content);
   article.append(layout);
   conversation.append(article);
+  messageSync.trackSignal(article, signal, options);
   inputSignalRelations.refresh();
   regroupInputSignals(conversation);
   inputSignalRelations.scheduleLines();
@@ -541,6 +569,26 @@ function appendInputSignal(signal, options = {}) {
   if (options.scroll !== false) conversation.scrollTop = conversation.scrollHeight;
   return article;
 }
+
+function enableExclusiveInputSignalDetails(detailsBar) {
+  for (const detail of detailsBar.querySelectorAll("details")) {
+    detail.addEventListener("toggle", () => {
+      if (!detail.open) return;
+      for (const other of detailsBar.querySelectorAll("details[open]")) {
+        if (other !== detail) other.open = false;
+      }
+    });
+  }
+}
+
+function closeInputSignalDetailsFromOutside(event) {
+  for (const detail of document.querySelectorAll(".input-signal-detail[open]")) {
+    if (!detail.contains(event.target)) detail.open = false;
+  }
+}
+
+document.addEventListener("pointerdown", closeInputSignalDetailsFromOutside);
+document.addEventListener("click", closeInputSignalDetailsFromOutside);
 
 window.addEventListener("input-roles-updated", (event) => {
   for (const role of event.detail?.roles || []) {
@@ -692,8 +740,12 @@ function appendConnectionRecoveryNotice(error, retry) {
 }
 
 function resizeComposer() {
-  input.style.height = "auto";
-  input.style.height = `${Math.min(input.scrollHeight, 140)}px`;
+  if (composerResizeFrame !== null) return;
+  composerResizeFrame = requestAnimationFrame(() => {
+    composerResizeFrame = null;
+    input.style.height = "auto";
+    input.style.height = `${Math.min(input.scrollHeight, 140)}px`;
+  });
 }
 
 function setBusy(nextBusy) {
@@ -703,6 +755,8 @@ function setBusy(nextBusy) {
   stopResponseButton.hidden = !nextBusy;
   messageActions.refresh();
   if (!nextBusy) {
+    signalTyping(false);
+    void messageSync.refresh();
     stoppingResponse = false;
     stopResponseButton.disabled = false;
     renderRuntimeStatus();
@@ -843,7 +897,39 @@ function setRuntimeStatus(message, state = "idle") {
   appStatusBar.dataset.runtimeState = state;
 }
 
+const runtimeFingerprints = new Map();
+
+function runtimeValueChanged(name, value) {
+  const next = JSON.stringify(value ?? null);
+  if (runtimeFingerprints.get(name) === next) return false;
+  runtimeFingerprints.set(name, next);
+  return true;
+}
+
 function applyRuntime(payload) {
+  const identityChanged = runtimeValueChanged("identity", payload.identity);
+  const usageChanged = runtimeValueChanged("usage", payload.usage);
+  const inputRolesChanged = runtimeValueChanged("inputRoles", payload.inputRoles);
+  const audioTranscriptionChanged = runtimeValueChanged(
+    "audioTranscription",
+    payload.audioTranscription,
+  );
+  const explorationChanged = runtimeValueChanged("exploration", payload.exploration);
+  const attackerChanged = runtimeValueChanged("attacker", payload.attacker);
+  const reflectionChanged = runtimeValueChanged("reflection", payload.reflection);
+  const reconciliationChanged = runtimeValueChanged(
+    "reconciliation",
+    payload.reconciliation,
+  );
+  const conversationChanged = runtimeValueChanged("conversation", payload.conversation);
+  const permissionsChanged = runtimeValueChanged("permissions", payload.permissions);
+  const bridgeChanged = runtimeValueChanged("bridge", payload.bridge);
+  const turnDispositionsChanged = runtimeValueChanged(
+    "turnDispositions",
+    payload.turnDispositions,
+  );
+  const signalsChanged = Array.isArray(payload.signals);
+
   appState.identity = payload.identity || appState.identity;
   appState.usage = payload.usage || appState.usage;
   appState.ambient = payload.ambient || appState.ambient;
@@ -871,32 +957,41 @@ function applyRuntime(payload) {
   appState.permissions = payload.permissions || appState.permissions;
   appState.bridge = payload.bridge || appState.bridge;
   appState.signalRetention = payload.signalRetention || appState.signalRetention;
-  if (payload.signals) {
+  if (typeof payload.signalsVersion === "number") {
+    appState.signalsVersion = payload.signalsVersion;
+  }
+  if (signalsChanged) {
     appState.signals = payload.signals;
     const liveSignalIds = new Set(payload.signals.map((signal) => signal.id));
     for (const article of conversation.querySelectorAll(".input-signal[data-signal-id]")) {
       if (!liveSignalIds.has(article.dataset.signalId)) {
         displayedSignalIds.delete(article.dataset.signalId);
+        messageSync.remove([`signal:${article.dataset.signalId}`]);
         article.remove();
       }
     }
-    for (const signal of payload.signals) appendInputSignal(signal, { scroll: false });
+    for (const signal of payload.signals) {
+      appendInputSignal(signal, { incoming: true, scroll: false });
+    }
     inputSignalRelations.refresh();
     regroupInputSignals(conversation);
+    messageSync.refreshUnreadPresentation();
     inputSignalRelations.scheduleLines();
   }
-  inputBriefingUi.render();
-  renderUsage();
-  renderRuntimeStatus();
-  identityUi.render();
-  inputRoleUi.render();
-  reflectionUi.renderRuntime();
-  reconciliationUi.runtimeUpdated();
-  explorationUi.runtimeUpdated();
-  composerContextUi.configUpdated();
-  permissionUi.render();
-  voiceInput.configUpdated();
-  turnDispositionUi.applyAll(payload.turnDispositions);
+  if (signalsChanged || inputRolesChanged) inputBriefingUi.render();
+  if (usageChanged) renderUsage();
+  if (explorationChanged || attackerChanged || reflectionChanged || conversationChanged) {
+    renderRuntimeStatus();
+  }
+  if (identityChanged) identityUi.render();
+  if (inputRolesChanged) inputRoleUi.render();
+  if (reflectionChanged) reflectionUi.renderRuntime();
+  if (reconciliationChanged) reconciliationUi.runtimeUpdated();
+  if (explorationChanged) explorationUi.runtimeUpdated();
+  if (bridgeChanged) composerContextUi.configUpdated();
+  if (permissionsChanged) permissionUi.render();
+  if (audioTranscriptionChanged) voiceInput.configUpdated();
+  if (turnDispositionsChanged) turnDispositionUi.applyAll(payload.turnDispositions);
 }
 
 async function bootstrap() {
@@ -914,12 +1009,17 @@ async function bootstrap() {
       })),
     ].sort((left, right) => String(left.at).localeCompare(String(right.at)));
     timeline.forEach((item) => {
-      if (item.kind === "signal") appendInputSignal(item.value, { scroll: false });
+      if (item.kind === "signal") appendInputSignal(item.value, { history: true, scroll: false });
       else appendMessage(item.value, { scroll: false });
+    });
+    messageHistory.configure({
+      oldestAt: state.messages[0]?.at,
+      hasMore: state.historyHasMore,
     });
     inputBriefingUi.render();
     turnDispositionUi.applyAll(state.turnDispositions);
-    messageSync.completeBootstrap(state.messages);
+    messageSync.completeBootstrap(state.messages, state.signals || []);
+    messageSync.refreshUnreadPresentation();
     try {
       await ephemeralDiscussionUi.restore();
     } catch (error) {
@@ -1350,16 +1450,27 @@ function chatBody(
 
 function signalTyping(typing) {
   clearTimeout(typingSignalTimer);
-  if (!busy) return;
+  if (typing) {
+    if (!busy) return;
+    if (!typingActive) {
+      typingActive = true;
+      sendTypingSignal(true);
+    }
+    typingSignalTimer = setTimeout(() => signalTyping(false), 2200);
+    return;
+  }
+  if (!typingActive) return;
+  typingActive = false;
+  sendTypingSignal(false);
+}
+
+function sendTypingSignal(typing) {
   fetch("/api/interaction/typing", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ typing }),
     keepalive: true,
   }).catch(() => {});
-  if (typing) {
-    typingSignalTimer = setTimeout(() => signalTyping(false), 2200);
-  }
 }
 
 function notifyComposer(message) {

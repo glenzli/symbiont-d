@@ -57,7 +57,7 @@
 
 ### 运行
 
-当前原型需要：Rust 1.88+、已登录的 Codex CLI，以及同级 checkout 的 [PCP 仓库](https://github.com/glenzli/paged-context-protocol)。语音输入和部分无状态后台判断可选用 [infer-runtime](https://github.com/glenzli/infer-runtime)。
+当前原型需要：Rust 1.88+、已登录的 Codex CLI，以及用于构建客户端依赖的同级 [PCP 仓库](https://github.com/glenzli/paged-context-protocol)。PCP Runtime 与 Console 由 PCP 自己独立安装和托管；Symbiont-d 只通过发现与已批准的 enrollment 连接它。语音输入和部分无状态后台判断可选用 [infer-runtime](https://github.com/glenzli/infer-runtime)。
 
 ```bash
 cargo run
@@ -69,7 +69,7 @@ cargo run
 ./scripts/service-install.sh
 ```
 
-安装脚本会配置身份绑定的 PCP Runtime、只读 PCP Console 与 symbiont-d；卸载不会删除本地数据。
+安装脚本只配置 symbiont-d。请先通过 PCP 自己的安装入口启动 Runtime 与 Console，并在 Console 中批准 Symbiont-d 的注册；卸载 Symbiont-d 不会触及 PCP 或本地数据。
 
 <p align="right"><a href="#en">English ↓</a></p>
 
@@ -124,7 +124,7 @@ outside world / your conversation / selected Codex context
 
 ### Run it
 
-This prototype needs Rust 1.88+, a signed-in Codex CLI, and a sibling checkout of the [PCP repository](https://github.com/glenzli/paged-context-protocol). Voice input and some stateless background judgments can additionally use [infer-runtime](https://github.com/glenzli/infer-runtime).
+This prototype needs Rust 1.88+, a signed-in Codex CLI, and a sibling checkout of the [PCP repository](https://github.com/glenzli/paged-context-protocol) for the client build dependency. PCP Runtime and Console are installed and managed independently by PCP itself; Symbiont-d reaches them only through discovery and approved enrollment. Voice input and some stateless background judgments can additionally use [infer-runtime](https://github.com/glenzli/infer-runtime).
 
 ```bash
 cargo run
@@ -136,6 +136,6 @@ Then open <http://127.0.0.1:4317>. To keep it running as a local service:
 ./scripts/service-install.sh
 ```
 
-The installer configures an identity-bound PCP Runtime, a read-only PCP Console, and symbiont-d. Removing the service preserves local data.
+The installer configures symbiont-d only. Start Runtime and Console through PCP's own installation path, then approve Symbiont-d in Console; removing this service leaves PCP and local data untouched.
 
 <p align="right"><a href="#zh">中文 ↑</a></p>

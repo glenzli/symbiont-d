@@ -1,7 +1,7 @@
 use std::path::PathBuf;
 
 use anyhow::{Context, Result};
-use chrono::{DateTime, Duration, NaiveDate, SecondsFormat, Utc};
+use chrono::{DateTime, Duration, Local, NaiveDate, SecondsFormat, Utc};
 use serde::{Deserialize, Serialize};
 use tokio::{
     fs,
@@ -75,6 +75,17 @@ pub struct SignalEvent {
     pub related_signal_ids: Vec<String>,
     #[serde(default, alias = "promoted_revision_id")]
     pub promoted_revision_id: Option<String>,
+    /// A best-effort, local-only browsing label. It never affects routing,
+    /// publication, or the durable PCP projection.
+    #[serde(default, alias = "briefing_topic")]
+    pub briefing_topic: Option<String>,
+    #[serde(default, alias = "briefing_topic_status")]
+    pub briefing_topic_status: BriefingTopicStatus,
+    /// Records that a local topic pass has reached a final result, including
+    /// an intentional `未归类` outcome. This prevents manual day re-runs from
+    /// repeatedly sending the same input to the local model.
+    #[serde(default, alias = "briefing_topic_reviewed")]
+    pub briefing_topic_reviewed: bool,
     #[serde(default)]
     pub hidden: bool,
     /// Explicit user dismissal is distinct from the legacy promotion path,
@@ -89,6 +100,27 @@ pub enum SignalKind {
     #[default]
     ExternalInput,
     AttackerChallenge,
+}
+
+#[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum BriefingTopicStatus {
+    /// Older records and inputs a completed local pass could not confidently
+    /// name remain readable in the `未归类` topic.
+    #[default]
+    Unclassified,
+    /// A newly published input is waiting for the bounded local classifier.
+    Pending,
+    Classified,
+    /// The local runtime did not produce a usable result. This is a visible
+    /// availability state, never a reason to block the input itself.
+    Unavailable,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct BriefingTopicAssignment {
+    pub(crate) signal_id: String,
+    pub(crate) topic: String,
 }
 
 /// Bounded, read-only comparison material for the existing ambient review.
@@ -221,6 +253,9 @@ impl SignalStore {
             review_reason: review_reason.trim().to_owned(),
             related_signal_ids: Vec::new(),
             promoted_revision_id: None,
+            briefing_topic: None,
+            briefing_topic_status: BriefingTopicStatus::Pending,
+            briefing_topic_reviewed: false,
             hidden: false,
             dismissed: false,
         };
@@ -291,6 +326,9 @@ impl SignalStore {
             review_reason: reason.trim().to_owned(),
             related_signal_ids: related,
             promoted_revision_id: None,
+            briefing_topic: None,
+            briefing_topic_status: BriefingTopicStatus::Unclassified,
+            briefing_topic_reviewed: false,
             hidden: false,
             dismissed: false,
         };
@@ -319,6 +357,135 @@ impl SignalStore {
             self.persist().await?;
         }
         Ok(signals.into_iter().rev().collect())
+    }
+
+    /// Returns today's still-visible external inputs for the ephemeral briefing
+    /// projection. Topics are intentionally assigned only within this narrow
+    /// local-day window unless the user explicitly asks to reorganize that day.
+    pub async fn briefing_inputs_for_local_day(&self, day: NaiveDate) -> Vec<SignalEvent> {
+        let document = self.document.read().await;
+        document
+            .signals
+            .iter()
+            .filter(|signal| {
+                signal.kind == SignalKind::ExternalInput
+                    && !signal.hidden
+                    && !signal.dismissed
+                    && DateTime::parse_from_rfc3339(&signal.observed_at)
+                        .map(|observed_at| observed_at.with_timezone(&Local).date_naive() == day)
+                        .unwrap_or(false)
+            })
+            .cloned()
+            .collect()
+    }
+
+    /// Queues a user-requested, bounded day backfill. Already reviewed inputs,
+    /// including those deliberately left unclassified, are not reconsidered.
+    pub async fn queue_unreviewed_briefing_topics_for_local_day(
+        &self,
+        day: NaiveDate,
+    ) -> Result<usize> {
+        let mut document = self.document.write().await;
+        let mut changed = 0;
+        for signal in &mut document.signals {
+            if is_visible_briefing_input_on_day(signal, day)
+                && signal.briefing_topic.is_none()
+                && !signal.briefing_topic_reviewed
+                && signal.briefing_topic_status != BriefingTopicStatus::Pending
+            {
+                signal.briefing_topic_status = BriefingTopicStatus::Pending;
+                changed += 1;
+            }
+        }
+        drop(document);
+        if changed > 0 {
+            self.persist().await?;
+            self.notify_changed();
+        }
+        Ok(changed)
+    }
+
+    /// Explicitly clears the visible day's topic projection and queues every
+    /// input for one fresh local classification pass. This never runs as part
+    /// of ordinary background processing, so existing labels stay stable until
+    /// the user chooses to reorganize the selected day.
+    pub async fn requeue_all_briefing_topics_for_local_day(&self, day: NaiveDate) -> Result<usize> {
+        let mut document = self.document.write().await;
+        let mut changed = 0;
+        for signal in &mut document.signals {
+            if !is_visible_briefing_input_on_day(signal, day) {
+                continue;
+            }
+            signal.briefing_topic = None;
+            signal.briefing_topic_status = BriefingTopicStatus::Pending;
+            signal.briefing_topic_reviewed = false;
+            changed += 1;
+        }
+        drop(document);
+        if changed > 0 {
+            self.persist().await?;
+            self.notify_changed();
+        }
+        Ok(changed)
+    }
+
+    /// Finalizes one bounded local classification attempt. Existing labels are
+    /// never replaced; unlabeled pending inputs become plainly unclassified if
+    /// the model omitted them.
+    pub async fn settle_briefing_topics_for_local_day(
+        &self,
+        day: NaiveDate,
+        assignments: &[BriefingTopicAssignment],
+    ) -> Result<usize> {
+        let assignments = assignments
+            .iter()
+            .map(|assignment| (&assignment.signal_id, &assignment.topic))
+            .collect::<std::collections::HashMap<_, _>>();
+        let mut document = self.document.write().await;
+        let mut changed = 0;
+        for signal in &mut document.signals {
+            if !is_pending_briefing_input_on_day(signal, day) {
+                continue;
+            }
+            if signal.briefing_topic.is_none() {
+                if let Some(topic) = assignments.get(&signal.id) {
+                    signal.briefing_topic = Some((*topic).clone());
+                    signal.briefing_topic_status = BriefingTopicStatus::Classified;
+                } else {
+                    signal.briefing_topic_status = BriefingTopicStatus::Unclassified;
+                }
+                signal.briefing_topic_reviewed = true;
+                changed += 1;
+            }
+        }
+        drop(document);
+        if changed > 0 {
+            self.persist().await?;
+            self.notify_changed();
+        }
+        Ok(changed)
+    }
+
+    /// Stops a pending indicator after the local classifier is unavailable or
+    /// superseded. The input remains available under `未归类`.
+    pub async fn mark_briefing_topics_unavailable_for_local_day(
+        &self,
+        day: NaiveDate,
+    ) -> Result<usize> {
+        let mut document = self.document.write().await;
+        let mut changed = 0;
+        for signal in &mut document.signals {
+            if is_pending_briefing_input_on_day(signal, day) {
+                signal.briefing_topic_status = BriefingTopicStatus::Unavailable;
+                changed += 1;
+            }
+        }
+        drop(document);
+        if changed > 0 {
+            self.persist().await?;
+            self.notify_changed();
+        }
+        Ok(changed)
     }
 
     /// Removes unadopted external inputs after the user-selected lifetime.
@@ -404,6 +571,14 @@ impl SignalStore {
 
     pub fn subscribe(&self) -> watch::Receiver<u64> {
         self.changes.subscribe()
+    }
+
+    /// Monotonically changes when the visible signal projection can change.
+    ///
+    /// The web runtime uses this to avoid serializing and rebuilding the
+    /// transient signal timeline on every heartbeat.
+    pub fn revision(&self) -> u64 {
+        *self.changes.borrow()
     }
 
     pub async fn deduplication_references(&self) -> Vec<SignalDeduplicationReference> {
@@ -577,6 +752,20 @@ fn observed_before(signal: &SignalEvent, cutoff: DateTime<Utc>) -> bool {
         .unwrap_or(true)
 }
 
+fn is_pending_briefing_input_on_day(signal: &SignalEvent, day: NaiveDate) -> bool {
+    is_visible_briefing_input_on_day(signal, day)
+        && signal.briefing_topic_status == BriefingTopicStatus::Pending
+}
+
+fn is_visible_briefing_input_on_day(signal: &SignalEvent, day: NaiveDate) -> bool {
+    signal.kind == SignalKind::ExternalInput
+        && !signal.hidden
+        && !signal.dismissed
+        && DateTime::parse_from_rfc3339(&signal.observed_at)
+            .map(|observed_at| observed_at.with_timezone(&Local).date_naive() == day)
+            .unwrap_or(false)
+}
+
 fn event_is_too_old(event_at: Option<&str>, now: DateTime<Utc>) -> bool {
     let Some(event_at) = event_at else {
         return false;
@@ -637,11 +826,13 @@ fn timestamp(value: DateTime<Utc>) -> String {
 mod tests {
     use std::time::{SystemTime, UNIX_EPOCH};
 
-    use super::{SignalPublishOutcome, SignalStore, timestamp};
+    use super::{
+        BriefingTopicAssignment, BriefingTopicStatus, SignalPublishOutcome, SignalStore, timestamp,
+    };
     use crate::sensing::{
         InputRoleSnapshot, SensingCandidate, SensingPresentation, SensingSource, SensingSourceClass,
     };
-    use chrono::{Duration, Utc};
+    use chrono::{Duration, Local, Utc};
 
     fn candidate(id: &str) -> SensingCandidate {
         SensingCandidate {
@@ -727,6 +918,108 @@ mod tests {
         assert_eq!(published.received_text, "A model input.");
         assert_eq!(published.presentation, SensingPresentation::Condensed);
         assert!(published.qualification_note.is_some());
+        let _ = tokio::fs::remove_file(path).await;
+    }
+
+    #[tokio::test]
+    async fn local_briefing_topic_status_settles_without_affecting_input_visibility() {
+        let nonce = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let path = std::env::temp_dir().join(format!("symbiont-signals-topic-{nonce}.json"));
+        let store = SignalStore::open(path.clone()).await.unwrap();
+        let first = candidate("sense_topic_first");
+        store
+            .publish_with_content(&first, first.proposed_input.clone(), "credible".to_owned())
+            .await
+            .unwrap();
+        let published = store.visible(10).await.unwrap().remove(0);
+        assert_eq!(
+            published.briefing_topic_status,
+            BriefingTopicStatus::Pending
+        );
+
+        let day = Local::now().date_naive();
+        assert_eq!(
+            store
+                .settle_briefing_topics_for_local_day(
+                    day,
+                    &[BriefingTopicAssignment {
+                        signal_id: published.id.clone(),
+                        topic: "本地模型".to_owned(),
+                    }],
+                )
+                .await
+                .unwrap(),
+            1
+        );
+        let settled = store.get(&published.id).await.unwrap().unwrap();
+        assert_eq!(settled.briefing_topic.as_deref(), Some("本地模型"));
+        assert_eq!(
+            settled.briefing_topic_status,
+            BriefingTopicStatus::Classified
+        );
+        assert!(settled.briefing_topic_reviewed);
+        assert_eq!(
+            store
+                .queue_unreviewed_briefing_topics_for_local_day(day)
+                .await
+                .unwrap(),
+            0
+        );
+        assert!(!settled.hidden);
+
+        let second = candidate("sense_topic_second");
+        store
+            .publish_with_content(
+                &second,
+                second.proposed_input.clone(),
+                "credible".to_owned(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            store
+                .mark_briefing_topics_unavailable_for_local_day(day)
+                .await
+                .unwrap(),
+            1
+        );
+        let pending = store
+            .visible(10)
+            .await
+            .unwrap()
+            .into_iter()
+            .find(|signal| signal.candidate_id == "sense_topic_second")
+            .unwrap();
+        assert_eq!(
+            pending.briefing_topic_status,
+            BriefingTopicStatus::Unavailable
+        );
+        assert!(pending.briefing_topic.is_none());
+        assert!(!pending.briefing_topic_reviewed);
+        assert_eq!(
+            store
+                .queue_unreviewed_briefing_topics_for_local_day(day)
+                .await
+                .unwrap(),
+            1
+        );
+        assert_eq!(
+            store
+                .requeue_all_briefing_topics_for_local_day(day)
+                .await
+                .unwrap(),
+            2
+        );
+        let reorganized = store.get(&published.id).await.unwrap().unwrap();
+        assert_eq!(reorganized.briefing_topic, None);
+        assert_eq!(
+            reorganized.briefing_topic_status,
+            BriefingTopicStatus::Pending
+        );
+        assert!(!reorganized.briefing_topic_reviewed);
         let _ = tokio::fs::remove_file(path).await;
     }
 

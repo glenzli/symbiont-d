@@ -370,9 +370,29 @@ html[data-native-shell="macos"] .topbar {
 
 .conversation {
   height: 100%;
+  /* Rich-text tables, equations, and pasted unbroken runs may be wider than a
+   * message. Keep that overflow inside their own scrollable renderers instead
+   * of allowing the transcript itself to acquire a horizontal scroll offset. */
+  overflow-x: hidden;
   overflow-y: auto;
   padding: 20px 16px 28px;
   scroll-behavior: smooth;
+}
+
+.load-earlier-messages {
+  display: block;
+  margin: 0 auto 18px;
+  padding: 7px 12px;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--surface) 92%, var(--button));
+  color: var(--text-soft);
+  cursor: pointer;
+}
+
+.load-earlier-messages:hover:not(:disabled) {
+  color: var(--text);
+  border-color: var(--button);
 }
 
 .conversation.is-conversation-focused > :is(.input-signal, .input-signal-group) {
@@ -753,6 +773,8 @@ html[data-native-shell="macos"] .topbar {
 
 .message {
   width: min(740px, 92%);
+  min-width: 0;
+  max-width: 100%;
   margin: 0 0 17px;
 }
 
@@ -1006,7 +1028,7 @@ html[data-native-shell="macos"] .topbar {
   .input-signal-qualification,
   .input-signal-sources
 ) {
-  opacity: 0.82;
+  opacity: 1;
 }
 
 .input-signal-details {
@@ -1058,14 +1080,14 @@ html[data-native-shell="macos"] .topbar {
   margin: 5px 0 0;
   padding: 8px 9px;
   position: absolute;
-  z-index: 8;
+  z-index: 20;
   top: 100%;
   left: 0;
   overflow: auto;
   border: 1px solid var(--border);
   border-radius: 6px;
-  background: var(--surface-raised);
-  box-shadow: 0 8px 20px rgb(0 0 0 / 10%);
+  background: var(--surface);
+  box-shadow: 0 10px 24px rgb(0 0 0 / 18%);
   color: var(--text-soft);
   font-size: 10px;
   line-height: 1.5;
@@ -1290,6 +1312,8 @@ html[data-native-shell="macos"] .topbar {
 }
 
 .message-layout {
+  min-width: 0;
+  max-width: 100%;
   display: flex;
   align-items: flex-start;
   gap: 8px;
@@ -1365,12 +1389,34 @@ html[data-native-shell="macos"] .topbar {
   box-shadow: inset 2px 0 0 var(--text-soft);
 }
 
+.conversation-unread-divider {
+  width: min(740px, 92%);
+  margin: 3px 0 12px;
+  padding: 5px 0;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  color: var(--text-soft);
+  font-size: 10px;
+  font-weight: 650;
+}
+
+.conversation-unread-divider::before,
+.conversation-unread-divider::after {
+  height: 1px;
+  flex: 1 1 auto;
+  background: var(--border-strong);
+  content: "";
+}
+
 .speaker {
   color: var(--text-soft);
   font-weight: 650;
 }
 
 .message-body {
+  min-width: 0;
+  max-width: 100%;
   min-height: 34px;
   margin: 0;
   padding: 8px 10px;
@@ -3062,7 +3108,7 @@ html[data-native-shell="macos"] .topbar {
 .input-briefing-shell {
   min-height: 0;
   display: grid;
-  grid-template-columns: 178px minmax(0, 1fr);
+  grid-template-columns: 148px minmax(0, 1fr);
   flex: 1 1 auto;
   overflow: hidden;
 }
@@ -3127,6 +3173,151 @@ html[data-native-shell="macos"] .topbar {
   min-height: 0;
   display: flex;
   flex-direction: column;
+}
+
+.input-briefing-controls {
+  min-height: 42px;
+  padding: 7px 15px;
+  display: grid;
+  grid-template-columns: max-content minmax(0, 1fr) max-content;
+  grid-template-areas:
+    "tabs organize date"
+    "status status status";
+  align-items: center;
+  column-gap: 8px;
+  row-gap: 4px;
+  border-bottom: 1px solid var(--border);
+}
+
+.input-briefing-view-tabs,
+.input-briefing-date-controls {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  min-width: 0;
+  white-space: nowrap;
+}
+
+.input-briefing-view-tabs {
+  grid-area: tabs;
+}
+
+.input-briefing-date-controls {
+  grid-area: date;
+}
+
+.input-briefing-view-tabs button {
+  flex: 0 0 auto;
+  width: 26px;
+  height: 26px;
+  padding: 0;
+  border: 1px solid transparent;
+  border-radius: 5px;
+  color: var(--text-faint);
+  background: transparent;
+  cursor: pointer;
+  font-size: 14px;
+}
+
+.input-briefing-view-tabs button:hover,
+.input-briefing-view-tabs button[aria-pressed="true"] {
+  border-color: var(--border);
+  color: var(--text);
+  background: var(--surface-subtle);
+}
+
+.input-briefing-topic-actions {
+  grid-area: organize;
+  display: flex;
+  gap: 5px;
+  justify-self: start;
+}
+
+.input-briefing-topic-action {
+  width: 26px;
+  height: 26px;
+  margin: 0;
+  padding: 0;
+  border: 1px solid var(--border);
+  border-radius: 5px;
+  color: var(--text-soft);
+  background: var(--surface-subtle);
+  cursor: pointer;
+  font-size: 14px;
+}
+
+.input-briefing-topic-action:hover:not(:disabled) {
+  color: var(--text);
+  border-color: var(--border-strong);
+}
+
+.input-briefing-topic-action:disabled {
+  cursor: wait;
+  opacity: 0.55;
+}
+
+.input-briefing-organize-status {
+  grid-area: status;
+  margin: 0;
+  color: var(--text-soft);
+  font-size: 10px;
+  line-height: 1.35;
+}
+
+.input-briefing-organize-status.is-problem {
+  color: var(--text);
+  font-weight: 600;
+}
+
+.input-briefing-date-controls button {
+  width: 26px;
+  height: 26px;
+  padding: 0;
+  border: 1px solid var(--border);
+  border-radius: 5px;
+  color: var(--text-soft);
+  background: var(--surface-subtle);
+  cursor: pointer;
+  font-size: 17px;
+  line-height: 1;
+}
+
+.input-briefing-date-controls button:hover:not(:disabled) {
+  color: var(--text);
+  border-color: var(--border-strong);
+}
+
+.input-briefing-date-controls button:disabled {
+  cursor: default;
+  opacity: 0.42;
+}
+
+.input-briefing-date-controls label {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  color: var(--text-faint);
+  font-size: 9px;
+}
+
+.input-briefing-date-controls input {
+  min-height: 26px;
+  padding: 2px 5px;
+  border: 1px solid var(--border);
+  border-radius: 5px;
+  color: var(--text-soft);
+  background: var(--surface-subtle);
+  font: inherit;
+}
+
+@media (max-width: 760px) {
+  .input-briefing-controls {
+    grid-template-columns: minmax(0, 1fr) max-content;
+    grid-template-areas:
+      "tabs date"
+      "organize organize"
+      "status status";
+  }
 }
 
 .input-briefing-feed-header {

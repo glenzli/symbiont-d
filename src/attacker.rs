@@ -597,6 +597,9 @@ mod tests {
             review_reason: "visible in the chat".to_owned(),
             related_signal_ids: vec![],
             promoted_revision_id: None,
+            briefing_topic: None,
+            briefing_topic_status: crate::signals::BriefingTopicStatus::Unclassified,
+            briefing_topic_reviewed: false,
             hidden: false,
             dismissed: false,
         };
@@ -647,6 +650,9 @@ mod tests {
             review_reason: "already visible".to_owned(),
             related_signal_ids: vec![],
             promoted_revision_id: None,
+            briefing_topic: None,
+            briefing_topic_status: crate::signals::BriefingTopicStatus::Unclassified,
+            briefing_topic_reviewed: false,
             hidden: false,
             dismissed: false,
         }];

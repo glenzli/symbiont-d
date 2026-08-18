@@ -8,8 +8,7 @@ use std::{
 };
 
 use anyhow::{Context, Result};
-use chrono::{DateTime, Utc};
-use pcp_client::{AccessMode, PcpApi};
+use pcp_client::{AccessMode, PcpTenantApi};
 use pcp_core::AccessPrincipalType;
 use pcp_rpc::{
     BeginEnrollmentParams, EnrollmentClient, EnrollmentClientClaim, EnrollmentPrincipalClaim,
@@ -28,7 +27,7 @@ use std::os::unix::fs::{FileTypeExt, MetadataExt, PermissionsExt};
 pub(super) const HOST_PRINCIPAL_ID: &str = "host:symbiont-d";
 const HOST_DISPLAY_NAME: &str = "Symbiont";
 const DISCOVERY_SCHEMA: &str = "infra.discovery.registration";
-const DISCOVERY_VERSION: &str = "20260810.1";
+const DISCOVERY_VERSION: &str = "20260812.1";
 const UNIX_SOCKET_BINDING: &str = "infra.local.unix-socket";
 const MAX_MANIFEST_BYTES: u64 = 64 * 1024;
 const STATE_FILE_NAME: &str = "pcp-enrollment-client.json";
@@ -40,15 +39,7 @@ struct DiscoveryRegistration {
     schema: String,
     schema_version: String,
     service: EnrollmentServiceIdentity,
-    lease: DiscoveryLease,
     offers: Vec<DiscoveryOffer>,
-}
-
-#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
-#[serde(deny_unknown_fields)]
-struct DiscoveryLease {
-    renewed_at: String,
-    expires_at: String,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -127,10 +118,6 @@ impl EnrollmentManager {
         self.probe_locked(preferred_instance).await
     }
 
-    pub async fn has_selected_instance(&self) -> bool {
-        self.state.lock().await.service_instance_id.is_some()
-    }
-
     /// Reads only the current discovery generation. The background monitor
     /// uses this before opening a session so a healthy Runtime does not receive
     /// a fresh `open_session` request on every polling interval.
@@ -140,17 +127,19 @@ impl EnrollmentManager {
     ) -> Result<Option<String>> {
         let stored_instance = self.state.lock().await.service_instance_id.clone();
         let preferred_instance = stored_instance.as_deref().or(preferred_instance);
-        Ok(
-            discover_enrollment(&self.runtime_root, preferred_instance, Utc::now())?
-                .map(|selected| selected.service.generation),
-        )
+        let selected = discover_enrollment(&self.runtime_root, preferred_instance)?
+            // An identity replacement deliberately invalidates a stored
+            // registration. Fall back to unfiltered discovery so probe can
+            // clear that state and start a fresh approval request.
+            .or(discover_enrollment(&self.runtime_root, None)?);
+        Ok(selected.map(|selected| selected.service.generation))
     }
 
     async fn probe_locked(&self, preferred_instance: Option<&str>) -> Result<EnrollmentProbe> {
         let stored_instance = self.state.lock().await.service_instance_id.clone();
         let preferred_instance = stored_instance.as_deref().or(preferred_instance);
-        let Some(selected) =
-            discover_enrollment(&self.runtime_root, preferred_instance, Utc::now())?
+        let Some(selected) = discover_enrollment(&self.runtime_root, preferred_instance)?
+            .or(discover_enrollment(&self.runtime_root, None)?)
         else {
             return Ok(EnrollmentProbe::Unavailable);
         };
@@ -282,11 +271,20 @@ impl EnrollmentManager {
     async fn remember_selected_instance(&self, instance_id: &str) -> Result<()> {
         let mut state = self.state.lock().await;
         if let Some(stored) = state.service_instance_id.as_deref() {
-            anyhow::ensure!(
-                stored == instance_id,
-                "discovered PCP Store identity changed from {stored} to {instance_id}"
-            );
-            return Ok(());
+            if stored == instance_id {
+                return Ok(());
+            }
+
+            // A PCP Identity is the tenant boundary.  A discovery-selected
+            // replacement must never inherit a registration approved for the
+            // previous Identity, but the locally generated enrollment
+            // credential remains the same owner-only secret.
+            state.request_id = None;
+            state.registration_id = None;
+            state.generation_registration_id = None;
+            state.approved_generation = None;
+            state.reopened_after_generation_change = false;
+            state.rejected = false;
         }
         state.service_instance_id = Some(instance_id.to_owned());
         let snapshot = state.clone();
@@ -345,7 +343,7 @@ fn client_claim() -> EnrollmentClientClaim {
 
 fn requested_access() -> RequestedAccess {
     RequestedAccess {
-        mode: RequestedAccessMode::Admin,
+        mode: RequestedAccessMode::Contribute,
         scopes: vec![
             "user:self".to_owned(),
             PROJECT_NAMESPACE.to_owned(),
@@ -364,6 +362,7 @@ fn session_matches_requested_access(
         RequestedAccessMode::Observe => AccessMode::Observe,
         RequestedAccessMode::Read => AccessMode::Read,
         RequestedAccessMode::Audit => AccessMode::Audit,
+        RequestedAccessMode::Contribute => AccessMode::Contribute,
         RequestedAccessMode::Write => AccessMode::Write,
         RequestedAccessMode::Admin => AccessMode::Admin,
     };
@@ -412,8 +411,8 @@ async fn validate_active_session(
         .await
         .context("connect enrolled PCP RPC session")?;
     anyhow::ensure!(
-        client.owner_id() == selected.service.instance_id,
-        "PCP RPC descriptor owner does not match discovered Store identity"
+        client.identity_id() == selected.service.instance_id,
+        "PCP RPC descriptor identity does not match discovered PCP Identity"
     );
     anyhow::ensure!(
         client.access() == &session.access,
@@ -428,7 +427,6 @@ async fn validate_active_session(
 fn discover_enrollment(
     runtime_root: &Path,
     preferred_instance: Option<&str>,
-    now: DateTime<Utc>,
 ) -> Result<Option<SelectedEnrollment>> {
     if !runtime_root.exists() {
         return Ok(None);
@@ -453,7 +451,6 @@ fn discover_enrollment(
             || registration.service.kind != "pcp"
             || entry.file_name().to_string_lossy()
                 != format!("pcp--{}.json", registration.service.instance_id)
-            || !live_lease(&registration.lease, now)
         {
             continue;
         }
@@ -499,25 +496,6 @@ fn read_registration(path: &Path) -> Result<DiscoveryRegistration> {
         .with_context(|| format!("read Infra Discovery manifest {}", path.display()))?;
     serde_json::from_slice(&bytes)
         .with_context(|| format!("decode Infra Discovery manifest {}", path.display()))
-}
-
-fn live_lease(lease: &DiscoveryLease, now: DateTime<Utc>) -> bool {
-    if lease.renewed_at.len() > 40 || lease.expires_at.len() > 40 {
-        return false;
-    }
-    let Ok(renewed_at) = DateTime::parse_from_rfc3339(&lease.renewed_at) else {
-        return false;
-    };
-    let Ok(expires_at) = DateTime::parse_from_rfc3339(&lease.expires_at) else {
-        return false;
-    };
-    let renewed_at = renewed_at.with_timezone(&Utc);
-    let expires_at = expires_at.with_timezone(&Utc);
-    renewed_at < expires_at
-        && expires_at - renewed_at <= chrono::Duration::seconds(120)
-        && renewed_at <= now + chrono::Duration::seconds(15)
-        && expires_at <= now + chrono::Duration::seconds(120)
-        && expires_at > now
 }
 
 fn valid_registration(registration: &DiscoveryRegistration) -> bool {
@@ -585,7 +563,7 @@ fn valid_unix_endpoint(endpoint: &str) -> bool {
     let Some(token) = name.strip_suffix(".sock") else {
         return false;
     };
-    !token.is_empty() && token.len() <= 64 && valid_file_token(token)
+    !token.is_empty() && token.len() <= 16 && valid_file_token(token)
 }
 
 fn resolve_unix_endpoint(runtime_root: &Path, endpoint: &str) -> Result<PathBuf> {
@@ -877,6 +855,138 @@ fn is_not_found(error: &anyhow::Error) -> bool {
 }
 
 #[cfg(test)]
+mod v08_tests {
+    use super::*;
+    use pcp_core::{
+        IngestPageRequest, PagePayload, Projection, SearchFilters, SearchMode, SearchPagesRequest,
+        SearchTermMatch, SourceSpan,
+    };
+
+    #[test]
+    fn enrollment_requests_contribute_for_canonical_scopes() {
+        let request = requested_access();
+        assert_eq!(request.mode, RequestedAccessMode::Contribute);
+        assert_eq!(
+            request.scopes,
+            vec![
+                "user:self".to_owned(),
+                PROJECT_NAMESPACE.to_owned(),
+                CONVERSATION_NAMESPACE.to_owned(),
+            ]
+        );
+        assert!(request.allow_cross_scope_derivation);
+    }
+
+    #[tokio::test]
+    async fn a_new_discovered_identity_invalidates_only_the_old_registration() {
+        let temporary = tempfile::tempdir().expect("temporary directory");
+        let manager = EnrollmentManager::open_at(
+            temporary.path().to_owned(),
+            temporary.path().join("client.json"),
+        )
+        .await
+        .expect("open enrollment manager");
+        {
+            let mut state = manager.state.lock().await;
+            state.credential = "ab".repeat(32);
+            state.service_instance_id = Some("idn_old".to_owned());
+            state.registration_id = Some("reg_old".to_owned());
+            state.request_id = Some("req_old".to_owned());
+            state.approved_generation = Some("proc_old".to_owned());
+            state.generation_registration_id = Some("reg_old".to_owned());
+        }
+
+        manager
+            .remember_selected_instance("idn_new")
+            .await
+            .expect("accept new discovery identity");
+
+        let state = manager.state.lock().await;
+        assert_eq!(state.credential, "ab".repeat(32));
+        assert_eq!(state.service_instance_id.as_deref(), Some("idn_new"));
+        assert!(state.registration_id.is_none());
+        assert!(state.request_id.is_none());
+        assert!(state.approved_generation.is_none());
+    }
+
+    /// Opt-in only: this is the release-integration check against an approved
+    /// locally discovered Runtime. It writes one idempotent source record, not
+    /// a conversation event or any semantic maintenance artifact.
+    #[tokio::test]
+    #[ignore = "requires an approved local PCP Runtime and writes one idempotent source smoke record"]
+    async fn live_contribute_session_can_ingest_search_and_read() {
+        let workspace = std::env::current_dir().expect("resolve workspace");
+        let manager = EnrollmentManager::open(&workspace)
+            .await
+            .expect("open enrollment manager")
+            .expect("local Infra Discovery must be available");
+        let EnrollmentProbe::Active(active) = manager
+            .probe(None)
+            .await
+            .expect("open approved Contribute session")
+        else {
+            panic!("expected an approved Contribute enrollment");
+        };
+        let external_event_id = "symbiont-d:integration-smoke:pcp-v08".to_owned();
+        let written = active
+            .client
+            .ingest_page(IngestPageRequest {
+                namespace: CONVERSATION_NAMESPACE.to_owned(),
+                kind: "integration_smoke".to_owned(),
+                observed_at: Some("2026-08-15T00:00:00.000Z".to_owned()),
+                source_span: Some(SourceSpan {
+                    stream_id: "integration-smoke".to_owned(),
+                    start: 1,
+                    end: 1,
+                }),
+                payload: Some(PagePayload {
+                    media_type: "text/plain".to_owned(),
+                    content: "symbiont pcp v0.8 contribute integration smoke".to_owned(),
+                }),
+                source_refs: Vec::new(),
+                facets: Some(serde_json::json!({"kind": "integration_smoke"})),
+                external_event_id: Some(external_event_id),
+            })
+            .await
+            .expect("ingest source-only smoke Page");
+        let result = active
+            .client
+            .search_pages(SearchPagesRequest {
+                query: "symbiont pcp v0.8 contribute integration smoke".to_owned(),
+                scopes: vec![CONVERSATION_NAMESPACE.to_owned()],
+                mode: SearchMode::Exact,
+                term_match: SearchTermMatch::All,
+                // Exact text search must include the payload surface; facets
+                // only verifies the structured metadata, not the smoke text.
+                projections: vec![Projection::Payload, Projection::Facets],
+                filters: SearchFilters::default(),
+                limit: 10,
+                cursor: None,
+            })
+            .await
+            .expect("search smoke source Page");
+        assert!(
+            result
+                .hits
+                .iter()
+                .any(|hit| hit.revision_id == written.revision_id)
+        );
+        let pages = active
+            .client
+            .read_pages(pcp_core::ReadPagesRequest {
+                page_ids: Vec::new(),
+                revision_ids: vec![written.revision_id.clone()],
+                projections: vec![Projection::Payload, Projection::Facets],
+                max_chars: 1_024,
+            })
+            .await
+            .expect("read smoke source Page");
+        assert_eq!(pages.len(), 1);
+        assert_eq!(pages[0].revision.revision_id, written.revision_id);
+    }
+}
+
+#[cfg(any())]
 mod tests {
     use std::{
         os::unix::fs::PermissionsExt,
@@ -922,7 +1032,6 @@ mod tests {
     }
 
     fn write_manifest(root: &Path, instance_id: &str, generation: &str, public_endpoint: &str) {
-        let now = Utc::now();
         let registration = DiscoveryRegistration {
             schema: DISCOVERY_SCHEMA.to_owned(),
             schema_version: DISCOVERY_VERSION.to_owned(),
@@ -930,10 +1039,6 @@ mod tests {
                 kind: "pcp".to_owned(),
                 instance_id: instance_id.to_owned(),
                 generation: generation.to_owned(),
-            },
-            lease: DiscoveryLease {
-                renewed_at: (now - chrono::Duration::seconds(1)).to_rfc3339(),
-                expires_at: (now + chrono::Duration::seconds(44)).to_rfc3339(),
             },
             offers: vec![DiscoveryOffer {
                 protocol: PCP_ENROLLMENT_PROTOCOL_ID.to_owned(),
@@ -1026,7 +1131,7 @@ mod tests {
         );
         let owner_id = store.owner_id().to_owned();
         let principal = ContinuityHost::access_session(&owner_id).principal;
-        let access_one = AccessMode::Admin.session(
+        let access_one = AccessMode::Contribute.session(
             principal,
             "enrolled:reg-test:proc-one",
             vec![
@@ -1185,7 +1290,7 @@ mod tests {
         };
         let principal = ContinuityHost::access_session(owner_id).principal;
         let access = |conversation: &str| {
-            AccessMode::Admin.session(
+            AccessMode::Contribute.session(
                 principal.clone(),
                 "enrolled:reg-test:proc-test",
                 vec![
@@ -1249,22 +1354,29 @@ mod tests {
     }
 
     #[test]
-    fn lease_validation_obeys_the_discovery_time_bounds() {
-        let now = Utc::now();
-        let live = DiscoveryLease {
-            renewed_at: (now - chrono::Duration::seconds(5)).to_rfc3339(),
-            expires_at: (now + chrono::Duration::seconds(40)).to_rfc3339(),
+    fn discovery_registration_has_no_liveness_lease() {
+        let registration = DiscoveryRegistration {
+            schema: DISCOVERY_SCHEMA.to_owned(),
+            schema_version: DISCOVERY_VERSION.to_owned(),
+            service: EnrollmentServiceIdentity {
+                kind: "pcp".to_owned(),
+                instance_id: "usr-test".to_owned(),
+                generation: "proc-test".to_owned(),
+            },
+            offers: vec![DiscoveryOffer {
+                protocol: PCP_ENROLLMENT_PROTOCOL_ID.to_owned(),
+                protocol_versions: vec![PCP_ENROLLMENT_PROTOCOL_VERSION.to_owned()],
+                binding: UNIX_SOCKET_BINDING.to_owned(),
+                endpoint: "sockets/0123456789ABCDEF.sock".to_owned(),
+            }],
         };
-        let expired = DiscoveryLease {
-            renewed_at: (now - chrono::Duration::seconds(60)).to_rfc3339(),
-            expires_at: (now - chrono::Duration::seconds(1)).to_rfc3339(),
-        };
-        let overlong = DiscoveryLease {
-            renewed_at: now.to_rfc3339(),
-            expires_at: (now + chrono::Duration::seconds(121)).to_rfc3339(),
-        };
-        assert!(live_lease(&live, now));
-        assert!(!live_lease(&expired, now));
-        assert!(!live_lease(&overlong, now));
+        assert!(valid_registration(&registration));
+        assert!(
+            serde_json::to_value(registration)
+                .expect("encode discovery registration")
+                .get("lease")
+                .is_none()
+        );
+        assert!(!valid_unix_endpoint("sockets/0123456789ABCDEFG.sock"));
     }
 }

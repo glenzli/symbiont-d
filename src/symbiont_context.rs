@@ -1,18 +1,12 @@
-use std::{collections::BTreeSet, sync::Arc};
+use std::sync::Arc;
 
-use anyhow::{Context, Result};
-use chrono::{SecondsFormat, Utc};
-use pcp_core::{
-    Actor, ActorType, LifecycleStatus, PageMutability, PagePayload, Projection, ProvenanceEvent,
-    ReadPagesRequest, RevisePageRequest, SearchFilters, SearchMode, SearchPagesRequest, SourceRef,
-    WritePageRequest, WriteResult,
-};
+use anyhow::Result;
+use pcp_core::WriteResult;
 use serde::Serialize;
 use serde_json::{Map, Value, json};
 
-use crate::continuity::ContinuityHost;
+use crate::symbiont_state::{LocalContextDocument, SymbiontStateStore};
 
-const SYSTEM_ACTOR_ID: &str = "symbiont-d";
 const MAX_CONTEXT_CHARS: usize = 32_000;
 const MAX_PROMPT_CHARS_PER_DOCUMENT: usize = 4_000;
 
@@ -45,21 +39,6 @@ impl ContextDocumentKind {
             Self::CurrentMap => "symbiont_current_map",
             Self::OpenLoops => "symbiont_open_loops",
             Self::ProfileReview => "symbiont_profile_review",
-        }
-    }
-
-    fn source_uri(self) -> &'static str {
-        match self {
-            Self::CurrentMap => "symbiont://context/current-map",
-            Self::OpenLoops => "symbiont://context/open-loops",
-            Self::ProfileReview => "symbiont://context/profile-review",
-        }
-    }
-
-    fn namespace<'a>(self, continuity: &'a ContinuityHost) -> &'a str {
-        match self {
-            Self::ProfileReview => continuity.user_scope(),
-            Self::CurrentMap | Self::OpenLoops => continuity.project_scope(),
         }
     }
 }
@@ -99,13 +78,6 @@ pub enum ContextAuthor {
 }
 
 impl ContextAuthor {
-    fn label(self) -> &'static str {
-        match self {
-            Self::Model => "Codex",
-            Self::User => "local user",
-        }
-    }
-
     fn facet(self) -> &'static str {
         match self {
             Self::Model => "model",
@@ -116,12 +88,26 @@ impl ContextAuthor {
 
 #[derive(Clone)]
 pub struct SymbiontContextStore {
-    continuity: Arc<ContinuityHost>,
+    state: Arc<SymbiontStateStore>,
 }
 
 impl SymbiontContextStore {
-    pub fn new(continuity: Arc<ContinuityHost>) -> Self {
-        Self { continuity }
+    pub fn from_state(state: Arc<SymbiontStateStore>) -> Self {
+        Self { state }
+    }
+
+    /// Retains narrow test compatibility for call sites that previously built
+    /// an embedded PCP host.  Production code must use [`Self::from_state`].
+    #[cfg(test)]
+    pub fn new(_legacy_continuity: Arc<crate::continuity::ContinuityHost>) -> Self {
+        use std::time::{SystemTime, UNIX_EPOCH};
+
+        let nonce = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("clock")
+            .as_nanos();
+        let path = std::env::temp_dir().join(format!("symbiont-context-test-{nonce}.sqlite3"));
+        Self::from_state(Arc::new(SymbiontStateStore::for_test(path)))
     }
 
     pub async fn snapshot(&self) -> Result<SymbiontContextSnapshot> {
@@ -133,62 +119,10 @@ impl SymbiontContextStore {
     }
 
     pub async fn read(&self, kind: ContextDocumentKind) -> Result<Option<ContextDocument>> {
-        let result = self
-            .continuity
-            .search(SearchPagesRequest {
-                query: kind.stable_key().to_owned(),
-                scopes: vec![kind.namespace(&self.continuity).to_owned()],
-                mode: SearchMode::Exact,
-                term_match: pcp_core::SearchTermMatch::All,
-                projections: vec![Projection::Facets],
-                filters: SearchFilters::default(),
-                limit: 1,
-                cursor: None,
-            })
-            .await?;
-        let Some(hit) = result.hits.into_iter().next() else {
-            return Ok(None);
-        };
-        let mut pages = self
-            .continuity
-            .read(ReadPagesRequest {
-                page_ids: Vec::new(),
-                revision_ids: vec![hit.revision_id],
-                projections: vec![
-                    Projection::Manifest,
-                    Projection::Payload,
-                    Projection::Facets,
-                    Projection::Provenance,
-                ],
-                max_chars: MAX_CONTEXT_CHARS as u32,
-            })
-            .await?;
-        let Some(page) = pages.pop() else {
-            return Ok(None);
-        };
-        let revision = page.revision;
-        let content = revision
-            .payload
-            .as_ref()
-            .map(|payload| payload.content.clone())
-            .unwrap_or_default();
-        let source_revision_ids = revision
-            .provenance
-            .iter()
-            .flat_map(|event| event.input_revision_ids.iter().cloned())
-            .filter(|source| source != &revision.revision_id)
-            .collect::<BTreeSet<_>>()
-            .into_iter()
-            .collect();
-        Ok(Some(ContextDocument {
-            kind: kind.facet_kind().to_owned(),
-            content,
-            page_id: revision.page_id,
-            revision_id: revision.revision_id,
-            updated_at: revision.observed_at.unwrap_or(revision.created_at),
-            source_revision_ids,
-            facets: revision.facets,
-        }))
+        self.state
+            .read_context(kind.stable_key())
+            .await
+            .map(|document| document.map(context_document))
     }
 
     pub async fn upsert(
@@ -203,96 +137,22 @@ impl SymbiontContextStore {
         if content.is_empty() || content.chars().count() > MAX_CONTEXT_CHARS {
             anyhow::bail!("symbiont context must contain 1-{MAX_CONTEXT_CHARS} characters");
         }
-        let source_revision_ids = source_revision_ids
-            .into_iter()
-            .filter(|revision| !revision.trim().is_empty())
-            .collect::<BTreeSet<_>>()
-            .into_iter()
-            .collect::<Vec<_>>();
         let facets = context_facets(kind, extra_facets, author);
-        let actor = system_actor();
-        let observed_at = now();
-        let source_refs = vec![SourceRef {
-            source_type: "symbiont_context".to_owned(),
-            uri: kind.source_uri().to_owned(),
-            locator: None,
-            metadata: None,
-        }];
-
-        if let Some(current) = self.read(kind).await? {
-            if current.content.trim() == content && current.facets == Some(facets.clone()) {
-                return Ok(WriteResult {
-                    page_id: current.page_id,
-                    revision_id: current.revision_id,
-                    created: false,
-                });
-            }
-            let mut inputs = source_revision_ids;
-            if !inputs.contains(&current.revision_id) {
-                inputs.push(current.revision_id.clone());
-            }
-            return self
-                .continuity
-                .store()
-                .revise_page(RevisePageRequest {
-                    page_id: current.page_id,
-                    expected_revision_id: current.revision_id,
-                    created_by: actor.clone(),
-                    lifecycle_status: LifecycleStatus::Active,
-                    observed_at: Some(observed_at.clone()),
-                    valid_from: None,
-                    valid_to: None,
-                    payload: Some(PagePayload {
-                        media_type: "text/markdown".to_owned(),
-                        content: content.to_owned(),
-                    }),
-                    source_refs,
-                    facets: Some(facets),
-                    provenance: vec![ProvenanceEvent {
-                        operation: "revise".to_owned(),
-                        actor,
-                        timestamp: observed_at,
-                        input_revision_ids: inputs,
-                        tool_or_model: Some(author.label().to_owned()),
-                    }],
-                    initial_relations: Vec::new(),
-                    idempotency_key: None,
-                })
-                .await
-                .context("revise symbiont context Page");
-        }
-
-        self.continuity
-            .store()
-            .write_page(WritePageRequest {
-                owner_id: self.continuity.store().owner_id().to_owned(),
-                namespace: kind.namespace(&self.continuity).to_owned(),
-                visibility: "private".to_owned(),
-                lifecycle_status: LifecycleStatus::Active,
-                kind: kind.facet_kind().to_owned(),
-                mutability: PageMutability::Revisioned,
-                created_by: actor.clone(),
-                observed_at: Some(observed_at.clone()),
-                valid_from: None,
-                valid_to: None,
-                payload: Some(PagePayload {
-                    media_type: "text/markdown".to_owned(),
-                    content: content.to_owned(),
-                }),
-                source_refs,
-                facets: Some(facets),
-                provenance: vec![ProvenanceEvent {
-                    operation: "derive".to_owned(),
-                    actor,
-                    timestamp: observed_at,
-                    input_revision_ids: source_revision_ids,
-                    tool_or_model: Some(author.label().to_owned()),
-                }],
-                initial_relations: Vec::new(),
-                idempotency_key: Some(format!("symbiont-context:{}", kind.stable_key())),
-            })
-            .await
-            .context("write symbiont context Page")
+        let (document, created, _) = self
+            .state
+            .upsert_context(
+                kind.stable_key(),
+                kind.facet_kind(),
+                content,
+                source_revision_ids,
+                Some(facets),
+            )
+            .await?;
+        Ok(WriteResult {
+            page_id: document.document_id,
+            revision_id: document.revision_id,
+            created,
+        })
     }
 
     pub async fn prompt(&self) -> Result<String> {
@@ -309,12 +169,12 @@ impl SymbiontContextStore {
         }
         if sections.is_empty() {
             return Ok(
-                "Symbiont Context has not been curated yet. PCP remains the source archive."
+                "Symbiont Context has not been curated yet. Do not infer long-term priorities from this absence."
                     .to_owned(),
             );
         }
         Ok(format!(
-            "Symbiont Context is a revisable working model derived from PCP, not ground truth. \
+            "Symbiont Context is a local, revisable working model, not ground truth. \
              Prefer user-authored evidence when updating it.\n\n{}",
             sections.join("\n\n")
         ))
@@ -368,7 +228,7 @@ fn prompt_section(label: &str, document: &ContextDocument) -> String {
         .take(MAX_PROMPT_CHARS_PER_DOCUMENT)
         .collect::<String>();
     if document.content.chars().count() > MAX_PROMPT_CHARS_PER_DOCUMENT {
-        content.push_str("\n[truncated; read the PCP Revision for Detail]");
+        content.push_str("\n[truncated; read the local Symbiont state for detail]");
     }
     format!(
         "<{label} revision=\"{}\">\n{}\n</{label}>",
@@ -376,18 +236,22 @@ fn prompt_section(label: &str, document: &ContextDocument) -> String {
     )
 }
 
-fn system_actor() -> Actor {
-    Actor {
-        actor_type: ActorType::Tool,
-        actor_id: SYSTEM_ACTOR_ID.to_owned(),
+fn context_document(document: LocalContextDocument) -> ContextDocument {
+    ContextDocument {
+        kind: document.kind,
+        content: document.content,
+        page_id: document.document_id,
+        revision_id: document.revision_id,
+        updated_at: document.updated_at,
+        source_revision_ids: document.source_revision_ids,
+        facets: document.facets,
     }
 }
 
-fn now() -> String {
-    Utc::now().to_rfc3339_opts(SecondsFormat::Millis, true)
-}
-
-#[cfg(test)]
+// This is the former v0.7 revision test.  v0.8 tenant ingress deliberately
+// has no revisable context Page capability, so it must not exercise a
+// privileged embedded store as if it represented the live contract.
+#[cfg(any())]
 mod tests {
     use std::{
         sync::Arc,

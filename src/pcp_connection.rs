@@ -2,42 +2,28 @@ mod enrollment;
 
 use std::{
     collections::{BTreeMap, BTreeSet},
-    env,
     future::Future,
-    path::{Path, PathBuf},
+    path::Path,
     pin::Pin,
     sync::{Arc, RwLock, Weak},
     time::Duration,
 };
 
 use anyhow::{Context, Result};
-use pcp_client::{
-    DurablePageInventoryItem, EmbeddedPcpClient, HealthSnapshot, PcpApi, TombstoneCascadeResult,
-};
+use pcp_client::PcpTenantApi;
 use pcp_core::{
-    AccessAuditEvent, AccessSession, Actor, AssessPageValidityRequest, Capabilities,
-    CollectRevisionRetentionRequest, ConsolidatePagesRequest, CreateScopeRequest, LinkPagesRequest,
-    PlanRevisionRetentionRequest, PutRevisionRetentionLeaseRequest, ReadPage, ReadPagesRequest,
-    Relation, RevisePageRequest, RevisionCollectionResult, RevisionRetentionLease,
-    RevisionRetentionPlan, Scope, SearchPagesRequest, SearchResult, WritePageRequest, WriteResult,
-    WriteSummaryRequest, WriteSummaryResult, WriteValidityResult,
+    AccessSession, Capabilities, IngestPageRequest, ReadPage, ReadPagesRequest, Scope,
+    SearchPagesRequest, SearchResult, WriteResult,
 };
-use pcp_rpc::RemotePcpClient;
-use pcp_sqlite::SqlitePcpStore;
-use pcp_store::PcpStore;
-use tokio::{sync::Mutex, time::Instant};
+use tokio::sync::Mutex;
 use tracing::{info, warn};
 
-use self::enrollment::{ActiveEnrollment, EnrollmentManager, EnrollmentProbe, HOST_PRINCIPAL_ID};
-use crate::continuity::ContinuityHost;
-
-const DEFAULT_CONNECT_TIMEOUT: Duration = Duration::from_secs(30);
-const CONNECT_RETRY_INTERVAL: Duration = Duration::from_millis(250);
+use self::enrollment::{ActiveEnrollment, EnrollmentManager, EnrollmentProbe};
 const DISCOVERY_REFRESH_INTERVAL: Duration = Duration::from_secs(10);
 
 #[derive(Clone)]
 struct ActiveClient {
-    api: Arc<dyn PcpApi>,
+    api: Arc<dyn PcpTenantApi>,
     generation: Option<String>,
     enrolled: bool,
 }
@@ -51,97 +37,28 @@ struct ManagedPcpClient {
     access: AccessSession,
     active: RwLock<ActiveClient>,
     enrollment: Option<Arc<EnrollmentManager>>,
-    static_socket: Option<PathBuf>,
     recovery: Mutex<()>,
-    connect_timeout: Duration,
 }
 
-pub async fn open(workspace: &Path) -> Result<Arc<dyn PcpApi>> {
-    let connect_timeout = runtime_connect_timeout()?;
-    let static_socket = env::var_os("SYMBIONT_PCP_RUNTIME_SOCKET").map(PathBuf::from);
+pub async fn open(workspace: &Path) -> Result<Arc<dyn PcpTenantApi>> {
     let enrollment = EnrollmentManager::open(workspace).await?.map(Arc::new);
-
-    if let Some(socket_path) = static_socket.as_ref() {
-        if let Some(manager) = enrollment.as_ref()
-            && manager.has_selected_instance().await
-        {
-            match manager.probe(None).await {
-                Ok(EnrollmentProbe::Active(active)) => {
-                    return Ok(managed_client(
-                        active_client(active),
-                        Some(Arc::clone(manager)),
-                        static_socket,
-                        connect_timeout,
-                    ));
-                }
-                Ok(EnrollmentProbe::Pending) => {
-                    info!(
-                        "PCP Runtime enrollment is pending approval; retaining the migration fallback"
-                    );
-                }
-                Ok(EnrollmentProbe::Rejected) => {
-                    warn!("PCP Runtime enrollment was rejected; retaining the migration fallback");
-                }
-                Ok(EnrollmentProbe::Unavailable) => {}
-                Err(error) => {
-                    warn!(%error, "PCP Runtime discovery or enrollment is not ready; retaining the migration fallback");
-                }
-            }
+    let manager = enrollment.ok_or_else(|| {
+        anyhow::anyhow!(
+            "PCP Runtime discovery is unavailable on this platform; start PCP Console and approve Symbiont enrollment"
+        )
+    })?;
+    match manager.probe(None).await? {
+        EnrollmentProbe::Active(active) => Ok(managed_client(active_client(active), Some(manager))),
+        EnrollmentProbe::Pending => {
+            anyhow::bail!("PCP Runtime enrollment is pending approval in PCP Console")
         }
-        let fallback = connect_configured(socket_path, connect_timeout).await?;
-        if let Some(manager) = enrollment.as_ref() {
-            match manager.probe(Some(fallback.owner_id())).await {
-                Ok(EnrollmentProbe::Active(active)) => {
-                    return Ok(managed_client(
-                        active_client(active),
-                        Some(Arc::clone(manager)),
-                        static_socket,
-                        connect_timeout,
-                    ));
-                }
-                Ok(
-                    EnrollmentProbe::Pending
-                    | EnrollmentProbe::Rejected
-                    | EnrollmentProbe::Unavailable,
-                ) => {}
-                Err(error) => {
-                    warn!(%error, "could not promote the configured PCP fallback to enrollment yet");
-                }
-            }
+        EnrollmentProbe::Rejected => {
+            anyhow::bail!("PCP Runtime enrollment was rejected in PCP Console")
         }
-        return Ok(managed_client(
-            ActiveClient {
-                api: Arc::new(fallback),
-                generation: None,
-                enrolled: false,
-            },
-            enrollment,
-            static_socket,
-            connect_timeout,
-        ));
+        EnrollmentProbe::Unavailable => anyhow::bail!(
+            "no PCP Runtime is discoverable; start PCP Console and approve Symbiont enrollment"
+        ),
     }
-
-    if let Some(manager) = enrollment.as_ref() {
-        match manager.probe(None).await? {
-            EnrollmentProbe::Active(active) => {
-                return Ok(managed_client(
-                    active_client(active),
-                    Some(Arc::clone(manager)),
-                    None,
-                    connect_timeout,
-                ));
-            }
-            EnrollmentProbe::Pending => {
-                anyhow::bail!("PCP Runtime enrollment is pending approval in PCP Console")
-            }
-            EnrollmentProbe::Rejected => {
-                anyhow::bail!("PCP Runtime enrollment was rejected in PCP Console")
-            }
-            EnrollmentProbe::Unavailable => {}
-        }
-    }
-
-    open_embedded(workspace).await
 }
 
 fn active_client(active: ActiveEnrollment) -> ActiveClient {
@@ -155,19 +72,15 @@ fn active_client(active: ActiveEnrollment) -> ActiveClient {
 fn managed_client(
     initial: ActiveClient,
     enrollment: Option<Arc<EnrollmentManager>>,
-    static_socket: Option<PathBuf>,
-    connect_timeout: Duration,
-) -> Arc<dyn PcpApi> {
-    let owner_id = initial.api.owner_id().to_owned();
+) -> Arc<dyn PcpTenantApi> {
+    let owner_id = initial.api.identity_id().to_owned();
     let access = initial.api.access().clone();
     let client = Arc::new(ManagedPcpClient {
         owner_id,
         access,
         active: RwLock::new(initial),
         enrollment,
-        static_socket,
         recovery: Mutex::new(()),
-        connect_timeout,
     });
     ManagedPcpClient::spawn_monitor(&client);
     client
@@ -183,8 +96,8 @@ impl ManagedPcpClient {
 
     fn install(&self, next: ActiveClient) -> Result<()> {
         anyhow::ensure!(
-            next.api.owner_id() == self.owner_id,
-            "recovered PCP Store identity does not match the active Store"
+            next.api.identity_id() == self.owner_id,
+            "recovered PCP Identity does not match the active Identity"
         );
         anyhow::ensure!(
             equivalent_access(&self.access, next.api.access()),
@@ -240,16 +153,7 @@ impl ManagedPcpClient {
         if self.refresh_enrollment(true).await.unwrap_or(false) {
             return Ok(());
         }
-        if let Some(socket_path) = self.static_socket.as_ref() {
-            let fallback = connect_configured(socket_path, self.connect_timeout).await?;
-            self.install(ActiveClient {
-                api: Arc::new(fallback),
-                generation: None,
-                enrolled: false,
-            })?;
-            return Ok(());
-        }
-        anyhow::bail!("no approved PCP session or configured migration fallback is available")
+        anyhow::bail!("no approved PCP session is available through discovery")
     }
 
     fn spawn_monitor(client: &Arc<Self>) {
@@ -302,48 +206,6 @@ fn transport_failure(error: &anyhow::Error) -> bool {
                 || message.contains("closed before responding")
                 || message.contains("closed without a response")
         })
-}
-
-async fn connect_configured(path: &Path, timeout: Duration) -> Result<RemotePcpClient> {
-    let started = Instant::now();
-    loop {
-        match RemotePcpClient::connect_expected(path, HOST_PRINCIPAL_ID).await {
-            Ok(client) => return Ok(client),
-            Err(error) if started.elapsed() >= timeout => {
-                return Err(error).with_context(|| {
-                    format!(
-                        "connect configured PCP runtime at {} within {} ms; embedded fallback is disabled",
-                        path.display(),
-                        timeout.as_millis()
-                    )
-                });
-            }
-            Err(_) => tokio::time::sleep(CONNECT_RETRY_INTERVAL).await,
-        }
-    }
-}
-
-async fn open_embedded(workspace: &Path) -> Result<Arc<dyn PcpApi>> {
-    let path = env::var_os("SYMBIONT_PCP_PATH")
-        .map(PathBuf::from)
-        .unwrap_or_else(|| workspace.join("data/context.sqlite3"));
-    let store = Arc::new(SqlitePcpStore::open(path).await?);
-    let access = ContinuityHost::access_session(store.owner_id());
-    let store: Arc<dyn PcpStore> = store;
-    Ok(EmbeddedPcpClient::shared(store, access))
-}
-
-fn runtime_connect_timeout() -> Result<Duration> {
-    let Some(value) = env::var_os("SYMBIONT_PCP_CONNECT_TIMEOUT_MS") else {
-        return Ok(DEFAULT_CONNECT_TIMEOUT);
-    };
-    let value = value
-        .to_str()
-        .context("SYMBIONT_PCP_CONNECT_TIMEOUT_MS must be valid UTF-8")?;
-    let milliseconds = value
-        .parse::<u64>()
-        .context("SYMBIONT_PCP_CONNECT_TIMEOUT_MS must be an integer")?;
-    Ok(Duration::from_millis(milliseconds))
 }
 
 type PcpFuture<'a, T> = Pin<Box<dyn Future<Output = Result<T>> + Send + 'a>>;
@@ -402,8 +264,9 @@ macro_rules! recovering_write {
     };
 }
 
-impl PcpApi for ManagedPcpClient {
-    fn owner_id(&self) -> &str {
+#[async_trait::async_trait]
+impl PcpTenantApi for ManagedPcpClient {
+    fn identity_id(&self) -> &str {
         &self.owner_id
     }
 
@@ -415,8 +278,6 @@ impl PcpApi for ManagedPcpClient {
         &self.access
     }
 
-    retrying_read!(integrity_check() -> String);
-    recovering_write!(create_scope(request: CreateScopeRequest) -> ());
     retrying_read!(list_scopes(
         requested_scopes: Vec<String>,
         query: Option<String>,
@@ -432,54 +293,7 @@ impl PcpApi for ManagedPcpClient {
         max_chars: u32,
     ) -> SearchResult);
     retrying_read!(read_pages(request: ReadPagesRequest) -> Vec<ReadPage>);
-    retrying_read!(current_revision_id(page_id: String) -> String);
-    retrying_read!(page_count(requested_scopes: Vec<String>) -> u64);
-    retrying_read!(content_char_count(requested_scopes: Vec<String>) -> usize);
-    retrying_read!(plan_revision_retention(
-        request: PlanRevisionRetentionRequest,
-    ) -> RevisionRetentionPlan);
-    recovering_write!(collect_revision_retention(
-        request: CollectRevisionRetentionRequest,
-    ) -> RevisionCollectionResult);
-    recovering_write!(put_revision_retention_lease(
-        request: PutRevisionRetentionLeaseRequest,
-    ) -> RevisionRetentionLease);
-    retrying_read!(active_revision_retention_leases(
-        requested_scopes: Vec<String>,
-        limit: u32,
-    ) -> Vec<RevisionRetentionLease>);
-    recovering_write!(write_page(request: WritePageRequest) -> WriteResult);
-    recovering_write!(revise_page(request: RevisePageRequest) -> WriteResult);
-    recovering_write!(consolidate_pages(request: ConsolidatePagesRequest) -> WriteResult);
-    recovering_write!(link_pages(request: LinkPagesRequest) -> Relation);
-    recovering_write!(write_summary(request: WriteSummaryRequest) -> WriteSummaryResult);
-    retrying_read!(next_summary_candidate(
-        minimum_chars: usize,
-        excluded_page_kinds: Vec<String>,
-    ) -> Option<String>);
-    recovering_write!(mark_summary_assessed(
-        target_revision_id: String,
-        outcome: String,
-        tool_or_model: Option<String>,
-    ) -> ());
-    recovering_write!(assess_page_validity(
-        request: AssessPageValidityRequest,
-    ) -> WriteValidityResult);
-    recovering_write!(tombstone_derivation_cascade(
-        root_revision_id: String,
-        actor: Actor,
-    ) -> TombstoneCascadeResult);
-    retrying_read!(durable_page_inventory(
-        excluded_page_kinds: Vec<String>,
-    ) -> Vec<DurablePageInventoryItem>);
-    retrying_read!(access_log(
-        limit: u32,
-        cursor: Option<String>,
-    ) -> (Vec<AccessAuditEvent>, Option<String>));
-    retrying_read!(health_snapshot(
-        requested_scopes: Vec<String>,
-        window_hours: u32,
-    ) -> HealthSnapshot);
+    recovering_write!(ingest_page(request: IngestPageRequest) -> WriteResult);
 }
 
 #[cfg(test)]
@@ -491,7 +305,7 @@ mod tests {
     #[test]
     fn generation_specific_metadata_and_grant_order_do_not_change_the_approved_policy() {
         let first_principal = AccessPrincipal {
-            principal_id: HOST_PRINCIPAL_ID.to_owned(),
+            principal_id: enrollment::HOST_PRINCIPAL_ID.to_owned(),
             principal_type: AccessPrincipalType::Host,
             display_name: Some("Symbiont".to_owned()),
         };
@@ -527,7 +341,7 @@ mod tests {
     #[test]
     fn changed_grants_are_not_accepted_during_recovery() {
         let principal = AccessPrincipal {
-            principal_id: HOST_PRINCIPAL_ID.to_owned(),
+            principal_id: enrollment::HOST_PRINCIPAL_ID.to_owned(),
             principal_type: AccessPrincipalType::Host,
             display_name: Some("Symbiont".to_owned()),
         };

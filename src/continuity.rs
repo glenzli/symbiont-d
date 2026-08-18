@@ -1,30 +1,30 @@
 use std::{
     collections::{HashMap, HashSet},
-    sync::{
-        Arc,
-        atomic::{AtomicU64, Ordering},
-    },
-    time::{SystemTime, UNIX_EPOCH},
+    path::PathBuf,
+    sync::Arc,
 };
 
 use anyhow::{Context, Result};
 use chrono::{SecondsFormat, Utc};
 #[cfg(test)]
 use pcp_client::EmbeddedPcpClient;
-use pcp_client::{DurablePageInventoryItem, PcpApi};
+use pcp_client::{DurablePageInventoryItem, PcpTenantApi};
 use pcp_core::{
     AccessPrincipal, AccessPrincipalType, AccessSession, Actor, ActorType,
-    AssessPageValidityRequest, ConsolidatePagesRequest, ConsolidationInput, CreateScopeRequest,
-    InitialRelation, LifecycleStatus, LinkPagesRequest, PageMutability, PagePayload, Projection,
-    ProvenanceEvent, ReadPage, ReadPagesRequest, Relation, RevisePageRequest, Scope, SearchFilters,
-    SearchMode, SearchPagesRequest, SearchResult, SourceRef, ValidityStanding, WritePageRequest,
+    AssessPageValidityRequest, CreateScopeRequest, IngestPageRequest, InitialRelation,
+    LifecycleStatus, LinkPagesRequest, PageMutability, PagePayload, Projection, ProvenanceEvent,
+    ReadPage, ReadPagesRequest, Relation, RevisePageRequest, Scope, SearchFilters, SearchMode,
+    SearchPagesRequest, SearchResult, SourceRef, SourceSpan, ValidityStanding, WritePageRequest,
     WriteResult, WriteSummaryRequest, WriteSummaryResult, WriteValidityResult,
 };
 #[cfg(test)]
 use pcp_store::PcpStore;
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
-use tokio::sync::RwLock;
+use tokio::{
+    fs,
+    sync::{Mutex, RwLock},
+};
 
 use crate::{
     asset::{ImageAttachment, SavedImage},
@@ -35,6 +35,7 @@ use crate::{
     },
     profile::{ProfileSnapshot, SetupStatus},
     signals::SignalEvent,
+    transcript::TranscriptStore,
     working_context::{WORKING_CONTEXT_SCAN_MESSAGES, WorkingContext},
 };
 
@@ -69,6 +70,73 @@ const SUMMARY_EXCLUDED_PAGE_KINDS: &[&str] = &[
     "image_asset",
     "tombstone",
 ];
+/// One producer-local stream for all durable host events.  The sequence is
+/// persisted before the ingest RPC, so retries reuse the same external event
+/// identity and Runtime can namespace it as `host:symbiont-d:symbiont-main`.
+const CONVERSATION_SOURCE_STREAM: &str = "symbiont-main";
+
+#[derive(Clone, Debug, serde::Deserialize, serde::Serialize)]
+struct SourceSequenceState {
+    next: u64,
+}
+
+struct SourceSequence {
+    path: Option<PathBuf>,
+    next: Mutex<u64>,
+}
+
+impl SourceSequence {
+    async fn open(path: PathBuf) -> Result<Self> {
+        if let Some(parent) = path.parent() {
+            fs::create_dir_all(parent).await.with_context(|| {
+                format!("create source sequence directory {}", parent.display())
+            })?;
+        }
+        let next = match fs::read(&path).await {
+            Ok(bytes) => {
+                serde_json::from_slice::<SourceSequenceState>(&bytes)
+                    .context("decode durable PCP source sequence")?
+                    .next
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => 1,
+            Err(error) => {
+                return Err(error)
+                    .with_context(|| format!("read source sequence {}", path.display()));
+            }
+        };
+        anyhow::ensure!(next > 0, "durable PCP source sequence must start at one");
+        Ok(Self {
+            path: Some(path),
+            next: Mutex::new(next),
+        })
+    }
+
+    fn in_memory() -> Self {
+        Self {
+            path: None,
+            next: Mutex::new(1),
+        }
+    }
+
+    async fn reserve(&self) -> Result<u64> {
+        let mut next = self.next.lock().await;
+        let sequence = *next;
+        *next = next
+            .checked_add(1)
+            .context("PCP source sequence exhausted")?;
+        if let Some(path) = &self.path {
+            let state = serde_json::to_vec(&SourceSequenceState { next: *next })?;
+            let temporary = path.with_extension("tmp");
+            fs::write(&temporary, state)
+                .await
+                .with_context(|| format!("write source sequence {}", temporary.display()))?;
+            fs::rename(&temporary, path)
+                .await
+                .with_context(|| format!("commit source sequence {}", path.display()))?;
+        }
+        Ok(sequence)
+    }
+}
 
 #[derive(Clone, Debug)]
 pub struct ScopePolicy {
@@ -78,9 +146,9 @@ pub struct ScopePolicy {
 }
 
 impl ScopePolicy {
-    fn for_owner(owner_id: &str) -> Self {
+    fn for_owner(_owner_id: &str) -> Self {
         Self {
-            user: format!("user:{owner_id}"),
+            user: "user:self".to_owned(),
             project: PROJECT_NAMESPACE.to_owned(),
             conversation: CONVERSATION_NAMESPACE.to_owned(),
         }
@@ -96,9 +164,10 @@ impl ScopePolicy {
 }
 
 pub struct ContinuityHost {
-    store: Arc<dyn PcpApi>,
+    store: Arc<dyn PcpTenantApi>,
+    transcript: Arc<TranscriptStore>,
     scopes: ScopePolicy,
-    event_counter: AtomicU64,
+    source_sequence: SourceSequence,
     orientation: RwLock<Option<WriteResult>>,
     live_conversation: ConversationProjection,
 }
@@ -116,8 +185,28 @@ pub struct MessageLinks {
 #[derive(Clone, Debug)]
 pub struct StoredMessage {
     pub entry: MemoryEntry,
-    pub page: WriteResult,
+    /// Kept as `page` temporarily for call-site compatibility.  These are
+    /// local transcript identifiers, not PCP Page or Revision identifiers.
+    pub page: LocalMessageRecord,
     pub attachment_revision_ids: Vec<String>,
+}
+
+#[derive(Clone, Debug)]
+pub struct LocalMessageRecord {
+    pub page_id: String,
+    pub revision_id: String,
+}
+
+#[derive(Clone, Debug)]
+pub struct MessageHistoryPage {
+    pub messages: Vec<MemoryEntry>,
+    pub has_more: bool,
+}
+
+struct DecodedMessageEntries {
+    entries: Vec<MemoryEntry>,
+    revision_page_ids: HashMap<String, String>,
+    replied_to_page_ids: HashSet<String>,
 }
 
 #[derive(Clone, Debug)]
@@ -144,10 +233,6 @@ impl ContinuityHost {
     /// interpretation and from the transient signal timeline.
     pub async fn ingest_external_signal(&self, signal: &SignalEvent) -> Result<WriteResult> {
         let observed_at = now();
-        let actor = Actor {
-            actor_type: ActorType::Model,
-            actor_id: format!("input-role:{}", signal.actor.id),
-        };
         let payload = serde_json::to_string_pretty(&json!({
             "title": signal.title,
             "content": signal.content,
@@ -163,18 +248,17 @@ impl ContinuityHost {
             "signal_kind": signal.kind,
             "related_signal_ids": signal.related_signal_ids,
         }))?;
+        let sequence = self.source_sequence.reserve().await?;
         self.store
-            .write_page(WritePageRequest {
-                owner_id: self.store.owner_id().to_owned(),
+            .ingest_page(IngestPageRequest {
                 namespace: self.scopes.conversation.clone(),
-                visibility: "private".to_owned(),
-                lifecycle_status: LifecycleStatus::Active,
                 kind: "external_signal".to_owned(),
-                mutability: PageMutability::Sealed,
-                created_by: actor.clone(),
                 observed_at: Some(observed_at.clone()),
-                valid_from: None,
-                valid_to: None,
+                source_span: Some(SourceSpan {
+                    stream_id: CONVERSATION_SOURCE_STREAM.to_owned(),
+                    start: sequence,
+                    end: sequence,
+                }),
                 payload: Some(PagePayload {
                     media_type: "application/vnd.symbiont.external-signal+json".to_owned(),
                     content: payload,
@@ -183,10 +267,10 @@ impl ContinuityHost {
                     .sources
                     .iter()
                     .map(|source| SourceRef {
-                        source_type: "web".to_owned(),
-                        uri: source.url.clone(),
-                        locator: None,
-                        metadata: Some(json!({"detail": source.detail})),
+                        provider_id: "web".to_owned(),
+                        locator: source.url.clone(),
+                        media_type: Some("text/html".to_owned()),
+                        content_digest: None,
                     })
                     .collect(),
                 facets: Some(json!({
@@ -197,15 +281,7 @@ impl ContinuityHost {
                     "actor_id": signal.actor.id,
                     "actor_name": signal.actor.name,
                 })),
-                provenance: vec![ProvenanceEvent {
-                    operation: "promote_input_signal".to_owned(),
-                    actor,
-                    timestamp: observed_at,
-                    input_revision_ids: Vec::new(),
-                    tool_or_model: Some(signal.actor.model.clone()),
-                }],
-                initial_relations: Vec::new(),
-                idempotency_key: Some(format!("external-signal:{}", signal.id)),
+                external_event_id: Some(format!("external-signal:{}", signal.id)),
             })
             .await
     }
@@ -246,43 +322,38 @@ impl ContinuityHost {
         )
     }
 
-    pub async fn open(store: Arc<dyn PcpApi>) -> Result<Self> {
-        let owner_id = store.owner_id().to_owned();
-        let scopes = ScopePolicy::for_owner(&owner_id);
-        for request in [
-            CreateScopeRequest {
-                owner_id: owner_id.clone(),
-                namespace: scopes.user.clone(),
-                display_name: USER_SCOPE_LABEL.to_owned(),
-                description: Some("Long-lived context explicitly owned by the user.".to_owned()),
-                parent_namespace: None,
-                visibility: "private".to_owned(),
-            },
-            CreateScopeRequest {
-                owner_id: owner_id.clone(),
-                namespace: scopes.project.clone(),
-                display_name: "symbiont-d".to_owned(),
-                description: Some("Project-level context for symbiont-d.".to_owned()),
-                parent_namespace: Some(scopes.user.clone()),
-                visibility: "private".to_owned(),
-            },
-            CreateScopeRequest {
-                owner_id,
-                namespace: scopes.conversation.clone(),
-                display_name: "symbiont-d main conversation".to_owned(),
-                description: Some(
-                    "Raw user, assistant, and tool events from this companion.".to_owned(),
-                ),
-                parent_namespace: Some(scopes.project.clone()),
-                visibility: "private".to_owned(),
-            },
-        ] {
-            store.create_scope(request).await?;
-        }
+    pub async fn open(
+        store: Arc<dyn PcpTenantApi>,
+        transcript: Arc<TranscriptStore>,
+    ) -> Result<Self> {
+        Self::open_with_sequence(store, transcript, SourceSequence::in_memory()).await
+    }
+
+    pub async fn open_at(
+        store: Arc<dyn PcpTenantApi>,
+        transcript: Arc<TranscriptStore>,
+        sequence_path: PathBuf,
+    ) -> Result<Self> {
+        Self::open_with_sequence(
+            store,
+            transcript,
+            SourceSequence::open(sequence_path).await?,
+        )
+        .await
+    }
+
+    async fn open_with_sequence(
+        store: Arc<dyn PcpTenantApi>,
+        transcript: Arc<TranscriptStore>,
+        source_sequence: SourceSequence,
+    ) -> Result<Self> {
+        let identity_id = store.identity_id().to_owned();
+        let scopes = ScopePolicy::for_owner(&identity_id);
         Ok(Self {
             store,
+            transcript,
             scopes,
-            event_counter: AtomicU64::new(0),
+            source_sequence,
             orientation: RwLock::new(None),
             live_conversation: ConversationProjection::new(),
         })
@@ -290,11 +361,21 @@ impl ContinuityHost {
 
     #[cfg(test)]
     pub async fn open_embedded_for_test(store: Arc<dyn PcpStore>) -> Result<Self> {
-        let access = Self::access_session(store.owner_id());
-        Self::open(EmbeddedPcpClient::shared(store, access)).await
+        let access = Self::access_session("host:symbiont-d");
+        let path = std::env::temp_dir().join(format!(
+            "symbiont-d-test-transcript-{}-{}.sqlite3",
+            std::process::id(),
+            Utc::now().timestamp_nanos_opt().unwrap_or_default()
+        ));
+        let (transcript, _) = TranscriptStore::open(path, None).await?;
+        Self::open(
+            EmbeddedPcpClient::shared(store, access),
+            Arc::new(transcript),
+        )
+        .await
     }
 
-    pub fn store(&self) -> &dyn PcpApi {
+    pub fn store(&self) -> &dyn PcpTenantApi {
         self.store.as_ref()
     }
 
@@ -343,11 +424,11 @@ impl ContinuityHost {
             .map(|message| message.page.revision_id.as_str())
             .unwrap_or("none");
         let mut seed = format!(
-            "PCP boundary: `{}` is the complete symbiont-d transcript across native-thread \
-             resets and compactions; native context is recent only. Current event: \
-             `{current_revision}`; orientation: `{orientation}`; latest checkpoint: \
-             `{checkpoint}`. Search then selectively read older context before relying on it or \
-             asking the user to repeat it. Derived Pages may use `{}` or `{}`.",
+            "PCP boundary: the local transcript is authoritative for chat history. `{}` contains \
+             selected durable source material for recall, not every turn and not a replayable chat \
+             log. Current local message: `{current_revision}`; orientation: `{orientation}`; \
+             latest checkpoint: `{checkpoint}`. Search then selectively read PCP material before \
+             relying on it or asking the user to repeat it. Derived Pages may use `{}` or `{}`.",
             self.scopes.conversation, self.scopes.user, self.scopes.project
         );
         if let Some(attachments) = current
@@ -383,174 +464,23 @@ impl ContinuityHost {
 
     pub async fn migrate_legacy(
         &self,
-        memory: &MemoryStore,
-        profile: &ProfileSnapshot,
+        _memory: &MemoryStore,
+        _profile: &ProfileSnapshot,
     ) -> Result<MigrationSummary> {
-        let entries = memory.all_entries().await?;
-        let mut migrated_messages = 0_u64;
-        let mut source_revisions = Vec::new();
-        for (index, entry) in entries.into_iter().enumerate() {
-            let actor = actor_for_role(&entry.role);
-            let result = self
-                .store
-                .write_page(WritePageRequest {
-                    owner_id: self.store.owner_id().to_owned(),
-                    namespace: self.scopes.conversation.clone(),
-                    visibility: "private".to_owned(),
-                    lifecycle_status: LifecycleStatus::Active,
-                    kind: "conversation_event".to_owned(),
-                    mutability: PageMutability::Sealed,
-                    created_by: actor.clone(),
-                    observed_at: Some(entry.at.clone()),
-                    valid_from: None,
-                    valid_to: None,
-                    payload: Some(PagePayload {
-                        media_type: "text/markdown".to_owned(),
-                        content: entry.content.clone(),
-                    }),
-                    source_refs: vec![SourceRef {
-                        source_type: "legacy_markdown_memory".to_owned(),
-                        uri: memory.source_uri(),
-                        locator: Some(format!("entry:{index}")),
-                        metadata: None,
-                    }],
-                    facets: Some(message_facets(&entry)),
-                    provenance: vec![ProvenanceEvent {
-                        operation: "import".to_owned(),
-                        actor: system_actor(),
-                        timestamp: now(),
-                        input_revision_ids: Vec::new(),
-                        tool_or_model: Some("symbiont legacy importer".to_owned()),
-                    }],
-                    initial_relations: Vec::new(),
-                    idempotency_key: Some(format!("legacy-memory:{}:{index}", entry.at)),
-                })
-                .await?;
-            source_revisions.push(result.revision_id);
-            migrated_messages += u64::from(result.created);
-        }
-        let orientation = self
-            .sync_orientation(profile, source_revisions)
-            .await
-            .context("migrate visible orientation into PCP")?;
         Ok(MigrationSummary {
-            migrated_messages,
-            orientation,
+            migrated_messages: 0,
+            orientation: None,
         })
     }
 
     pub async fn sync_orientation(
         &self,
-        profile: &ProfileSnapshot,
-        source_revision_ids: Vec<String>,
+        _profile: &ProfileSnapshot,
+        _source_revision_ids: Vec<String>,
     ) -> Result<Option<WriteResult>> {
-        if profile.status != SetupStatus::Ready || profile.orientation.trim().is_empty() {
-            return Ok(None);
-        }
-        let actor = system_actor();
-        let initial = self
-            .store
-            .write_page(WritePageRequest {
-                owner_id: self.store.owner_id().to_owned(),
-                namespace: self.scopes.user.clone(),
-                visibility: "private".to_owned(),
-                lifecycle_status: LifecycleStatus::Active,
-                kind: "user_orientation".to_owned(),
-                mutability: PageMutability::Revisioned,
-                created_by: actor.clone(),
-                observed_at: profile.updated_at.clone(),
-                valid_from: None,
-                valid_to: None,
-                payload: Some(PagePayload {
-                    media_type: "text/markdown".to_owned(),
-                    content: profile.orientation.trim().to_owned(),
-                }),
-                source_refs: vec![SourceRef {
-                    source_type: "symbiont_orientation".to_owned(),
-                    uri: "symbiont://profile/orientation".to_owned(),
-                    locator: None,
-                    metadata: None,
-                }],
-                facets: Some(json!({
-                    "kind": "user_orientation",
-                    "stableKey": "symbiont.orientation"
-                })),
-                provenance: vec![ProvenanceEvent {
-                    operation: "derive".to_owned(),
-                    actor: actor.clone(),
-                    timestamp: now(),
-                    input_revision_ids: source_revision_ids,
-                    tool_or_model: Some("symbiont onboarding".to_owned()),
-                }],
-                initial_relations: Vec::new(),
-                idempotency_key: Some("symbiont.orientation".to_owned()),
-            })
-            .await?;
-        let current_revision = self
-            .store
-            .current_revision_id(initial.page_id.clone())
-            .await?;
-        let current = self
-            .store
-            .read_pages(ReadPagesRequest {
-                page_ids: Vec::new(),
-                revision_ids: vec![current_revision.clone()],
-                projections: vec![Projection::Payload],
-                max_chars: 64_000,
-            })
-            .await?;
-        let current_content = current
-            .first()
-            .and_then(|page| page.revision.payload.as_ref())
-            .map(|payload| payload.content.trim())
-            .unwrap_or_default();
-        if current_content == profile.orientation.trim() {
-            let current = WriteResult {
-                page_id: initial.page_id,
-                revision_id: current_revision,
-                created: initial.created,
-            };
-            *self.orientation.write().await = Some(current.clone());
-            return Ok(Some(current));
-        }
-        let previous_revision = current_revision.clone();
-        let revised = self
-            .store
-            .revise_page(RevisePageRequest {
-                page_id: initial.page_id,
-                expected_revision_id: current_revision,
-                created_by: actor.clone(),
-                lifecycle_status: LifecycleStatus::Active,
-                observed_at: profile.updated_at.clone(),
-                valid_from: None,
-                valid_to: None,
-                payload: Some(PagePayload {
-                    media_type: "text/markdown".to_owned(),
-                    content: profile.orientation.trim().to_owned(),
-                }),
-                source_refs: vec![SourceRef {
-                    source_type: "symbiont_orientation".to_owned(),
-                    uri: "symbiont://profile/orientation".to_owned(),
-                    locator: None,
-                    metadata: None,
-                }],
-                facets: Some(json!({
-                    "kind": "user_orientation",
-                    "stableKey": "symbiont.orientation"
-                })),
-                provenance: vec![ProvenanceEvent {
-                    operation: "revise".to_owned(),
-                    actor,
-                    timestamp: now(),
-                    input_revision_ids: vec![previous_revision],
-                    tool_or_model: Some("symbiont profile editor".to_owned()),
-                }],
-                initial_relations: Vec::new(),
-                idempotency_key: None,
-            })
-            .await?;
-        *self.orientation.write().await = Some(revised.clone());
-        Ok(Some(revised))
+        // v0.8 tenant ingress is source-only.  Orientation remains local to
+        // Symbiont until PCP exposes a dedicated user-owned ingest contract.
+        Ok(None)
     }
 
     pub async fn recent_source_revisions(&self, limit: u32) -> Result<Vec<String>> {
@@ -582,15 +512,11 @@ impl ContinuityHost {
             anyhow::bail!("conversation event requires text, an image, or a quote");
         }
         let observed_at = now();
-        let actor = actor_for_role(&role);
-        let tool_or_model = metadata
-            .as_ref()
-            .and_then(|metadata| metadata.runs.last())
-            .map(|run| run.model.clone());
-        let attachment_revision_ids = self
-            .ingest_image_assets(&images, &observed_at, &actor, tool_or_model.as_deref())
-            .await
-            .context("ingest image assets into PCP")?;
+        // Normal conversation lives locally. Images remain available through
+        // the local asset store; an explicit future capture can ingest a
+        // selected source into PCP without making the transcript dependent on
+        // that decision.
+        let attachment_revision_ids = Vec::new();
         let external_inputs = if role == MemoryRole::User {
             self.external_input_references(&links.input_revision_ids)
                 .await
@@ -629,7 +555,7 @@ impl ContinuityHost {
         parts.extend(images.iter().map(|image| MessagePart::Image {
             asset: image.attachment.clone(),
         }));
-        let mut entry = MemoryEntry {
+        let entry = MemoryEntry {
             role: role.clone(),
             at: observed_at,
             content: content.to_owned(),
@@ -638,116 +564,14 @@ impl ContinuityHost {
             metadata,
             delivery_state: None,
         };
-        let event_key = self.next_event_key();
-        let mut relation_targets = Vec::new();
-        if let Some(revision_id) = links.responds_to.as_ref() {
-            relation_targets.push(("responds_to".to_owned(), revision_id.clone()));
-        }
-        if let Some(revision_id) = links.continues_from.as_ref() {
-            relation_targets.push(("continues".to_owned(), revision_id.clone()));
-        }
-        relation_targets.extend(
-            links
-                .surfaced_hunch_revision_ids
-                .iter()
-                .cloned()
-                .map(|revision_id| ("surfaces_hunch".to_owned(), revision_id)),
-        );
-        relation_targets.extend(
-            attachment_revision_ids
-                .iter()
-                .cloned()
-                .map(|revision_id| ("has_attachment".to_owned(), revision_id)),
-        );
-        let mut quoted_revision_ids = links
-            .quotes
-            .iter()
-            .map(|quote| quote.source_revision_id.clone())
-            .collect::<Vec<_>>();
-        quoted_revision_ids.sort();
-        quoted_revision_ids.dedup();
-        relation_targets.extend(
-            quoted_revision_ids
-                .iter()
-                .cloned()
-                .map(|revision_id| ("quotes".to_owned(), revision_id)),
-        );
-        relation_targets.extend(
-            external_inputs
-                .iter()
-                .map(|input| ("references".to_owned(), input.source_revision_id.clone())),
-        );
-        let initial_relations = self
-            .initial_relations_for_revision_targets(relation_targets)
-            .await?;
-        let mut provenance_inputs = links.input_revision_ids;
-        provenance_inputs.extend(links.surfaced_hunch_revision_ids);
-        provenance_inputs.extend(quoted_revision_ids);
-        if let Some(revision_id) = links.responds_to {
-            provenance_inputs.push(revision_id);
-        }
-        if let Some(revision_id) = links.continues_from {
-            provenance_inputs.push(revision_id);
-        }
-        provenance_inputs.sort();
-        provenance_inputs.dedup();
-        let payload_content = if entry.content.is_empty() && !images.is_empty() {
-            images
-                .iter()
-                .map(|image| format!("[Image: {}]", image.attachment.filename))
-                .collect::<Vec<_>>()
-                .join("\n")
-        } else if entry.content.is_empty() {
-            links
-                .quotes
-                .iter()
-                .map(|quote| {
-                    format!(
-                        "[Quoted {}: {}]",
-                        quote.source_revision_id,
-                        quote.text.replace('\n', " ")
-                    )
-                })
-                .collect::<Vec<_>>()
-                .join("\n")
-        } else {
-            entry.content.clone()
-        };
-        let page = self
-            .store
-            .write_page(WritePageRequest {
-                owner_id: self.store.owner_id().to_owned(),
-                namespace: self.scopes.conversation.clone(),
-                visibility: "private".to_owned(),
-                lifecycle_status: LifecycleStatus::Active,
-                kind: "conversation_event".to_owned(),
-                mutability: PageMutability::Sealed,
-                created_by: actor.clone(),
-                observed_at: Some(entry.at.clone()),
-                valid_from: None,
-                valid_to: None,
-                payload: Some(PagePayload {
-                    media_type: "text/markdown".to_owned(),
-                    content: payload_content,
-                }),
-                source_refs: Vec::new(),
-                facets: Some(message_facets(&entry)),
-                provenance: vec![ProvenanceEvent {
-                    operation: "ingest".to_owned(),
-                    actor,
-                    timestamp: entry.at.clone(),
-                    input_revision_ids: provenance_inputs,
-                    tool_or_model,
-                }],
-                initial_relations,
-                idempotency_key: Some(event_key),
-            })
-            .await?;
-        entry.revision_id = Some(page.revision_id.clone());
-        self.live_conversation.publish(entry.clone()).await;
+        let stored = self.transcript.append(entry).await?;
+        self.live_conversation.publish(stored.entry.clone()).await;
         Ok(StoredMessage {
-            entry,
-            page,
+            entry: stored.entry,
+            page: LocalMessageRecord {
+                page_id: stored.message_id.clone(),
+                revision_id: stored.message_id,
+            },
             attachment_revision_ids,
         })
     }
@@ -756,49 +580,40 @@ impl ContinuityHost {
         &self,
         images: &[SavedImage],
         observed_at: &str,
-        actor: &Actor,
-        tool_or_model: Option<&str>,
+        _actor: &Actor,
+        _tool_or_model: Option<&str>,
     ) -> Result<Vec<String>> {
         let mut revision_ids = Vec::with_capacity(images.len());
         for image in images {
             let payload = serde_json::to_string_pretty(&image.attachment)?;
+            let sequence = self.source_sequence.reserve().await?;
             let result = self
                 .store
-                .write_page(WritePageRequest {
-                    owner_id: self.store.owner_id().to_owned(),
+                .ingest_page(IngestPageRequest {
                     namespace: self.scopes.conversation.clone(),
-                    visibility: "private".to_owned(),
-                    lifecycle_status: LifecycleStatus::Active,
                     kind: "image_asset".to_owned(),
-                    mutability: PageMutability::Sealed,
-                    created_by: actor.clone(),
                     observed_at: Some(observed_at.to_owned()),
-                    valid_from: None,
-                    valid_to: None,
+                    source_span: Some(SourceSpan {
+                        stream_id: CONVERSATION_SOURCE_STREAM.to_owned(),
+                        start: sequence,
+                        end: sequence,
+                    }),
                     payload: Some(PagePayload {
                         media_type: "application/vnd.symbiont.image+json".to_owned(),
                         content: payload,
                     }),
                     source_refs: vec![SourceRef {
-                        source_type: image.source_type().to_owned(),
-                        uri: image.source_uri().to_owned(),
-                        locator: None,
-                        metadata: image.source_metadata(),
+                        provider_id: image.source_type().to_owned(),
+                        locator: image.source_uri().to_owned(),
+                        media_type: Some("application/vnd.symbiont.image+json".to_owned()),
+                        content_digest: Some(image.attachment.sha256.clone()),
                     }],
                     facets: Some(json!({
                         "kind": "image_asset",
                         "sha256": image.attachment.sha256,
                         "origin": image.source_type()
                     })),
-                    provenance: vec![ProvenanceEvent {
-                        operation: "ingest".to_owned(),
-                        actor: actor.clone(),
-                        timestamp: observed_at.to_owned(),
-                        input_revision_ids: Vec::new(),
-                        tool_or_model: tool_or_model.map(str::to_owned),
-                    }],
-                    initial_relations: Vec::new(),
-                    idempotency_key: Some(format!("image-asset:{}", image.attachment.sha256)),
+                    external_event_id: Some(format!("image-asset:{}", image.attachment.sha256)),
                 })
                 .await?;
             revision_ids.push(result.revision_id);
@@ -906,41 +721,28 @@ impl ContinuityHost {
             .collect::<Vec<_>>();
         revision_ids.sort();
         revision_ids.dedup();
-        let pages = self
-            .read(ReadPagesRequest {
-                page_ids: Vec::new(),
-                revision_ids,
-                projections: vec![Projection::Payload, Projection::Facets],
-                max_chars: (MAX_QUOTES_PER_MESSAGE * (MAX_QUOTE_TEXT_CHARS + 2_000)) as u32,
-            })
+        // Quotes belong to the local transcript. PCP contains only selected
+        // recall material, which may be absent or represented differently.
+        let messages = self
+            .transcript
+            .by_ids(&revision_ids)
             .await?
             .into_iter()
-            .map(|page| (page.revision.revision_id.clone(), page))
+            .filter_map(|entry| entry.revision_id.clone().map(|id| (id, entry)))
             .collect::<HashMap<_, _>>();
 
         drafts
             .into_iter()
             .map(|draft| {
-                let page = pages.get(&draft.source_revision_id).with_context(|| {
+                let entry = messages.get(&draft.source_revision_id).with_context(|| {
                     format!(
-                        "quoted conversation Revision {} was not found",
+                        "quoted transcript message {} was not found",
                         draft.source_revision_id
                     )
                 })?;
-                let source_role = page_message_role(&page)
-                    .context("quoted Revision is not a conversation message")?;
-                let source_at = page
-                    .revision
-                    .observed_at
-                    .clone()
-                    .unwrap_or_else(|| page.revision.created_at.clone());
-                let source = page
-                    .revision
-                    .payload
-                    .as_ref()
-                    .context("quoted conversation Revision has no readable content")?
-                    .content
-                    .clone();
+                let source_role = entry.role.clone();
+                let source_at = entry.at.clone();
+                let source = entry.content.clone();
                 let source_sha256 = format!("{:x}", Sha256::digest(source.as_bytes()));
                 let (text, truncated) = if draft.whole_message {
                     truncate_with_flag(&source, MAX_QUOTE_TEXT_CHARS)
@@ -1015,29 +817,26 @@ impl ContinuityHost {
     }
 
     pub async fn recent_messages(&self, limit: usize) -> Result<Vec<MemoryEntry>> {
-        let mut cursor = None;
-        let mut revision_ids = Vec::new();
-        while revision_ids.len() < limit {
-            let remaining = limit - revision_ids.len();
-            let result = self
-                .search(SearchPagesRequest {
-                    query: "conversation_event".to_owned(),
-                    scopes: vec![self.scopes.conversation.clone()],
-                    mode: SearchMode::Exact,
-                    term_match: pcp_core::SearchTermMatch::All,
-                    projections: vec![Projection::Facets],
-                    filters: SearchFilters::default(),
-                    limit: remaining.min(50) as u32,
-                    cursor: cursor.clone(),
-                })
-                .await?;
-            revision_ids.extend(result.hits.into_iter().map(|hit| hit.revision_id));
-            cursor = result.next_cursor;
-            if cursor.is_none() {
-                break;
-            }
-        }
-        revision_ids.truncate(limit);
+        self.transcript.recent(limit).await
+    }
+
+    /// Reads one chronological page ending at `before_at`.
+    ///
+    /// PCP's temporal result order is newest first; callers receive a page in
+    /// chronological order so it can be prepended to the visible transcript.
+    pub async fn message_history_page(
+        &self,
+        before_at: Option<&str>,
+        limit: usize,
+    ) -> Result<MessageHistoryPage> {
+        let (messages, has_more) = self.transcript.before(before_at, limit).await?;
+        Ok(MessageHistoryPage { messages, has_more })
+    }
+
+    async fn message_entries_for_revisions(
+        &self,
+        revision_ids: &[String],
+    ) -> Result<DecodedMessageEntries> {
         let mut pages = Vec::with_capacity(revision_ids.len());
         for chunk in revision_ids.chunks(20) {
             pages.extend(
@@ -1086,19 +885,11 @@ impl ContinuityHost {
                 .cmp(&right.at)
                 .then_with(|| left.revision_id.cmp(&right.revision_id))
         });
-        if let Some(latest_user) = entries
-            .iter_mut()
-            .rev()
-            .find(|entry| entry.role == MemoryRole::User)
-            && latest_user
-                .revision_id
-                .as_ref()
-                .and_then(|revision| revision_page_ids.get(revision))
-                .is_some_and(|page_id| !replied_to_page_ids.contains(page_id))
-        {
-            latest_user.delivery_state = Some(MessageDeliveryState::Failed);
-        }
-        Ok(entries)
+        Ok(DecodedMessageEntries {
+            entries,
+            revision_page_ids,
+            replied_to_page_ids,
+        })
     }
 
     pub async fn messages_by_revision_ids(
@@ -1111,89 +902,21 @@ impl ContinuityHost {
         if revision_ids.len() > 200 {
             anyhow::bail!("at most 200 conversation Revisions can be read at once");
         }
-        let mut unique = revision_ids.to_vec();
-        unique.sort();
-        unique.dedup();
-        let mut entries = Vec::with_capacity(unique.len());
-        for chunk in unique.chunks(20) {
-            let pages = self
-                .read(ReadPagesRequest {
-                    page_ids: Vec::new(),
-                    revision_ids: chunk.to_vec(),
-                    projections: vec![Projection::Payload, Projection::Facets],
-                    max_chars: 128_000,
-                })
-                .await?;
-            entries.extend(pages.into_iter().filter_map(memory_entry_from_page));
-        }
-        entries.sort_by(|left, right| {
-            left.at
-                .cmp(&right.at)
-                .then_with(|| left.revision_id.cmp(&right.revision_id))
-        });
-        Ok(entries)
+        self.transcript.by_ids(revision_ids).await
     }
 
     pub async fn retract_user_message_and_after(
         &self,
         revision_id: &str,
     ) -> Result<MessageRetractionResult> {
-        let messages = self.recent_messages(500).await?;
-        let target_index = messages
-            .iter()
-            .position(|entry| entry.revision_id.as_deref() == Some(revision_id))
-            .context("message is not an active conversation event")?;
-        if messages[target_index].role != MemoryRole::User {
-            anyhow::bail!("only user messages can be retracted");
-        }
-
-        let suffix_revisions = messages[target_index..]
-            .iter()
-            .filter_map(|entry| entry.revision_id.clone())
-            .collect::<Vec<_>>();
-        let mut retracted_revision_ids = Vec::new();
-        let mut restored_page_ids = Vec::new();
-        for root_revision_id in suffix_revisions.iter().rev() {
-            let cascade = self
-                .store
-                .tombstone_derivation_cascade(root_revision_id.clone(), system_actor())
-                .await?;
-            retracted_revision_ids.extend(cascade.retracted_revision_ids);
-            restored_page_ids.extend(cascade.restored_page_ids);
-        }
-        retracted_revision_ids.sort();
-        retracted_revision_ids.dedup();
-        restored_page_ids.sort();
-        restored_page_ids.dedup();
-
-        let mut message_revision_ids = Vec::new();
-        for chunk in retracted_revision_ids.chunks(20) {
-            let pages = self
-                .read(ReadPagesRequest {
-                    page_ids: Vec::new(),
-                    revision_ids: chunk.to_vec(),
-                    projections: vec![Projection::Facets],
-                    max_chars: 16_000,
-                })
-                .await?;
-            message_revision_ids.extend(pages.into_iter().filter_map(|page| {
-                (page
-                    .revision
-                    .facets
-                    .as_ref()
-                    .and_then(|facets| facets.get("kind"))
-                    .and_then(Value::as_str)
-                    == Some("conversation_event"))
-                .then_some(page.revision.revision_id)
-            }));
-        }
-        message_revision_ids.sort();
-        message_revision_ids.dedup();
-        self.live_conversation.remove(&message_revision_ids).await;
+        let retraction = self.transcript.retract_from(revision_id).await?;
+        self.live_conversation
+            .remove(&retraction.retracted_message_ids)
+            .await;
         Ok(MessageRetractionResult {
-            retracted_revision_ids,
-            message_revision_ids,
-            restored_page_ids,
+            retracted_revision_ids: retraction.retracted_message_ids.clone(),
+            message_revision_ids: retraction.retracted_message_ids,
+            restored_page_ids: Vec::new(),
         })
     }
 
@@ -1205,9 +928,14 @@ impl ContinuityHost {
         Ok(self.live_conversation.after(after_revision_id, limit).await)
     }
 
+    pub fn subscribe_live_messages(&self) -> tokio::sync::watch::Receiver<u64> {
+        self.live_conversation.subscribe()
+    }
+
     pub async fn latest_assistant_revision(&self) -> Result<Option<String>> {
         Ok(self
-            .recent_messages(1)
+            .transcript
+            .recent(1)
             .await?
             .into_iter()
             .next()
@@ -1231,9 +959,12 @@ impl ContinuityHost {
     }
 
     pub async fn memory_chars(&self) -> Result<usize> {
-        self.store
-            .content_char_count(vec![self.scopes.conversation.clone()])
-            .await
+        Ok(self
+            .recent_messages(500)
+            .await?
+            .iter()
+            .map(|entry| entry.content.chars().count())
+            .sum())
     }
 
     pub async fn list_scopes(
@@ -1275,7 +1006,18 @@ impl ContinuityHost {
     }
 
     pub async fn current_revision_id(&self, page_id: &str) -> Result<String> {
-        self.store.current_revision_id(page_id.to_owned()).await
+        let page = self
+            .read(ReadPagesRequest {
+                page_ids: vec![page_id.to_owned()],
+                revision_ids: Vec::new(),
+                projections: vec![Projection::Manifest],
+                max_chars: 256,
+            })
+            .await?
+            .into_iter()
+            .next()
+            .context("PCP Page is not available")?;
+        Ok(page.revision.revision_id)
     }
 
     pub async fn page_ids_for_revisions(
@@ -1373,168 +1115,60 @@ impl ContinuityHost {
     }
 
     pub async fn next_summary_candidate(&self, minimum_chars: usize) -> Result<Option<String>> {
-        self.store
-            .next_summary_candidate(minimum_chars, owned_page_kinds(SUMMARY_EXCLUDED_PAGE_KINDS))
-            .await
+        let _ = minimum_chars;
+        Ok(None)
     }
 
     pub async fn durable_page_inventory(&self) -> Result<Vec<DurablePageInventoryItem>> {
-        self.store
-            .durable_page_inventory(owned_page_kinds(INDEX_EXCLUDED_PAGE_KINDS))
-            .await
+        Ok(Vec::new())
     }
 
     pub async fn mark_summary_assessed(
         &self,
-        target_revision_id: String,
-        outcome: &str,
-        tool_or_model: Option<String>,
+        _target_revision_id: String,
+        _outcome: &str,
+        _tool_or_model: Option<String>,
     ) -> Result<()> {
-        self.store
-            .mark_summary_assessed(target_revision_id, outcome.to_owned(), tool_or_model)
-            .await
+        Ok(())
     }
 
     pub async fn write_model_page(
         &self,
-        namespace: Option<&str>,
-        content: &str,
-        facets: Option<Value>,
-        source_refs: Vec<SourceRef>,
-        source_revision_ids: Vec<String>,
-        relations: Vec<InitialRelation>,
-        idempotency_key: Option<String>,
+        _namespace: Option<&str>,
+        _content: &str,
+        _facets: Option<Value>,
+        _source_refs: Vec<SourceRef>,
+        _source_revision_ids: Vec<String>,
+        _relations: Vec<InitialRelation>,
+        _idempotency_key: Option<String>,
     ) -> Result<WriteResult> {
-        if content.trim().is_empty() || content.chars().count() > MAX_MODEL_WRITE_CHARS {
-            anyhow::bail!("model Page content must contain 1-{MAX_MODEL_WRITE_CHARS} characters");
-        }
-        let namespace = namespace.unwrap_or(&self.scopes.user);
-        self.resolve_scopes(&[namespace.to_owned()])?;
-        let actor = model_actor();
-        let mut relations = relations;
-        let source_relations = self
-            .initial_relations_for_revision_targets(
-                source_revision_ids
-                    .iter()
-                    .cloned()
-                    .map(|revision_id| ("derived_from".to_owned(), revision_id))
-                    .collect(),
-            )
-            .await?;
-        for source_relation in source_relations {
-            if !relations.iter().any(|relation| {
-                relation.relation_type == source_relation.relation_type
-                    && relation.to_page_id == source_relation.to_page_id
-            }) {
-                relations.push(source_relation);
-            }
-        }
-        let kind = page_kind(facets.as_ref(), "memory_synthesis");
-        self.store
-            .write_page(WritePageRequest {
-                owner_id: self.store.owner_id().to_owned(),
-                namespace: namespace.to_owned(),
-                visibility: "private".to_owned(),
-                lifecycle_status: LifecycleStatus::Active,
-                kind,
-                mutability: PageMutability::Revisioned,
-                created_by: actor.clone(),
-                observed_at: Some(now()),
-                valid_from: None,
-                valid_to: None,
-                payload: Some(PagePayload {
-                    media_type: "text/markdown".to_owned(),
-                    content: content.trim().to_owned(),
-                }),
-                source_refs,
-                facets,
-                provenance: vec![ProvenanceEvent {
-                    operation: "derive".to_owned(),
-                    actor,
-                    timestamp: now(),
-                    input_revision_ids: source_revision_ids,
-                    tool_or_model: Some("Codex".to_owned()),
-                }],
-                initial_relations: relations,
-                idempotency_key,
-            })
-            .await
+        anyhow::bail!("PCP v0.8 tenant mode does not permit model-authored Pages")
     }
 
     pub async fn write_model_summary(
         &self,
-        target_page_id: String,
-        target_revision_id: String,
-        expected_summary_revision_id: Option<String>,
-        content: String,
-        source_revision_ids: Vec<String>,
-        idempotency_key: Option<String>,
-        tool_or_model: Option<String>,
+        _target_page_id: String,
+        _target_revision_id: String,
+        _expected_summary_revision_id: Option<String>,
+        _content: String,
+        _source_revision_ids: Vec<String>,
+        _idempotency_key: Option<String>,
+        _tool_or_model: Option<String>,
     ) -> Result<WriteSummaryResult> {
-        let actor = model_actor();
-        let tool_or_model = tool_or_model.unwrap_or_else(|| "Codex".to_owned());
-        let mut inputs = Vec::with_capacity(source_revision_ids.len() + 1);
-        inputs.push(target_revision_id.clone());
-        for revision_id in source_revision_ids {
-            if !inputs.contains(&revision_id) {
-                inputs.push(revision_id);
-            }
-        }
-        self.store
-            .write_summary(WriteSummaryRequest {
-                target_page_id,
-                target_revision_id,
-                expected_summary_revision_id,
-                content,
-                created_by: actor.clone(),
-                tool_or_model: Some(tool_or_model.clone()),
-                provenance: vec![ProvenanceEvent {
-                    operation: "summarize".to_owned(),
-                    actor,
-                    timestamp: now(),
-                    input_revision_ids: inputs,
-                    tool_or_model: Some(tool_or_model),
-                }],
-                idempotency_key,
-            })
-            .await
+        anyhow::bail!("PCP v0.8 tenant mode does not permit model-authored summaries")
     }
 
     pub async fn revise_current_model_page(
         &self,
-        target_page_id: String,
-        expected_revision_id: String,
-        content: String,
-        source_revision_ids: Vec<String>,
+        _target_page_id: String,
+        _expected_revision_id: String,
+        _content: String,
+        _source_revision_ids: Vec<String>,
     ) -> Result<WriteResult> {
-        let target = self
-            .store
-            .read_pages(ReadPagesRequest {
-                page_ids: Vec::new(),
-                revision_ids: vec![expected_revision_id.clone()],
-                projections: vec![Projection::Manifest, Projection::Facets],
-                max_chars: 256,
-            })
-            .await?
-            .into_iter()
-            .next()
-            .context("revision target is not available")?;
-        if target.page.page_id != target_page_id {
-            anyhow::bail!("target Page and expected Revision do not match");
-        }
-        self.revise_model_page(
-            target_page_id,
-            expected_revision_id,
-            content,
-            target.revision.facets,
-            Vec::new(),
-            LifecycleStatus::Active,
-            source_revision_ids,
-            None,
-        )
-        .await
+        anyhow::bail!("PCP v0.8 tenant mode does not permit model-authored revisions")
     }
 
+    #[cfg(any())]
     pub async fn consolidate_model_pages(
         &self,
         canonical_page_id: String,
@@ -1666,108 +1300,43 @@ impl ContinuityHost {
     #[allow(clippy::too_many_arguments)]
     pub async fn assess_model_page_validity(
         &self,
-        target_page_id: String,
-        target_revision_id: String,
-        expected_assessment_id: Option<String>,
-        standing: ValidityStanding,
-        rationale: String,
-        scope: Option<String>,
-        mut basis_revision_ids: Vec<String>,
-        idempotency_key: Option<String>,
-        tool_or_model: Option<String>,
+        _target_page_id: String,
+        _target_revision_id: String,
+        _expected_assessment_id: Option<String>,
+        _standing: ValidityStanding,
+        _rationale: String,
+        _scope: Option<String>,
+        _basis_revision_ids: Vec<String>,
+        _idempotency_key: Option<String>,
+        _tool_or_model: Option<String>,
     ) -> Result<WriteValidityResult> {
-        basis_revision_ids.sort();
-        basis_revision_ids.dedup();
-        self.store
-            .assess_page_validity(AssessPageValidityRequest {
-                target_page_id,
-                target_revision_id,
-                expected_assessment_revision_id: expected_assessment_id,
-                standing,
-                rationale,
-                scope,
-                basis_revision_ids,
-                created_by: model_actor(),
-                tool_or_model: Some(tool_or_model.unwrap_or_else(|| "Codex".to_owned())),
-                idempotency_key,
-            })
-            .await
+        anyhow::bail!("PCP v0.8 tenant mode does not permit validity assessments")
     }
 
     #[allow(clippy::too_many_arguments)]
     pub async fn revise_model_page(
         &self,
-        page_id: String,
-        expected_revision_id: String,
-        content: String,
-        facets: Option<Value>,
-        source_refs: Vec<SourceRef>,
-        lifecycle_status: LifecycleStatus,
-        source_revision_ids: Vec<String>,
-        idempotency_key: Option<String>,
+        _page_id: String,
+        _expected_revision_id: String,
+        _content: String,
+        _facets: Option<Value>,
+        _source_refs: Vec<SourceRef>,
+        _lifecycle_status: LifecycleStatus,
+        _source_revision_ids: Vec<String>,
+        _idempotency_key: Option<String>,
     ) -> Result<WriteResult> {
-        if content.trim().is_empty() || content.chars().count() > MAX_MODEL_WRITE_CHARS {
-            anyhow::bail!("model Page content must contain 1-{MAX_MODEL_WRITE_CHARS} characters");
-        }
-        let actor = model_actor();
-        let mut provenance_inputs = Vec::with_capacity(source_revision_ids.len() + 1);
-        provenance_inputs.push(expected_revision_id.clone());
-        provenance_inputs.extend(source_revision_ids.iter().cloned());
-        self.store
-            .revise_page(RevisePageRequest {
-                page_id,
-                expected_revision_id,
-                created_by: actor.clone(),
-                lifecycle_status,
-                observed_at: Some(now()),
-                valid_from: None,
-                valid_to: None,
-                payload: Some(PagePayload {
-                    media_type: "text/markdown".to_owned(),
-                    content: content.trim().to_owned(),
-                }),
-                source_refs,
-                facets,
-                provenance: vec![ProvenanceEvent {
-                    operation: "revise".to_owned(),
-                    actor,
-                    timestamp: now(),
-                    input_revision_ids: provenance_inputs,
-                    tool_or_model: Some("Codex".to_owned()),
-                }],
-                initial_relations: Vec::new(),
-                idempotency_key,
-            })
-            .await
+        anyhow::bail!("PCP v0.8 tenant mode does not permit model-authored revisions")
     }
 
     pub async fn link_model_pages(
         &self,
-        from_page_id: String,
-        relation_type: String,
-        to_page_id: String,
-        basis_revision_ids: Vec<String>,
-        idempotency_key: Option<String>,
+        _from_page_id: String,
+        _relation_type: String,
+        _to_page_id: String,
+        _basis_revision_ids: Vec<String>,
+        _idempotency_key: Option<String>,
     ) -> Result<Relation> {
-        self.store
-            .link_pages(LinkPagesRequest {
-                from_page_id,
-                relation_type,
-                to_page_id,
-                basis_revision_ids,
-                created_by: model_actor(),
-                idempotency_key,
-            })
-            .await
-    }
-
-    fn next_event_key(&self) -> String {
-        let nanos = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_nanos();
-        let counter = self.event_counter.fetch_add(1, Ordering::Relaxed);
-        format!("symbiont-event:{nanos}:{counter}")
+        anyhow::bail!("PCP v0.8 tenant mode does not permit tenant-authored relations")
     }
 }
 
@@ -1967,17 +1536,8 @@ fn image_asset_from_page(page: ReadPage) -> Option<ImageAssetPage> {
     let source_type = revision
         .source_refs
         .first()
-        .map(|source| source.source_type.clone());
-    let revised_prompt = revision
-        .source_refs
-        .iter()
-        .filter_map(|source| source.metadata.as_ref())
-        .find_map(|metadata| {
-            metadata
-                .get("revisedPrompt")
-                .and_then(Value::as_str)
-                .map(str::to_owned)
-        });
+        .map(|source| source.provider_id.clone());
+    let revised_prompt = None;
     Some(ImageAssetPage {
         revision_id: revision.revision_id,
         observed_at: revision.observed_at.unwrap_or(revision.created_at),
@@ -1998,6 +1558,25 @@ fn page_message_role(page: &ReadPage) -> Option<MemoryRole> {
         "assistant" => Some(MemoryRole::Assistant),
         "memory" => Some(MemoryRole::Memory),
         _ => None,
+    }
+}
+
+fn mark_latest_user_delivery_state(
+    entries: &mut [MemoryEntry],
+    revision_page_ids: &HashMap<String, String>,
+    replied_to_page_ids: &HashSet<String>,
+) {
+    if let Some(latest_user) = entries
+        .iter_mut()
+        .rev()
+        .find(|entry| entry.role == MemoryRole::User)
+        && latest_user
+            .revision_id
+            .as_ref()
+            .and_then(|revision| revision_page_ids.get(revision))
+            .is_some_and(|page_id| !replied_to_page_ids.contains(page_id))
+    {
+        latest_user.delivery_state = Some(MessageDeliveryState::Failed);
     }
 }
 

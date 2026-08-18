@@ -1,4 +1,4 @@
-use std::{collections::HashSet, convert::Infallible, sync::Arc};
+use std::{collections::HashSet, convert::Infallible, sync::Arc, time::Duration};
 
 use anyhow::Context;
 use axum::{
@@ -6,9 +6,13 @@ use axum::{
     body::{Body, Bytes},
     extract::{DefaultBodyLimit, Multipart, Path as AxumPath, Query, State},
     http::{StatusCode, header},
-    response::{IntoResponse, Response},
+    response::{
+        IntoResponse, Response,
+        sse::{Event, KeepAlive, Sse},
+    },
     routing::{delete, get, post},
 };
+use chrono::NaiveDate;
 use pcp_core::{
     Projection, ReadPage, ReadPagesRequest, Scope, SearchFilters, SearchMode, SearchPagesRequest,
 };
@@ -47,7 +51,7 @@ use crate::{
     compute::{ComputeConfig, ComputeLane, ComputeStore, ModelInfo},
     compute_policy::{ComputePolicyStore, ComputeTopicPolicy, ComputeTopicPolicyDraft},
     continuation::ContinuationQueue,
-    continuity::{ContinuityHost, MAX_QUOTES_PER_MESSAGE, MessageLinks},
+    continuity::{ContinuityHost, MAX_QUOTES_PER_MESSAGE, MessageHistoryPage, MessageLinks},
     conversation::{
         ConversationCoordinator, ConversationLease, ConversationSnapshot, ExternalContext,
         QueuedUserMessage, SettledConversation,
@@ -61,6 +65,7 @@ use crate::{
     ephemeral_chat::EphemeralChatService,
     exploration::{ExplorationHandle, ExplorationSnapshot, ManualExplorationRun, today_started_at},
     identity::{AvatarSlot, IdentitySettingsUpdate, IdentitySnapshot, IdentityStore},
+    inference::{InferenceAttempt, InferenceExecutor},
     input_roles::{InputRoleSettingsSnapshot, InputRoleSettingsUpdate, InputRoleStore},
     mail_input::{MailInputConfig, MailInputConnectionTest, MailInputSnapshot, MailInputStore},
     memory::{
@@ -112,6 +117,7 @@ const REFLECTION_UI_JS: &str = include_str!("../web/reflection-ui.js");
 const RECONCILIATION_UI_JS: &str = include_str!("../web/reconciliation-ui.js");
 const TOPIC_UI_JS: &str = include_str!("../web/topic-ui.js");
 const MESSAGE_SYNC_JS: &str = include_str!("../web/message-sync.js");
+const MESSAGE_HISTORY_JS: &str = include_str!("../web/message-history.js");
 const MESSAGE_ACTIONS_JS: &str = include_str!("../web/message-actions.js");
 const TURN_DISPOSITION_UI_JS: &str = include_str!("../web/turn-disposition-ui.js");
 const QUOTE_UI_JS: &str = include_str!("../web/quote-ui.js");
@@ -141,6 +147,8 @@ const MAX_USER_MESSAGE_CHARS: usize = 12_000;
 const MAX_CODEX_TASK_CONTEXTS: usize = 2;
 const MAX_CHAT_BODY_BYTES: usize =
     MAX_USER_MESSAGE_CHARS + (MAX_IMAGE_BYTES * MAX_IMAGES_PER_MESSAGE) + 64_000;
+const INITIAL_CHAT_MESSAGE_LIMIT: usize = 50;
+const HISTORY_PAGE_MESSAGE_LIMIT: usize = 50;
 
 #[derive(Clone)]
 pub struct AppState {
@@ -153,6 +161,7 @@ pub struct AppState {
     autonomy: Arc<AutonomyStore>,
     codex: Arc<Mutex<CodexClient>>,
     compute: Arc<ComputeStore>,
+    inference: Arc<InferenceExecutor>,
     ambient: Arc<AmbientTopologyStore>,
     drive_input: Arc<DriveInputStore>,
     mail_input: Arc<MailInputStore>,
@@ -187,6 +196,7 @@ impl AppState {
         autonomy: Arc<AutonomyStore>,
         codex: Arc<Mutex<CodexClient>>,
         compute: Arc<ComputeStore>,
+        inference: Arc<InferenceExecutor>,
         ambient: Arc<AmbientTopologyStore>,
         drive_input: Arc<DriveInputStore>,
         mail_input: Arc<MailInputStore>,
@@ -222,6 +232,7 @@ impl AppState {
             autonomy,
             codex,
             compute,
+            inference,
             ambient,
             drive_input,
             mail_input,
@@ -278,7 +289,9 @@ struct CodexTasksQuery {
 #[serde(rename_all = "camelCase")]
 struct BootstrapResponse {
     messages: Vec<MemoryEntry>,
+    history_has_more: bool,
     signals: Vec<SignalEvent>,
+    signals_version: u64,
     input_roles: InputRoleSettingsSnapshot,
     turn_dispositions: Vec<TurnDisposition>,
     memory_chars: usize,
@@ -332,7 +345,9 @@ struct RuntimeResponse {
     conversation: ConversationSnapshot,
     compute_policies: Vec<ComputeTopicPolicy>,
     messages: Vec<MemoryEntry>,
-    signals: Vec<SignalEvent>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    signals: Option<Vec<SignalEvent>>,
+    signals_version: u64,
     signal_retention: SignalRetentionConfig,
     input_roles: InputRoleSettingsSnapshot,
     turn_dispositions: Vec<TurnDisposition>,
@@ -351,6 +366,20 @@ struct RuntimeRecoveryResponse {
 #[serde(rename_all = "camelCase")]
 struct RuntimeQuery {
     after_revision_id: Option<String>,
+    signals_version: Option<u64>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct MessageHistoryQuery {
+    before_at: Option<String>,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct MessageHistoryResponse {
+    messages: Vec<MemoryEntry>,
+    has_more: bool,
 }
 
 #[derive(Default, Deserialize)]
@@ -476,6 +505,24 @@ struct TypingRequest {
 }
 
 #[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct BriefingTopicRunRequest {
+    date: String,
+    #[serde(default)]
+    reclassify: bool,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct BriefingTopicRunResponse {
+    queued_count: usize,
+    assigned_count: usize,
+    outcome: String,
+    reason: Option<String>,
+    reclassified: bool,
+}
+
+#[derive(Deserialize)]
 struct PermissionDecisionRequest {
     decision: PermissionDecision,
 }
@@ -588,6 +635,7 @@ pub fn router(state: AppState) -> Router {
         .route("/reconciliation-ui.js", get(reconciliation_ui_js))
         .route("/topic-ui.js", get(topic_ui_js))
         .route("/message-sync.js", get(message_sync_js))
+        .route("/message-history.js", get(message_history_js))
         .route("/message-actions.js", get(message_actions_js))
         .route("/turn-disposition-ui.js", get(turn_disposition_ui_js))
         .route("/quote-ui.js", get(quote_ui_js))
@@ -603,6 +651,8 @@ pub fn router(state: AppState) -> Router {
         )
         .route("/api/health", get(health))
         .route("/api/bootstrap", get(bootstrap))
+        .route("/api/events", get(runtime_events))
+        .route("/api/messages", get(message_history))
         .route("/api/chat", post(chat))
         .route("/api/chat/append", post(append_chat))
         .route("/api/chat/interrupt", post(interrupt_chat))
@@ -636,6 +686,7 @@ pub fn router(state: AppState) -> Router {
         )
         .route("/api/messages/{revision_id}", delete(retract_message))
         .route("/api/signals/{signal_id}", delete(dismiss_signal))
+        .route("/api/briefing/topics", post(run_briefing_topics))
         .route("/api/interaction/seen", post(record_seen))
         .route("/api/interaction/typing", post(record_typing))
         .route("/api/permissions/{permission_id}", post(resolve_permission))
@@ -941,6 +992,13 @@ async fn message_sync_js() -> impl IntoResponse {
     )
 }
 
+async fn message_history_js() -> impl IntoResponse {
+    (
+        [(header::CONTENT_TYPE, "text/javascript; charset=utf-8")],
+        MESSAGE_HISTORY_JS,
+    )
+}
+
 async fn message_actions_js() -> impl IntoResponse {
     (
         [(header::CONTENT_TYPE, "text/javascript; charset=utf-8")],
@@ -1008,11 +1066,13 @@ fn avatar_response(bytes: &'static [u8]) -> Response {
 }
 
 async fn bootstrap(State(state): State<AppState>) -> Result<Json<BootstrapResponse>, ApiError> {
-    let messages = state
+    let history = state
         .continuity
-        .recent_messages(100)
+        .message_history_page(None, INITIAL_CHAT_MESSAGE_LIMIT)
         .await
-        .map_err(ApiError::internal)?
+        .map_err(ApiError::internal)?;
+    let messages = history
+        .messages
         .into_iter()
         .filter(|entry| matches!(entry.role, MemoryRole::User | MemoryRole::Assistant))
         .collect();
@@ -1063,7 +1123,9 @@ async fn bootstrap(State(state): State<AppState>) -> Result<Json<BootstrapRespon
 
     Ok(Json(BootstrapResponse {
         messages,
+        history_has_more: history.has_more,
         signals,
+        signals_version: state.signals.revision(),
         input_roles,
         turn_dispositions,
         memory_chars,
@@ -1141,12 +1203,6 @@ async fn archive(State(state): State<AppState>) -> Result<Json<ArchiveResponse>,
         .list_scopes(None, 100, None)
         .await
         .map_err(ApiError::internal)?;
-    let page_count = state
-        .continuity
-        .store()
-        .page_count(state.continuity.allowed_scopes())
-        .await
-        .map_err(ApiError::internal)?;
     let recent_pages = state
         .continuity
         .search(SearchPagesRequest {
@@ -1185,6 +1241,10 @@ async fn archive(State(state): State<AppState>) -> Result<Json<ArchiveResponse>,
         })
         .await
         .map_err(ApiError::internal)?;
+    // The tenant API intentionally has no global count operation. The
+    // archive surface reports the materialized read window instead of asking
+    // for a privileged store-wide statistic.
+    let page_count = pages.len() as u64;
     Ok(Json(ArchiveResponse {
         profile,
         memory,
@@ -1671,12 +1731,18 @@ async fn runtime(
         .live_messages_after(query.after_revision_id.as_deref(), 20)
         .await
         .map_err(ApiError::internal)?;
-    let mut signals = state
-        .signals
-        .visible(100)
-        .await
-        .map_err(ApiError::internal)?;
-    apply_input_role_appearances(&state, &mut signals).await;
+    let signals_version = state.signals.revision();
+    let signals = if query.signals_version == Some(signals_version) {
+        None
+    } else {
+        let mut signals = state
+            .signals
+            .visible(100)
+            .await
+            .map_err(ApiError::internal)?;
+        apply_input_role_appearances(&state, &mut signals).await;
+        Some(signals)
+    };
     let turn_dispositions = state
         .reflection
         .store()
@@ -1713,12 +1779,70 @@ async fn runtime(
         compute_policies: state.compute_policies.snapshot().await,
         messages,
         signals,
+        signals_version,
         signal_retention: state.signal_retention.snapshot().await,
         input_roles,
         turn_dispositions,
         permissions: state.permissions.snapshot().await,
         bridge: state.bridge.snapshot().await,
     }))
+}
+
+/// A local, one-way invalidation stream for browser projections.
+///
+/// Events carry only their changed domain. The browser follows an event with
+/// the existing bounded runtime request, preserving its cursor and recovery
+/// semantics without repeatedly reconstructing the snapshot while idle.
+async fn runtime_events(State(state): State<AppState>) -> impl IntoResponse {
+    let mut messages = state.continuity.subscribe_live_messages();
+    let mut signals = state.signals.subscribe();
+    let mut permissions = state.permissions.subscribe();
+    let (sender, receiver) = mpsc::channel::<&'static str>(16);
+    tokio::spawn(async move {
+        loop {
+            let kind = tokio::select! {
+                changed = messages.changed() => {
+                    if changed.is_err() { break; }
+                    "messages"
+                }
+                changed = signals.changed() => {
+                    if changed.is_err() { break; }
+                    "signals"
+                }
+                changed = permissions.changed() => {
+                    if changed.is_err() { break; }
+                    "permissions"
+                }
+            };
+            if sender.send(kind).await.is_err() {
+                break;
+            }
+        }
+    });
+    let stream = ReceiverStream::new(receiver)
+        .map(|kind| Ok::<_, Infallible>(Event::default().event("runtime").data(kind)));
+    Sse::new(stream).keep_alive(
+        KeepAlive::new()
+            .interval(Duration::from_secs(20))
+            .text("keepalive"),
+    )
+}
+
+async fn message_history(
+    State(state): State<AppState>,
+    Query(query): Query<MessageHistoryQuery>,
+) -> Result<Json<MessageHistoryResponse>, ApiError> {
+    let before_at = query.before_at.as_deref().filter(|value| !value.is_empty());
+    let MessageHistoryPage { messages, has_more } = state
+        .continuity
+        .message_history_page(before_at, HISTORY_PAGE_MESSAGE_LIMIT)
+        .await
+        .map_err(ApiError::internal)?;
+    let messages = messages
+        .into_iter()
+        .filter(|entry| matches!(entry.role, MemoryRole::User | MemoryRole::Assistant))
+        .collect();
+    Ok(Json(MessageHistoryResponse { messages, has_more }))
 }
 
 async fn recover_runtime(
@@ -2346,6 +2470,138 @@ async fn dismiss_signal(
         return Err(ApiError::not_found("Input signal is no longer available."));
     }
     Ok(StatusCode::NO_CONTENT)
+}
+
+async fn run_briefing_topics(
+    State(state): State<AppState>,
+    Json(request): Json<BriefingTopicRunRequest>,
+) -> Result<Json<BriefingTopicRunResponse>, ApiError> {
+    let day = NaiveDate::parse_from_str(request.date.trim(), "%Y-%m-%d")
+        .map_err(|_| ApiError::bad_request("Briefing date must use YYYY-MM-DD."))?;
+    let Some(input_events) = state.conversation.subscribe_background_input().await else {
+        return Err(ApiError::conflict(
+            "Finish the current reply before organizing input topics.",
+        ));
+    };
+    let queued_count = if request.reclassify {
+        state
+            .signals
+            .requeue_all_briefing_topics_for_local_day(day)
+            .await
+            .map_err(ApiError::internal)?
+    } else {
+        state
+            .signals
+            .queue_unreviewed_briefing_topics_for_local_day(day)
+            .await
+            .map_err(ApiError::internal)?
+    };
+    if queued_count == 0 {
+        return Ok(Json(BriefingTopicRunResponse {
+            queued_count,
+            assigned_count: 0,
+            outcome: "nothing_to_do".to_owned(),
+            reason: None,
+            reclassified: request.reclassify,
+        }));
+    }
+    let inputs = state.signals.briefing_inputs_for_local_day(day).await;
+    let language = state.ambient.luna_output_language().await;
+    match state
+        .inference
+        .classify_briefing_topics(&inputs, input_events, language)
+        .await
+    {
+        InferenceAttempt::Completed(outcome) if !outcome.interrupted => {
+            let assigned_count = outcome.value.len();
+            state
+                .signals
+                .settle_briefing_topics_for_local_day(day, &outcome.value)
+                .await
+                .map_err(ApiError::internal)?;
+            state
+                .usage
+                .record_all(&outcome.invocations)
+                .await
+                .map_err(ApiError::internal)?;
+            tracing::info!(
+                target: crate::runtime_log::TARGET,
+                event = "input_briefing_topics_manual_completed",
+                date = %day,
+                queued_count,
+                assigned_count,
+                reclassified = request.reclassify,
+                "manual input briefing topic organization completed"
+            );
+            Ok(Json(BriefingTopicRunResponse {
+                queued_count,
+                assigned_count,
+                outcome: "completed".to_owned(),
+                reason: None,
+                reclassified: request.reclassify,
+            }))
+        }
+        InferenceAttempt::Completed(outcome) => {
+            state
+                .signals
+                .mark_briefing_topics_unavailable_for_local_day(day)
+                .await
+                .map_err(ApiError::internal)?;
+            state
+                .usage
+                .record_all(&outcome.invocations)
+                .await
+                .map_err(ApiError::internal)?;
+            let reason =
+                "New conversation input interrupted the local organization run.".to_owned();
+            tracing::info!(
+                target: crate::runtime_log::TARGET,
+                event = "input_briefing_topics_manual_interrupted",
+                date = %day,
+                queued_count,
+                reclassified = request.reclassify,
+                "manual input briefing topic organization yielded to new conversation input"
+            );
+            Ok(Json(BriefingTopicRunResponse {
+                queued_count,
+                assigned_count: 0,
+                outcome: "interrupted".to_owned(),
+                reason: Some(reason),
+                reclassified: request.reclassify,
+            }))
+        }
+        InferenceAttempt::Deferred {
+            reason,
+            invocations,
+        } => {
+            state
+                .signals
+                .mark_briefing_topics_unavailable_for_local_day(day)
+                .await
+                .map_err(ApiError::internal)?;
+            state
+                .usage
+                .record_all(&invocations)
+                .await
+                .map_err(ApiError::internal)?;
+            tracing::warn!(
+                target: crate::runtime_log::TARGET,
+                event = "input_briefing_topics_manual_deferred",
+                date = %day,
+                queued_count,
+                reclassified = request.reclassify,
+                reason = %reason,
+                "manual input briefing topic organization was deferred"
+            );
+            Ok(Json(BriefingTopicRunResponse {
+                queued_count,
+                assigned_count: 0,
+                outcome: "deferred".to_owned(),
+                reason: Some(reason),
+                reclassified: request.reclassify,
+            }))
+        }
+    }
 }
 
 async fn interrupt_chat(

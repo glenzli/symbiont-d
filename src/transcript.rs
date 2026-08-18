@@ -1,0 +1,508 @@
+//! Authoritative local conversation transcript.
+//!
+//! PCP receives selected, durable source material for later recall.  It is not
+//! the chat application's transcript store: a user must be able to browse,
+//! edit, retract, and eventually expire a conversation even while PCP is
+//! unavailable or its representation changes.
+
+use std::{
+    path::{Path, PathBuf},
+    sync::Arc,
+};
+
+use anyhow::{Context, Result};
+use chrono::{SecondsFormat, Utc};
+use getrandom::fill;
+use rusqlite::{Connection, OptionalExtension, params};
+use serde_json::Value;
+use tokio::{sync::Mutex, task};
+
+use crate::memory::{MemoryEntry, MemoryRole, MessagePart};
+
+const SCHEMA_VERSION: &str = "1";
+
+#[derive(Clone, Debug, Default)]
+pub struct TranscriptRestoreReport {
+    pub imported_messages: usize,
+    pub source_snapshot: Option<PathBuf>,
+}
+
+#[derive(Clone, Debug)]
+pub struct TranscriptMessage {
+    pub entry: MemoryEntry,
+    pub message_id: String,
+}
+
+#[derive(Clone, Debug, Default)]
+pub struct TranscriptRetraction {
+    pub retracted_message_ids: Vec<String>,
+}
+
+/// The connection is intentionally opened per operation.  It keeps all
+/// blocking SQLite work off the async runtime and makes process restart a
+/// normal part of the transcript contract.
+#[derive(Clone)]
+pub struct TranscriptStore {
+    path: PathBuf,
+    mutation: Arc<Mutex<()>>,
+}
+
+impl TranscriptStore {
+    pub async fn open(
+        path: PathBuf,
+        legacy_snapshot: Option<PathBuf>,
+    ) -> Result<(Self, TranscriptRestoreReport)> {
+        let store = Self {
+            path,
+            mutation: Arc::new(Mutex::new(())),
+        };
+        store.initialize().await?;
+        let report = store.restore_if_empty(legacy_snapshot).await?;
+        Ok((store, report))
+    }
+
+    pub fn path(&self) -> &Path {
+        &self.path
+    }
+
+    async fn initialize(&self) -> Result<()> {
+        let path = self.path.clone();
+        task::spawn_blocking(move || -> Result<()> {
+            if let Some(parent) = path.parent() {
+                std::fs::create_dir_all(parent)
+                    .with_context(|| format!("create transcript directory {}", parent.display()))?;
+            }
+            let connection = open_connection(&path)?;
+            connection.execute_batch(
+                "
+                PRAGMA journal_mode = WAL;
+                PRAGMA foreign_keys = ON;
+                CREATE TABLE IF NOT EXISTS transcript_meta (
+                    key TEXT PRIMARY KEY,
+                    value TEXT NOT NULL
+                );
+                CREATE TABLE IF NOT EXISTS transcript_messages (
+                    message_id TEXT PRIMARY KEY,
+                    sequence INTEGER NOT NULL UNIQUE,
+                    occurred_at TEXT NOT NULL,
+                    role TEXT NOT NULL,
+                    content TEXT NOT NULL,
+                    entry_json TEXT NOT NULL,
+                    imported_source_revision_id TEXT UNIQUE,
+                    retracted_at TEXT
+                );
+                CREATE INDEX IF NOT EXISTS transcript_messages_visible
+                    ON transcript_messages(retracted_at, sequence DESC);
+                CREATE INDEX IF NOT EXISTS transcript_messages_at
+                    ON transcript_messages(occurred_at, sequence DESC);
+                CREATE TABLE IF NOT EXISTS transcript_imports (
+                    source_snapshot TEXT NOT NULL,
+                    source_revision_id TEXT NOT NULL UNIQUE,
+                    imported_at TEXT NOT NULL,
+                    PRIMARY KEY(source_snapshot, source_revision_id)
+                );
+                ",
+            )?;
+            connection.execute(
+                "INSERT OR REPLACE INTO transcript_meta(key, value) VALUES ('schema_version', ?1)",
+                [SCHEMA_VERSION],
+            )?;
+            Ok(())
+        })
+        .await
+        .context("join transcript initialization")??;
+        Ok(())
+    }
+
+    async fn restore_if_empty(
+        &self,
+        legacy_snapshot: Option<PathBuf>,
+    ) -> Result<TranscriptRestoreReport> {
+        let Some(snapshot) = legacy_snapshot.filter(|path| path.is_file()) else {
+            return Ok(TranscriptRestoreReport::default());
+        };
+        let _guard = self.mutation.lock().await;
+        let destination = self.path.clone();
+        let source = snapshot.clone();
+        task::spawn_blocking(move || restore_if_empty_blocking(&destination, &source))
+            .await
+            .context("join transcript archive restore")?
+    }
+
+    pub async fn append(&self, mut entry: MemoryEntry) -> Result<TranscriptMessage> {
+        let _guard = self.mutation.lock().await;
+        let message_id = entry.revision_id.clone().unwrap_or_else(new_message_id);
+        entry.revision_id = Some(message_id.clone());
+        let path = self.path.clone();
+        let stored = entry.clone();
+        let persisted_message_id = message_id.clone();
+        task::spawn_blocking(move || -> Result<()> {
+            let mut connection = open_connection(&path)?;
+            let transaction = connection.transaction()?;
+            let sequence = next_sequence(&transaction)?;
+            transaction.execute(
+                "INSERT INTO transcript_messages(
+                    message_id, sequence, occurred_at, role, content, entry_json,
+                    imported_source_revision_id, retracted_at
+                 ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, NULL, NULL)",
+                params![
+                    persisted_message_id,
+                    sequence,
+                    stored.at,
+                    role_name(&stored.role),
+                    stored.content,
+                    serde_json::to_string(&stored)?,
+                ],
+            )?;
+            transaction.commit()?;
+            Ok(())
+        })
+        .await
+        .context("join transcript append")??;
+        Ok(TranscriptMessage { entry, message_id })
+    }
+
+    pub async fn recent(&self, limit: usize) -> Result<Vec<MemoryEntry>> {
+        let path = self.path.clone();
+        task::spawn_blocking(move || read_recent(&path, limit, None))
+            .await
+            .context("join transcript recent read")?
+    }
+
+    pub async fn before(
+        &self,
+        before_at: Option<&str>,
+        limit: usize,
+    ) -> Result<(Vec<MemoryEntry>, bool)> {
+        let path = self.path.clone();
+        let before = before_at.map(str::to_owned);
+        task::spawn_blocking(move || read_history_page(&path, before.as_deref(), limit))
+            .await
+            .context("join transcript history read")?
+    }
+
+    pub async fn by_ids(&self, message_ids: &[String]) -> Result<Vec<MemoryEntry>> {
+        if message_ids.is_empty() {
+            return Ok(Vec::new());
+        }
+        let path = self.path.clone();
+        let ids = message_ids.to_vec();
+        task::spawn_blocking(move || read_by_ids(&path, &ids))
+            .await
+            .context("join transcript selected read")?
+    }
+
+    pub async fn retract_from(&self, message_id: &str) -> Result<TranscriptRetraction> {
+        let _guard = self.mutation.lock().await;
+        let path = self.path.clone();
+        let message_id = message_id.to_owned();
+        task::spawn_blocking(move || retract_from_blocking(&path, &message_id))
+            .await
+            .context("join transcript retraction")?
+    }
+}
+
+fn open_connection(path: &Path) -> Result<Connection> {
+    Connection::open(path).with_context(|| format!("open transcript database {}", path.display()))
+}
+
+fn next_sequence(connection: &Connection) -> Result<i64> {
+    Ok(connection.query_row(
+        "SELECT COALESCE(MAX(sequence), 0) + 1 FROM transcript_messages",
+        [],
+        |row| row.get(0),
+    )?)
+}
+
+fn role_name(role: &MemoryRole) -> &'static str {
+    match role {
+        MemoryRole::User => "user",
+        MemoryRole::Assistant => "assistant",
+        MemoryRole::Memory => "memory",
+    }
+}
+
+fn new_message_id() -> String {
+    let mut bytes = [0_u8; 16];
+    fill(&mut bytes).expect("operating-system randomness for local message id");
+    format!(
+        "msg_{}",
+        bytes
+            .iter()
+            .map(|byte| format!("{byte:02x}"))
+            .collect::<String>()
+    )
+}
+
+fn restore_if_empty_blocking(destination: &Path, source: &Path) -> Result<TranscriptRestoreReport> {
+    let mut destination = open_connection(destination)?;
+    let existing: i64 =
+        destination.query_row("SELECT COUNT(*) FROM transcript_messages", [], |row| {
+            row.get(0)
+        })?;
+    if existing > 0 {
+        return Ok(TranscriptRestoreReport::default());
+    }
+
+    let source_connection = Connection::open_with_flags(
+        source,
+        rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY | rusqlite::OpenFlags::SQLITE_OPEN_NO_MUTEX,
+    )
+    .with_context(|| format!("open archived PCP snapshot {}", source.display()))?;
+    let mut query = source_connection.prepare(
+        "SELECT r.revision_id, COALESCE(r.observed_at, r.created_at), r.payload_content, r.facets_json
+         FROM pcp_pages p
+         JOIN pcp_revisions r ON r.revision_id = p.current_revision_id
+         WHERE p.kind = 'conversation_event'
+         ORDER BY COALESCE(r.observed_at, r.created_at), r.revision_id",
+    )?;
+    let rows = query.query_map([], |row| {
+        Ok((
+            row.get::<_, String>(0)?,
+            row.get::<_, String>(1)?,
+            row.get::<_, Option<String>>(2)?,
+            row.get::<_, Option<String>>(3)?,
+        ))
+    })?;
+    let imported_at = Utc::now().to_rfc3339_opts(SecondsFormat::Millis, true);
+    let transaction = destination.transaction()?;
+    let mut sequence = 0_i64;
+    let mut imported = 0_usize;
+    for row in rows {
+        let (source_revision_id, occurred_at, payload, facets) = row?;
+        let Some(entry) = archived_entry(&source_revision_id, &occurred_at, payload, facets) else {
+            continue;
+        };
+        sequence += 1;
+        transaction.execute(
+            "INSERT OR IGNORE INTO transcript_messages(
+                message_id, sequence, occurred_at, role, content, entry_json,
+                imported_source_revision_id, retracted_at
+             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, NULL)",
+            params![
+                source_revision_id,
+                sequence,
+                entry.at,
+                role_name(&entry.role),
+                entry.content,
+                serde_json::to_string(&entry)?,
+                source_revision_id,
+            ],
+        )?;
+        transaction.execute(
+            "INSERT OR IGNORE INTO transcript_imports(source_snapshot, source_revision_id, imported_at)
+             VALUES (?1, ?2, ?3)",
+            params![source.display().to_string(), source_revision_id, imported_at],
+        )?;
+        imported += 1;
+    }
+    transaction.commit()?;
+    Ok(TranscriptRestoreReport {
+        imported_messages: imported,
+        source_snapshot: Some(source.to_owned()),
+    })
+}
+
+fn archived_entry(
+    revision_id: &str,
+    occurred_at: &str,
+    payload: Option<String>,
+    facets: Option<String>,
+) -> Option<MemoryEntry> {
+    let facets = facets.and_then(|facets| serde_json::from_str::<Value>(&facets).ok())?;
+    let role = match facets.get("role").and_then(Value::as_str)? {
+        "user" => MemoryRole::User,
+        "assistant" => MemoryRole::Assistant,
+        "memory" => MemoryRole::Memory,
+        _ => return None,
+    };
+    let content = payload.unwrap_or_default();
+    let mut parts = facets
+        .get("contentParts")
+        .and_then(|value| serde_json::from_value::<Vec<MessagePart>>(value.clone()).ok())
+        .unwrap_or_default();
+    if parts.is_empty() && !content.is_empty() {
+        parts.push(MessagePart::Markdown {
+            text: content.clone(),
+        });
+    }
+    Some(MemoryEntry {
+        role,
+        at: occurred_at.to_owned(),
+        content,
+        revision_id: Some(revision_id.to_owned()),
+        parts,
+        metadata: facets
+            .get("messageMetadata")
+            .filter(|value| !value.is_null())
+            .and_then(|value| serde_json::from_value(value.clone()).ok()),
+        delivery_state: None,
+    })
+}
+
+fn read_recent(path: &Path, limit: usize, before_at: Option<&str>) -> Result<Vec<MemoryEntry>> {
+    let connection = open_connection(path)?;
+    let mut entries: Vec<MemoryEntry> = Vec::new();
+    let query = if before_at.is_some() {
+        "SELECT entry_json FROM transcript_messages
+         WHERE retracted_at IS NULL AND occurred_at < ?1
+         ORDER BY sequence DESC LIMIT ?2"
+    } else {
+        "SELECT entry_json FROM transcript_messages
+         WHERE retracted_at IS NULL
+         ORDER BY sequence DESC LIMIT ?1"
+    };
+    let mut statement = connection.prepare(query)?;
+    let mut rows = if let Some(before_at) = before_at {
+        statement.query(params![before_at, limit.clamp(1, 500) as i64])?
+    } else {
+        statement.query(params![limit.clamp(1, 500) as i64])?
+    };
+    while let Some(row) = rows.next()? {
+        let json: String = row.get(0)?;
+        entries.push(serde_json::from_str(&json)?);
+    }
+    entries.reverse();
+    Ok(entries)
+}
+
+fn read_history_page(
+    path: &Path,
+    before_at: Option<&str>,
+    limit: usize,
+) -> Result<(Vec<MemoryEntry>, bool)> {
+    let requested = limit.clamp(1, 100);
+    let mut entries = read_recent(path, requested + 1, before_at)?;
+    let has_more = entries.len() > requested;
+    if has_more {
+        entries.remove(0);
+    }
+    Ok((entries, has_more))
+}
+
+fn read_by_ids(path: &Path, message_ids: &[String]) -> Result<Vec<MemoryEntry>> {
+    let connection = open_connection(path)?;
+    let mut statement = connection.prepare(
+        "SELECT entry_json FROM transcript_messages WHERE message_id = ?1 AND retracted_at IS NULL",
+    )?;
+    let mut entries: Vec<MemoryEntry> = Vec::new();
+    for message_id in message_ids {
+        if let Some(json) = statement
+            .query_row([message_id], |row| row.get::<_, String>(0))
+            .optional()?
+        {
+            entries.push(serde_json::from_str(&json)?);
+        }
+    }
+    entries.sort_by(|left, right| {
+        left.at
+            .cmp(&right.at)
+            .then_with(|| left.revision_id.cmp(&right.revision_id))
+    });
+    Ok(entries)
+}
+
+fn retract_from_blocking(path: &Path, message_id: &str) -> Result<TranscriptRetraction> {
+    let mut connection = open_connection(path)?;
+    let transaction = connection.transaction()?;
+    let start = transaction
+        .query_row(
+            "SELECT sequence FROM transcript_messages WHERE message_id = ?1 AND retracted_at IS NULL",
+            [message_id],
+            |row| row.get::<_, i64>(0),
+        )
+        .optional()?;
+    let Some(start) = start else {
+        return Ok(TranscriptRetraction::default());
+    };
+    let mut statement = transaction.prepare(
+        "SELECT message_id FROM transcript_messages WHERE sequence >= ?1 AND retracted_at IS NULL ORDER BY sequence",
+    )?;
+    let ids = statement
+        .query_map([start], |row| row.get::<_, String>(0))?
+        .collect::<std::result::Result<Vec<_>, _>>()?;
+    drop(statement);
+    transaction.execute(
+        "UPDATE transcript_messages SET retracted_at = ?1 WHERE sequence >= ?2 AND retracted_at IS NULL",
+        params![Utc::now().to_rfc3339_opts(SecondsFormat::Millis, true), start],
+    )?;
+    transaction.commit()?;
+    Ok(TranscriptRetraction {
+        retracted_message_ids: ids,
+    })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn entry(role: MemoryRole, at: &str, content: &str) -> MemoryEntry {
+        MemoryEntry {
+            role,
+            at: at.to_owned(),
+            content: content.to_owned(),
+            revision_id: None,
+            parts: vec![MessagePart::Markdown {
+                text: content.to_owned(),
+            }],
+            metadata: None,
+            delivery_state: None,
+        }
+    }
+
+    #[tokio::test]
+    async fn stores_chat_independently_of_pcp() {
+        let temporary = tempfile::tempdir().expect("temporary directory");
+        let (store, report) =
+            TranscriptStore::open(temporary.path().join("transcript.sqlite3"), None)
+                .await
+                .expect("open transcript");
+        assert_eq!(report.imported_messages, 0);
+        let written = store
+            .append(entry(
+                MemoryRole::User,
+                "2026-08-15T00:00:00Z",
+                "local only",
+            ))
+            .await
+            .expect("append transcript message");
+        assert!(written.message_id.starts_with("msg_"));
+        let restored = store.recent(10).await.expect("read transcript");
+        assert_eq!(restored.len(), 1);
+        assert_eq!(restored[0].content, "local only");
+    }
+
+    #[tokio::test]
+    async fn imports_an_archived_conversation_once() {
+        let temporary = tempfile::tempdir().expect("temporary directory");
+        let archived = temporary.path().join("archived.sqlite3");
+        let connection = Connection::open(&archived).expect("create archived snapshot");
+        connection
+            .execute_batch(
+                "
+                CREATE TABLE pcp_pages(page_id TEXT PRIMARY KEY, current_revision_id TEXT, kind TEXT NOT NULL);
+                CREATE TABLE pcp_revisions(revision_id TEXT PRIMARY KEY, created_at TEXT NOT NULL, observed_at TEXT, payload_content TEXT, facets_json TEXT);
+                INSERT INTO pcp_pages(page_id, current_revision_id, kind) VALUES ('pg_1', 'rev_1', 'conversation_event');
+                INSERT INTO pcp_revisions(revision_id, created_at, observed_at, payload_content, facets_json)
+                  VALUES ('rev_1', '2026-08-01T00:00:00Z', '2026-08-01T00:00:00Z', 'hello', '{\"role\":\"user\",\"kind\":\"conversation_event\"}');
+                ",
+            )
+            .expect("seed archived snapshot");
+        drop(connection);
+        let transcript = temporary.path().join("transcript.sqlite3");
+        let (store, report) = TranscriptStore::open(transcript.clone(), Some(archived.clone()))
+            .await
+            .expect("restore archived transcript");
+        assert_eq!(report.imported_messages, 1);
+        assert_eq!(
+            store.recent(10).await.expect("read restored")[0]
+                .revision_id
+                .as_deref(),
+            Some("rev_1")
+        );
+        let (_, second) = TranscriptStore::open(transcript, Some(archived))
+            .await
+            .expect("reopen transcript");
+        assert_eq!(second.imported_messages, 0);
+    }
+}

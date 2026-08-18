@@ -1318,6 +1318,67 @@ async fn run_once(
                     }
                 }
             }
+            if published_input_count > 0 {
+                let briefing_inputs = signals
+                    .briefing_inputs_for_local_day(Local::now().date_naive())
+                    .await;
+                let topic_language = ambient_scout.luna_output_language().await;
+                match inference
+                    .classify_briefing_topics(
+                        &briefing_inputs,
+                        input_events.clone(),
+                        topic_language,
+                    )
+                    .await
+                {
+                    InferenceAttempt::Completed(outcome) if !outcome.interrupted => {
+                        if let Err(error) = signals
+                            .settle_briefing_topics_for_local_day(
+                                Local::now().date_naive(),
+                                &outcome.value,
+                            )
+                            .await
+                        {
+                            stop_activity_relay(runtime_tx, activity_task).await?;
+                            return Err(error);
+                        }
+                        if let Err(error) = usage.record_all(&outcome.invocations).await {
+                            stop_activity_relay(runtime_tx, activity_task).await?;
+                            return Err(error);
+                        }
+                    }
+                    InferenceAttempt::Completed(_) => {
+                        signals
+                            .settle_briefing_topics_for_local_day(Local::now().date_naive(), &[])
+                            .await?;
+                        tracing::debug!(
+                            target: crate::runtime_log::TARGET,
+                            event = "input_briefing_topics_interrupted",
+                            "deferred local input briefing labels for newer user input"
+                        );
+                    }
+                    InferenceAttempt::Deferred {
+                        reason,
+                        invocations,
+                    } => {
+                        signals
+                            .mark_briefing_topics_unavailable_for_local_day(
+                                Local::now().date_naive(),
+                            )
+                            .await?;
+                        tracing::debug!(
+                            target: crate::runtime_log::TARGET,
+                            event = "input_briefing_topics_deferred",
+                            %reason,
+                            "kept input briefing entries unclassified"
+                        );
+                        if let Err(error) = usage.record_all(&invocations).await {
+                            stop_activity_relay(runtime_tx, activity_task).await?;
+                            return Err(error);
+                        }
+                    }
+                }
+            }
             if review_deferred_reason.is_none() {
                 annotate_sensing_delivery(
                     &mut review_invocations,

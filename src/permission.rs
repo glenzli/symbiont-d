@@ -9,7 +9,7 @@ use chrono::{SecondsFormat, Utc};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use tokio::{
-    sync::{Mutex, oneshot},
+    sync::{Mutex, oneshot, watch},
     time::timeout,
 };
 
@@ -91,10 +91,21 @@ struct BrokerState {
     session_grants: HashSet<String>,
 }
 
-#[derive(Default)]
 pub struct PermissionBroker {
     state: Mutex<BrokerState>,
     sequence: AtomicU64,
+    changes: watch::Sender<u64>,
+}
+
+impl Default for PermissionBroker {
+    fn default() -> Self {
+        let (changes, _) = watch::channel(0);
+        Self {
+            state: Mutex::new(BrokerState::default()),
+            sequence: AtomicU64::new(0),
+            changes,
+        }
+    }
 }
 
 impl PermissionBroker {
@@ -168,6 +179,7 @@ impl PermissionBroker {
                 sender,
             },
         );
+        self.notify_changed();
 
         match timeout(approval_timeout, receiver).await {
             Ok(Ok(decision)) => PermissionResolution {
@@ -176,6 +188,7 @@ impl PermissionBroker {
             },
             Ok(Err(_)) => {
                 self.state.lock().await.pending.remove(&id);
+                self.notify_changed();
                 PermissionResolution {
                     decision: PermissionDecision::Decline,
                     source: PermissionResolutionSource::BrokerClosed,
@@ -183,6 +196,7 @@ impl PermissionBroker {
             }
             Err(_) => {
                 self.state.lock().await.pending.remove(&id);
+                self.notify_changed();
                 PermissionResolution {
                     decision: PermissionDecision::Decline,
                     source: PermissionResolutionSource::Timeout,
@@ -229,7 +243,18 @@ impl PermissionBroker {
         {
             state.session_grants.insert(session_key);
         }
+        drop(state);
+        self.notify_changed();
         Ok(view)
+    }
+
+    pub fn subscribe(&self) -> watch::Receiver<u64> {
+        self.changes.subscribe()
+    }
+
+    fn notify_changed(&self) {
+        let next = self.changes.borrow().wrapping_add(1);
+        self.changes.send_replace(next);
     }
 }
 
@@ -305,5 +330,27 @@ mod tests {
             .request(request("autonomous", Some("https:example.com")))
             .await;
         assert_eq!(reused.source, PermissionResolutionSource::SessionGrant);
+    }
+
+    #[tokio::test]
+    async fn pending_permissions_notify_live_subscribers() {
+        let broker = Arc::new(PermissionBroker::new());
+        let mut updates = broker.subscribe();
+        let waiting = {
+            let broker = Arc::clone(&broker);
+            tokio::spawn(async move { broker.request(request("interactive", None)).await })
+        };
+
+        updates.changed().await.expect("pending notification");
+        let pending = broker.snapshot().await;
+        broker
+            .resolve(&pending[0].id, PermissionDecision::Decline)
+            .await
+            .expect("resolve pending permission");
+        updates.changed().await.expect("resolution notification");
+        assert_eq!(
+            waiting.await.expect("permission task").decision,
+            PermissionDecision::Decline
+        );
     }
 }

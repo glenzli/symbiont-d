@@ -2,8 +2,8 @@ use std::sync::Arc;
 
 use anyhow::{Context, Result};
 use pcp_core::{
-    ConsolidationInput, Projection, ReadPagesRequest, SearchFilters, SearchMode,
-    SearchPagesRequest, SearchTermMatch, ValidityStanding,
+    Projection, ReadPagesRequest, SearchFilters, SearchMode, SearchPagesRequest, SearchTermMatch,
+    ValidityStanding,
 };
 use serde_json::{Value, json};
 
@@ -2071,34 +2071,7 @@ impl SymbiontTools {
                 })
             }
             "consolidate_pages" => {
-                let replaced_pages = arguments
-                    .get("replaced_pages")
-                    .and_then(Value::as_array)
-                    .context("replaced_pages must be an array")?
-                    .iter()
-                    .map(|input| {
-                        Ok(ConsolidationInput {
-                            page_id: required_text(input, "page_id")?.to_owned(),
-                            expected_revision_id: required_text(input, "expected_revision_id")?
-                                .to_owned(),
-                        })
-                    })
-                    .collect::<Result<Vec<_>>>()?;
-                let consolidated = self
-                    .continuity
-                    .consolidate_model_pages(
-                        required_text(arguments, "canonical_page_id")?.to_owned(),
-                        required_text(arguments, "expected_canonical_revision_id")?.to_owned(),
-                        replaced_pages,
-                        required_text(arguments, "content")?.to_owned(),
-                        tool_or_model.map(str::to_owned),
-                    )
-                    .await?;
-                json!({
-                    "pageId": consolidated.page_id,
-                    "revisionId": consolidated.revision_id,
-                    "created": consolidated.created,
-                })
+                anyhow::bail!("PCP v0.8 tenant mode does not permit Symbiont Page consolidation")
             }
             "relate_pages" => {
                 let relation = self

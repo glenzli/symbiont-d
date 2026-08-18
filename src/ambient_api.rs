@@ -112,6 +112,15 @@ impl LunaOutputLanguage {
             }
         }
     }
+
+    pub(crate) fn briefing_topic_instruction(self) -> &'static str {
+        match self {
+            Self::Interface | Self::SimplifiedChinese => {
+                "Write the topic label in Simplified Chinese. Keep proper names in their clearest original form only when needed."
+            }
+            Self::English => "Write the topic label in English.",
+        }
+    }
 }
 
 /// A selected broad-input role for one exploration cycle. Selection is shared
@@ -306,6 +315,10 @@ impl AmbientTopologyStore {
         }
     }
 
+    pub async fn luna_output_language(&self) -> LunaOutputLanguage {
+        self.config.read().await.luna.output_language
+    }
+
     pub async fn update(&self, mut config: AmbientConfig) -> Result<AmbientSnapshot> {
         validate_config(&config)?;
         let prior = self.config.read().await.clone();
@@ -498,6 +511,10 @@ impl AmbientScout {
                 .build()
                 .context("build ambient API client")?,
         })
+    }
+
+    pub async fn luna_output_language(&self) -> LunaOutputLanguage {
+        self.topology.luna_output_language().await
     }
 
     pub async fn sense_selected(
