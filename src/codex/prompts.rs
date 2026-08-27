@@ -266,7 +266,9 @@ pub(super) fn memory_reconciliation_prompt(
          add a Relation that materially improves navigation; assess validity only from contrary or \
          superseding evidence; replace a poor routing Summary only when it impairs retrieval. Do not \
          reorganize content merely because it exists, and do not modify profile, Current Map, Open \
-         Loops, Hunches, Episodes, or raw messages. Use exact Revision IDs.\n\n\
+         Loops, Hunches, Episodes, or raw messages. Use exact Revision IDs. If a candidate tool \
+         returns `status: skipped`, treat only that candidate as rejected: do not repeat it in this \
+         run, continue reviewing the remaining window, and still complete the reconciliation.\n\n\
          Finish by calling `symbiont.complete_reconciliation` exactly once with a concise visible \
          summary in the user's language and the proposals that remain relevant. Then return exactly \
          `{completion_marker}`.\n\n\

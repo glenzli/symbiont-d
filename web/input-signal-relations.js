@@ -86,6 +86,14 @@ export function dissentPreview(message, maxLength = 86) {
   return text.length > maxLength ? `${text.slice(0, maxLength).trimEnd()}…` : text;
 }
 
+export function openRelationMarkerIds(markers) {
+  return new Set(
+    [...markers]
+      .filter((marker) => marker.open && marker.dataset.sourceSignalId)
+      .map((marker) => marker.dataset.sourceSignalId),
+  );
+}
+
 export function initInputSignalRelations(conversation) {
   const frame = conversation?.closest(".conversation-frame");
   if (!conversation || !frame) {
@@ -100,6 +108,7 @@ export function initInputSignalRelations(conversation) {
   overlay.setAttribute("aria-hidden", "true");
   frame.append(overlay);
   let emphasizedIds = new Set();
+  let openMarkerIds = new Set();
   let updateFrame = null;
   const layoutObserver = new ResizeObserver(scheduleLines);
 
@@ -213,6 +222,9 @@ export function initInputSignalRelations(conversation) {
     for (const message of conversation.querySelectorAll(".input-signal.has-dissent-response")) {
       message.classList.remove("has-dissent-response");
     }
+    openMarkerIds = openRelationMarkerIds(
+      conversation.querySelectorAll(".input-signal-dissent-marker"),
+    );
     for (const marker of conversation.querySelectorAll(".input-signal-dissent-marker")) {
       marker.remove();
     }
@@ -238,6 +250,8 @@ export function initInputSignalRelations(conversation) {
       if (!source || !runtime || runtime.querySelector(".input-signal-dissent-marker")) continue;
       const marker = document.createElement("details");
       marker.className = "input-signal-dissent-marker";
+      marker.dataset.sourceSignalId = id;
+      marker.open = openMarkerIds.has(id);
       const summary = document.createElement("summary");
       summary.textContent = `↗ ${dissents.length > 1 ? `${dissents.length} 条异议` : "有异议"}`;
       summary.title = "展开关联异议";
@@ -250,7 +264,6 @@ export function initInputSignalRelations(conversation) {
         jump.textContent = dissentPreview(dissent);
         jump.title = "定位到这条异议";
         jump.addEventListener("click", () => {
-          marker.open = false;
           revealGrouped(dissent);
           dissent.scrollIntoView({ behavior: "smooth", block: "center" });
           highlight(source);
@@ -261,6 +274,10 @@ export function initInputSignalRelations(conversation) {
         panel.append(jump);
       }
       marker.append(summary, panel);
+      marker.addEventListener("toggle", () => {
+        if (marker.open) openMarkerIds.add(id);
+        else openMarkerIds.delete(id);
+      });
       runtime.append(" ", marker);
     }
     scheduleLines();

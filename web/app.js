@@ -555,7 +555,6 @@ function appendInputSignal(signal, options = {}) {
   }
   footInfo.append(title);
   if (detailsBar.childElementCount) footInfo.append(detailsBar);
-  enableExclusiveInputSignalDetails(detailsBar);
   foot.append(footInfo, actions);
   content.append(foot);
   layout.append(avatar, content);
@@ -569,26 +568,6 @@ function appendInputSignal(signal, options = {}) {
   if (options.scroll !== false) conversation.scrollTop = conversation.scrollHeight;
   return article;
 }
-
-function enableExclusiveInputSignalDetails(detailsBar) {
-  for (const detail of detailsBar.querySelectorAll("details")) {
-    detail.addEventListener("toggle", () => {
-      if (!detail.open) return;
-      for (const other of detailsBar.querySelectorAll("details[open]")) {
-        if (other !== detail) other.open = false;
-      }
-    });
-  }
-}
-
-function closeInputSignalDetailsFromOutside(event) {
-  for (const detail of document.querySelectorAll(".input-signal-detail[open]")) {
-    if (!detail.contains(event.target)) detail.open = false;
-  }
-}
-
-document.addEventListener("pointerdown", closeInputSignalDetailsFromOutside);
-document.addEventListener("click", closeInputSignalDetailsFromOutside);
 
 window.addEventListener("input-roles-updated", (event) => {
   for (const role of event.detail?.roles || []) {

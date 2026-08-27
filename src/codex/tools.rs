@@ -2074,17 +2074,28 @@ impl SymbiontTools {
                 anyhow::bail!("PCP v0.8 tenant mode does not permit Symbiont Page consolidation")
             }
             "relate_pages" => {
-                let relation = self
+                let from_page_id = required_text(arguments, "from_page_id")?.to_owned();
+                let relation_type = required_text(arguments, "relation_type")?.to_owned();
+                let to_page_id = required_text(arguments, "to_page_id")?.to_owned();
+                match self
                     .continuity
                     .link_model_pages(
-                        required_text(arguments, "from_page_id")?.to_owned(),
-                        required_text(arguments, "relation_type")?.to_owned(),
-                        required_text(arguments, "to_page_id")?.to_owned(),
+                        from_page_id.clone(),
+                        relation_type.clone(),
+                        to_page_id.clone(),
                         string_array(arguments, "basis_revision_ids")?,
                         None,
                     )
-                    .await?;
-                serde_json::to_value(relation)?
+                    .await
+                {
+                    Ok(relation) => serde_json::to_value(relation)?,
+                    Err(error) => skipped_relation_result(
+                        &from_page_id,
+                        &relation_type,
+                        &to_page_id,
+                        &error.to_string(),
+                    ),
+                }
             }
             other => anyhow::bail!("unknown PCP tool: {other}"),
         };
@@ -2224,6 +2235,27 @@ fn string_array(arguments: &Value, field: &str) -> Result<Vec<String>> {
         .unwrap_or_else(|| Ok(Vec::new()))
 }
 
+/// A rejected relation candidate must not abort the rest of a reconciliation
+/// pass. The model sees an explicit skipped result and can continue with the
+/// remaining candidates or finish the reviewed window without inventing a
+/// relation that was not accepted by PCP.
+fn skipped_relation_result(
+    from_page_id: &str,
+    relation_type: &str,
+    to_page_id: &str,
+    reason: &str,
+) -> Value {
+    json!({
+        "status": "skipped",
+        "action": "relate_pages",
+        "reason": "relation_rejected",
+        "detail": reason,
+        "fromPageId": from_page_id,
+        "relationType": relation_type,
+        "toPageId": to_page_id,
+    })
+}
+
 fn parse_search_mode(value: &str) -> Result<SearchMode> {
     match value {
         "auto" => Ok(SearchMode::Auto),
@@ -2293,7 +2325,7 @@ pub(super) fn tool_result(success: bool, text: String) -> Value {
 
 #[cfg(test)]
 mod tests {
-    use super::require_sensing_origin;
+    use super::{require_sensing_origin, skipped_relation_result};
 
     #[test]
     fn sensing_candidate_submission_accepts_external_and_luna_origins() {
@@ -2302,5 +2334,15 @@ mod tests {
         assert!(require_sensing_origin("ambient_sense", tool).is_ok());
         assert!(require_sensing_origin("luna_sense", tool).is_ok());
         assert!(require_sensing_origin("interactive", tool).is_err());
+    }
+
+    #[test]
+    fn rejected_relation_is_an_explicit_skipped_candidate() {
+        let result = skipped_relation_result("page_a", "supports", "page_b", "not permitted");
+
+        assert_eq!(result["status"], "skipped");
+        assert_eq!(result["reason"], "relation_rejected");
+        assert_eq!(result["fromPageId"], "page_a");
+        assert_eq!(result["toPageId"], "page_b");
     }
 }

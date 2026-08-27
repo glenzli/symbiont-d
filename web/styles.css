@@ -4194,6 +4194,28 @@ html[data-native-shell="macos"] .topbar {
   font-size: 10px;
 }
 
+.topic-detail-actions {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 5px;
+}
+
+.topic-pack-control {
+  padding: 0;
+  border: 0;
+  border-radius: 0;
+  color: var(--text-faint);
+  background: transparent;
+  cursor: pointer;
+  font-size: 9px;
+  white-space: nowrap;
+}
+
+.topic-pack-control:hover {
+  color: var(--text);
+}
+
 .topic-summary {
   padding: 12px;
   border-bottom: 1px solid var(--border);
@@ -6254,6 +6276,10 @@ button:disabled {
 
   .topic-detail-header {
     align-items: flex-start;
+  }
+
+  .topic-detail-actions {
+    flex-wrap: wrap;
   }
 
   .topic-view-tabs {

@@ -4,6 +4,7 @@ import test from "node:test";
 import {
   dissentPreview,
   localRelationGeometry,
+  openRelationMarkerIds,
   relationAnchorGeometry,
 } from "./input-signal-relations.js";
 
@@ -96,4 +97,14 @@ test("keeps an unopened dissent summary compact", () => {
     dissentPreview({ querySelector: () => ({ textContent: "a".repeat(90) }) }, 12),
     "aaaaaaaaaaaa…",
   );
+});
+
+test("preserves only explicitly opened relation markers across a refresh", () => {
+  const open = openRelationMarkerIds([
+    { open: true, dataset: { sourceSignalId: "signal_a" } },
+    { open: false, dataset: { sourceSignalId: "signal_b" } },
+    { open: true, dataset: {} },
+  ]);
+
+  assert.deepEqual([...open], ["signal_a"]);
 });

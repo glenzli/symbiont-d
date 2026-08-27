@@ -1,5 +1,11 @@
 import { formatDate, responseJson } from "/presentation.js";
 import { renderMessageContent, renderRichText } from "/rich-text.js";
+import {
+  createTopicExpansion,
+  isMessageExpanded,
+  setMessageExpanded,
+  topicMessageKey,
+} from "/topic-expansion.js";
 
 export function initTopicUi({ conversation, focusComposer, applyAvatar }) {
   const openButton = document.querySelector("#open-topics");
@@ -18,6 +24,8 @@ export function initTopicUi({ conversation, focusComposer, applyAvatar }) {
   let activeDetail = null;
   let selectedView = "current";
   let loadEpoch = 0;
+  const selectedViews = new Map();
+  const packExpansion = new Map();
 
   openButton.addEventListener("click", () => open());
   openSelected.addEventListener("click", () => {
@@ -42,20 +50,28 @@ export function initTopicUi({ conversation, focusComposer, applyAvatar }) {
     const view = event.target.closest("[data-topic-view]");
     if (view && activeDetail) {
       selectedView = view.dataset.topicView;
+      selectedViews.set(activeDetail.topic.id, selectedView);
+      renderDetail(activeDetail);
+      return;
+    }
+    const packControl = event.target.closest("[data-topic-pack]");
+    if (packControl && activeDetail) {
+      const expansion = expansionFor(activeDetail.topic.id);
+      expansion.allExpanded = packControl.dataset.topicPack === "expand";
+      expansion.expanded.clear();
+      expansion.collapsed.clear();
       renderDetail(activeDetail);
       return;
     }
     const expand = event.target.closest("[data-topic-expand]");
-    if (expand) {
+    if (expand && activeDetail) {
+      const expansion = expansionFor(activeDetail.topic.id);
+      setMessageExpanded(expansion, expand.dataset.topicExpand, expand.getAttribute("aria-expanded") !== "true");
       const content = expand.closest(".topic-evolution-message");
-      content?.classList.toggle("expanded");
-      expand.textContent = content?.classList.contains("expanded")
-        ? "收起"
-        : "展开原文";
-      expand.setAttribute(
-        "aria-expanded",
-        String(content?.classList.contains("expanded")),
-      );
+      const expanded = isMessageExpanded(expansion, expand.dataset.topicExpand);
+      content?.classList.toggle("expanded", expanded);
+      expand.textContent = expanded ? "收起" : "展开原文";
+      expand.setAttribute("aria-expanded", String(expanded));
       return;
     }
     const button = event.target.closest("[data-continue-topic]");
@@ -116,8 +132,10 @@ export function initTopicUi({ conversation, focusComposer, applyAvatar }) {
   }
 
   async function select(topicId, parentEpoch = loadEpoch) {
+    const changedTopic = selectedTopicId !== topicId;
     selectedTopicId = topicId;
-    selectedView = "current";
+    selectedView = selectedViews.get(topicId) || "current";
+    if (changedTopic) expansionFor(topicId);
     activeDetail = null;
     renderList();
     renderEmpty("正在读取记录");
@@ -150,11 +168,24 @@ export function initTopicUi({ conversation, focusComposer, applyAvatar }) {
     continueButton.className = "secondary-button";
     continueButton.dataset.continueTopic = topic.id;
     continueButton.textContent = "从这里继续";
-    header.append(heading, continueButton);
+    const actions = document.createElement("div");
+    actions.className = "topic-detail-actions";
+    const expandAll = document.createElement("button");
+    expandAll.type = "button";
+    expandAll.className = "topic-pack-control";
+    expandAll.dataset.topicPack = "expand";
+    expandAll.textContent = "展开全部";
+    const collapseAll = document.createElement("button");
+    collapseAll.type = "button";
+    collapseAll.className = "topic-pack-control";
+    collapseAll.dataset.topicPack = "collapse";
+    collapseAll.textContent = "收起全部";
+    actions.append(expandAll, collapseAll, continueButton);
+    header.append(heading, actions);
     const topicLookup = new Map(topics.map(({ topic: item }) => [item.id, item]));
     detail.append(header, renderViewTabs(selectedView));
     if (selectedView === "evolution") {
-      detail.append(renderEvolution(payload));
+      detail.append(renderEvolution(payload, expansionFor(topic.id)));
     } else if (selectedView === "evidence") {
       detail.append(renderEvidence(payload, applyAvatar));
     } else {
@@ -187,6 +218,15 @@ export function initTopicUi({ conversation, focusComposer, applyAvatar }) {
     empty.className = "topic-empty";
     empty.textContent = text;
     detail.append(empty);
+  }
+
+  function expansionFor(topicId) {
+    let expansion = packExpansion.get(topicId);
+    if (!expansion) {
+      expansion = createTopicExpansion();
+      packExpansion.set(topicId, expansion);
+    }
+    return expansion;
   }
 
   return { clear, consume, open, set };
@@ -263,7 +303,7 @@ function renderCurrentLens(payload, topicLookup) {
   return section;
 }
 
-function renderEvolution(payload) {
+function renderEvolution(payload, expansion) {
   const section = document.createElement("section");
   section.className = "topic-evolution";
   const introduction = document.createElement("p");
@@ -275,6 +315,7 @@ function renderEvolution(payload) {
     section.append(topicEmpty("暂无可整理的主题推进。"));
     return section;
   }
+  let messageIndex = 0;
   for (const [index, move] of moves.entries()) {
     const step = document.createElement("article");
     step.className = "topic-evolution-step";
@@ -288,12 +329,16 @@ function renderEvolution(payload) {
     time.textContent = formatDate(time.dateTime);
     header.append(title, time);
     step.append(header);
-    if (move.user) step.append(renderEvolutionMessage("你的推进", move.user));
+    if (move.user) {
+      step.append(renderEvolutionMessage("你的推进", move.user, expansion, messageIndex));
+      messageIndex += 1;
+    }
     if (move.user && move.assistants.length) {
       step.append(renderEvolutionTransition("形成回应"));
     }
     for (const message of move.assistants) {
-      step.append(renderEvolutionMessage("形成的回应", message));
+      step.append(renderEvolutionMessage("形成的回应", message, expansion, messageIndex));
+      messageIndex += 1;
     }
     section.append(step);
     if (index < moves.length - 1) {
@@ -340,17 +385,20 @@ function renderLanding(label, message) {
   return card;
 }
 
-function renderEvolutionMessage(label, message) {
+function renderEvolutionMessage(label, message, expansion, index) {
   const item = document.createElement("section");
   item.className = `topic-evolution-message topic-evolution-${message.role}`;
+  const key = topicMessageKey(message, index);
+  const expanded = isMessageExpanded(expansion, key);
+  item.classList.toggle("expanded", expanded);
   const header = document.createElement("header");
   const heading = document.createElement("strong");
   heading.textContent = label;
   const expand = document.createElement("button");
   expand.type = "button";
-  expand.dataset.topicExpand = "";
-  expand.setAttribute("aria-expanded", "false");
-  expand.textContent = "展开原文";
+  expand.dataset.topicExpand = key;
+  expand.setAttribute("aria-expanded", String(expanded));
+  expand.textContent = expanded ? "收起" : "展开原文";
   header.append(heading, expand);
   const body = document.createElement("div");
   body.className = "topic-evolution-body";

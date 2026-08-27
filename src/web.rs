@@ -116,6 +116,7 @@ const EXPLORATION_RECEIPT_JS: &str = include_str!("../web/exploration-receipt.js
 const REFLECTION_UI_JS: &str = include_str!("../web/reflection-ui.js");
 const RECONCILIATION_UI_JS: &str = include_str!("../web/reconciliation-ui.js");
 const TOPIC_UI_JS: &str = include_str!("../web/topic-ui.js");
+const TOPIC_EXPANSION_JS: &str = include_str!("../web/topic-expansion.js");
 const MESSAGE_SYNC_JS: &str = include_str!("../web/message-sync.js");
 const MESSAGE_HISTORY_JS: &str = include_str!("../web/message-history.js");
 const MESSAGE_ACTIONS_JS: &str = include_str!("../web/message-actions.js");
@@ -634,6 +635,7 @@ pub fn router(state: AppState) -> Router {
         .route("/reflection-ui.js", get(reflection_ui_js))
         .route("/reconciliation-ui.js", get(reconciliation_ui_js))
         .route("/topic-ui.js", get(topic_ui_js))
+        .route("/topic-expansion.js", get(topic_expansion_js))
         .route("/message-sync.js", get(message_sync_js))
         .route("/message-history.js", get(message_history_js))
         .route("/message-actions.js", get(message_actions_js))
@@ -982,6 +984,13 @@ async fn topic_ui_js() -> impl IntoResponse {
     (
         [(header::CONTENT_TYPE, "text/javascript; charset=utf-8")],
         TOPIC_UI_JS,
+    )
+}
+
+async fn topic_expansion_js() -> impl IntoResponse {
+    (
+        [(header::CONTENT_TYPE, "text/javascript; charset=utf-8")],
+        TOPIC_EXPANSION_JS,
     )
 }
 
