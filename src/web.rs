@@ -126,10 +126,8 @@ const PERMISSION_UI_JS: &str = include_str!("../web/permission-ui.js");
 const TRACE_UI_JS: &str = include_str!("../web/trace-ui.js");
 const TOPBAR_UI_JS: &str = include_str!("../web/topbar-ui.js");
 const STYLES_CSS: &str = include_str!("../web/styles.css");
-const DEFAULT_AVATAR_PNG: &[u8] =
-    include_bytes!("../web/assets/symbiont-avatar-transparent-v3.png");
-const DEFAULT_SMALL_AVATAR_PNG: &[u8] =
-    include_bytes!("../web/assets/symbiont-avatar-transparent-small-v3.png");
+const DEFAULT_AVATAR_PNG: &[u8] = include_bytes!("../web/assets/symbiont-avatar-display.png");
+const DEFAULT_SMALL_AVATAR_PNG: &[u8] = include_bytes!("../web/assets/symbiont-avatar-small.png");
 const INPUT_ROLE_AVATAR_MOON_WINDOW: &[u8] =
     include_bytes!("../web/assets/input-role-avatars/moon-window.png");
 const INPUT_ROLE_AVATAR_COURIER: &[u8] =
@@ -143,7 +141,8 @@ const INPUT_ROLE_AVATAR_STAR_MAP: &[u8] =
     include_bytes!("../web/assets/input-role-avatars/star-map.png");
 const INPUT_ROLE_AVATAR_ECHO: &[u8] = include_bytes!("../web/assets/input-role-avatars/echo.png");
 const INPUT_ROLE_AVATAR_SYMBIONT_DISSENT: &[u8] =
-    include_bytes!("../web/assets/input-role-avatars/symbiont-dissent.png");
+    include_bytes!("../web/assets/input-role-avatars/symbiont-dissent-small.png");
+const VERSIONED_AVATAR_CACHE_CONTROL: &str = "public, max-age=31536000, immutable";
 const MAX_USER_MESSAGE_CHARS: usize = 12_000;
 const MAX_CODEX_TASK_CONTEXTS: usize = 2;
 const MAX_CHAT_BODY_BYTES: usize =
@@ -813,7 +812,7 @@ async fn input_role_avatar(
     Ok((
         [
             (header::CONTENT_TYPE, "image/png"),
-            (header::CACHE_CONTROL, "public, max-age=86400"),
+            (header::CACHE_CONTROL, VERSIONED_AVATAR_CACHE_CONTROL),
         ],
         bytes,
     ))
@@ -1068,7 +1067,7 @@ async fn default_small_avatar() -> Response {
 fn avatar_response(bytes: &'static [u8]) -> Response {
     Response::builder()
         .header(header::CONTENT_TYPE, "image/png")
-        .header(header::CACHE_CONTROL, "no-store")
+        .header(header::CACHE_CONTROL, VERSIONED_AVATAR_CACHE_CONTROL)
         .header("x-content-type-options", "nosniff")
         .body(Body::from(bytes))
         .expect("valid default avatar response")

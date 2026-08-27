@@ -15,7 +15,7 @@ const DERIVED_AVATAR_LABELS = {
   "symbiont-dissent": "共生体 · 异议",
 };
 
-const INPUT_ROLE_AVATAR_VERSION = "clay-transparent-20260812-v3";
+const INPUT_ROLE_AVATAR_VERSION = "clay-20260828-v1";
 
 const LEGACY_AVATARS = {
   orbit: "moon-window",

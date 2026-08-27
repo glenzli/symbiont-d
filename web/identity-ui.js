@@ -1,9 +1,9 @@
 import { responseJson } from "/presentation.js";
 
 const DEFAULT_SYMBIONT_AVATAR_URL =
-  "/symbiont-avatar.png?v=clay-transparent-20260810-v1";
+  "/symbiont-avatar.png?v=clay-20260828-v1";
 const DEFAULT_SMALL_SYMBIONT_AVATAR_URL =
-  "/symbiont-avatar-small.png?v=clay-transparent-20260810-v1";
+  "/symbiont-avatar-small.png?v=clay-20260828-v1";
 
 export function initIdentityUi(state) {
   const displayNameInput = document.querySelector("#symbiont-display-name");
