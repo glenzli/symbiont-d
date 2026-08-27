@@ -47,12 +47,4 @@
 /data/logs
 /data/run
 /data/backups/
-/web/assets/symbiont-avatar-small-v3.png
-/web/assets/symbiont-avatar-small-v4.png
-/web/assets/symbiont-avatar-v2.png
-/web/assets/symbiont-avatar-v3.png
-/web/assets/symbiont-avatar-transparent-v1.png
-/web/assets/symbiont-avatar-transparent-v2.png
-/web/assets/symbiont-avatar-transparent-small-v1.png
-/web/assets/symbiont-avatar-transparent-small-v2.png
 .DS_Store
