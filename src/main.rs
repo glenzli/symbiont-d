@@ -33,6 +33,7 @@ mod memory;
 mod outreach;
 mod pcp_connection;
 mod pcp_index;
+mod pcp_migration;
 mod permission;
 mod profile;
 mod reconciliation;
@@ -172,11 +173,13 @@ async fn main() -> Result<()> {
     if state_restore.imported_records > 0
         || state_restore.imported_relations > 0
         || state_restore.imported_provenance > 0
+        || state_restore.imported_context_documents > 0
     {
         info!(
             imported_records = state_restore.imported_records,
             imported_relations = state_restore.imported_relations,
             imported_provenance = state_restore.imported_provenance,
+            imported_context_documents = state_restore.imported_context_documents,
             source_snapshot = ?state_restore.source_snapshot,
             "restored archived Symbiont state into local storage"
         );
@@ -198,7 +201,10 @@ async fn main() -> Result<()> {
     let context = Arc::new(SymbiontContextStore::from_state(Arc::clone(
         &symbiont_state,
     )));
-    let curiosity = Arc::new(CuriosityStore::new(Arc::clone(&continuity)));
+    let curiosity = Arc::new(CuriosityStore::from_state(
+        Arc::clone(&continuity),
+        Arc::clone(&symbiont_state),
+    ));
     info!(
         "local chat transcript and PCP recall client are ready; semantic maintenance is disabled"
     );
@@ -276,7 +282,7 @@ async fn main() -> Result<()> {
     info!("symbiont-d is listening at http://{bind} (Codex may still be reconnecting)");
 
     let mut retry = shell.retry_subscriber();
-    let codex = loop {
+    let mut codex = loop {
         let startup = CodexClient::start(
             codex_config.clone(),
             Arc::clone(&continuity),
@@ -419,6 +425,25 @@ async fn main() -> Result<()> {
         ))
         .await?,
     );
+    if env::var_os("SYMBIONT_RUN_PCP_TRANSCRIPT_MIGRATION").is_some() {
+        let report = pcp_migration::migrate_transcript(
+            &mut codex,
+            Arc::clone(&transcript),
+            Arc::clone(&continuity),
+            Arc::clone(&compute),
+            Arc::clone(&profile),
+        )
+        .await
+        .context("run model-judged PCP transcript migration")?;
+        info!(
+            pcp_identity_id = report.pcp_identity_id,
+            through_sequence = report.through_sequence,
+            batches_completed = report.batches_completed,
+            messages_assessed = report.messages_assessed,
+            records_written = report.records_written,
+            "PCP transcript migration is complete for this Store identity"
+        );
+    }
     let rate_limits = codex.rate_limits();
     let codex = Arc::new(Mutex::new(codex));
     let task_sources = Arc::new(CodexTaskSources::new(codex_config));

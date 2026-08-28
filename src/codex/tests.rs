@@ -122,17 +122,22 @@ fn dynamic_tools_expose_host_and_pcp_namespaces() {
     assert_eq!(specs[1]["tools"][0]["name"], "describe");
     assert_eq!(specs[1]["tools"][2]["name"], "browse_index");
     assert_eq!(specs[1]["tools"][3]["name"], "search_pages");
-    assert_eq!(specs[1]["tools"][4]["name"], "read_pages");
-    assert_eq!(specs[1]["tools"][5]["name"], "assess_validity");
-    assert_eq!(specs[1]["tools"][6]["name"], "write_summary");
-    assert_eq!(specs[1]["tools"][7]["name"], "write_page");
+    assert_eq!(specs[1]["tools"][4]["name"], "semantic_search");
+    assert_eq!(specs[1]["tools"][5]["name"], "match_intent");
+    assert_eq!(specs[1]["tools"][6]["name"], "read_pages");
     assert!(
         specs[1]["tools"]
             .as_array()
             .unwrap()
             .iter()
-            .any(|tool| tool["name"] == "consolidate_pages")
+            .any(|tool| tool["name"] == "write_page")
     );
+    assert!(!specs[1]["tools"].as_array().unwrap().iter().any(|tool| {
+        matches!(
+            tool["name"].as_str(),
+            Some("assess_validity" | "write_summary" | "revise_page" | "relate_pages")
+        )
+    }));
 }
 
 #[test]
@@ -159,6 +164,8 @@ fn autonomous_scout_sees_only_its_read_only_tool_surface() {
             "list_scopes",
             "browse_index",
             "search_pages",
+            "semantic_search",
+            "match_intent",
             "read_pages"
         ]
     );
@@ -255,10 +262,10 @@ fn reconciliation_apply_distinguishes_consolidation_from_aggregation() {
 #[test]
 fn persistent_instructions_define_a_short_unambiguous_pcp_boundary() {
     let instructions = developer_instructions();
-    assert!(instructions.contains("PCP is the user-owned long-term archive"));
+    assert!(instructions.contains("center for information worth retaining"));
     assert!(instructions.contains("before asking the user to repeat known history"));
-    assert!(instructions.contains("absence means unreviewed, not invalid"));
-    assert!(instructions.contains("Never treat validity as a hard filter"));
+    assert!(instructions.contains("Autonomously call `pcp.write_page`"));
+    assert!(instructions.contains("Do not mirror every turn"));
     assert!(instructions.contains("Do not repeat an identical PCP search or read"));
     assert!(instructions.contains("Rarely use `symbiont.reserve_continuation`"));
     assert!(instructions.contains("PCP memory operations remain available"));
@@ -431,8 +438,8 @@ fn reflection_prompt_preserves_facts_uncertainty_and_profile_boundaries() {
     assert!(prompt.contains("`note` adds"));
     assert!(prompt.contains("`discussion` opens"));
     assert!(prompt.contains("feed"));
-    assert!(prompt.contains("pcp.assess_validity"));
-    assert!(prompt.contains("not ordinary messages"));
+    assert!(prompt.contains("new self-contained PCP Page"));
+    assert!(prompt.contains("tenant-side validity"));
     assert!(
         prompt.chars().count() < 3_200,
         "reflection prompt grew to {} characters",
@@ -539,7 +546,7 @@ async fn orientation_tool_requires_active_calibration() {
     );
     let (exploration_intents, _exploration_intent_receiver) = test_exploration_intents(&root).await;
     let tools = SymbiontTools::new(
-        continuity,
+        Arc::clone(&continuity),
         Arc::clone(&profile),
         context,
         curiosity,
@@ -592,6 +599,16 @@ async fn pcp_tools_write_search_and_read_through_the_dynamic_bridge() {
             .await
             .expect("open continuity host"),
     );
+    let source_message = continuity
+        .ingest_message(
+            MemoryRole::User,
+            "Please remember that the observatory uses a brass telescope.",
+            Vec::new(),
+            None,
+            MessageLinks::default(),
+        )
+        .await
+        .expect("store local transcript source");
     let profile = Arc::new(
         ProfileStore::open(root.join("profile.toml"), root.join("orientation.md"))
             .await
@@ -609,7 +626,7 @@ async fn pcp_tools_write_search_and_read_through_the_dynamic_bridge() {
     );
     let (exploration_intents, _exploration_intent_receiver) = test_exploration_intents(&root).await;
     let tools = SymbiontTools::new(
-        continuity,
+        Arc::clone(&continuity),
         profile,
         context,
         curiosity,
@@ -643,11 +660,17 @@ async fn pcp_tools_write_search_and_read_through_the_dynamic_bridge() {
             "namespace": "pcp",
             "tool": "write_page",
             "arguments": {
+                "kind": "project_fact",
                 "content": "The PCP bridge remembers a brass telescope.",
+                "source_message_ids": [source_message.page.revision_id],
             }
         }))
         .await;
-    assert_eq!(written.response["success"], true);
+    assert_eq!(
+        written.response["success"], true,
+        "PCP write failed: {}",
+        written.response
+    );
     let written_json = tool_content_json(&written.response);
     let page_id = written_json["pageId"].as_str().expect("written Page ID");
     let revision_id = written_json["revisionId"]
@@ -663,44 +686,16 @@ async fn pcp_tools_write_search_and_read_through_the_dynamic_bridge() {
             }
         }))
         .await;
-    assert_eq!(derived.response["success"], true);
+    assert_eq!(
+        derived.response["success"], true,
+        "derived PCP write failed: {}",
+        derived.response
+    );
     let derived_json = tool_content_json(&derived.response);
     let derived_page_id = derived_json["pageId"].as_str().expect("derived Page ID");
     let derived_revision_id = derived_json["revisionId"]
         .as_str()
         .expect("derived Revision ID");
-    let assessed = tools
-        .execute_for_model(
-            &json!({
-                "namespace": "pcp",
-                "tool": "assess_validity",
-                "arguments": {
-                    "target_page_id": page_id,
-                    "target_revision_id": revision_id,
-                    "standing": "qualified",
-                    "rationale": "The derived Page narrows why this detail remains useful.",
-                    "evidence_revision_ids": [derived_revision_id]
-                }
-            }),
-            Some("test-model"),
-            "maintenance",
-        )
-        .await;
-    assert_eq!(assessed.response["success"], true);
-    let summarized = tools
-        .execute(&json!({
-            "namespace": "pcp",
-            "tool": "write_summary",
-            "arguments": {
-                "target_page_id": page_id,
-                "target_revision_id": revision_id,
-                "content": "A semantic observatory instrument used to test Summary routing.",
-                "based_on_revision_ids": [derived_revision_id]
-            }
-        }))
-        .await;
-    assert_eq!(summarized.response["success"], true);
-
     let searched = tools
         .execute(&json!({
             "namespace": "pcp",
@@ -714,29 +709,6 @@ async fn pcp_tools_write_search_and_read_through_the_dynamic_bridge() {
     assert_eq!(searched.response["success"], true);
     let searched_json = tool_content_json(&searched.response);
     assert_eq!(searched_json["hits"][0]["pageId"], page_id);
-    assert_eq!(
-        searched_json["hits"][0]["validity"]["standing"],
-        "qualified"
-    );
-
-    let summary_search = tools
-        .execute(&json!({
-            "namespace": "pcp",
-            "tool": "search_pages",
-            "arguments": {
-                "query": "semantic observatory",
-                "strategy": "text"
-            }
-        }))
-        .await;
-    assert_eq!(summary_search.response["success"], true);
-    let summary_search_json = tool_content_json(&summary_search.response);
-    assert_eq!(summary_search_json["hits"][0]["pageId"], page_id);
-    assert_eq!(
-        summary_search_json["hits"][0]["matchedProjection"],
-        "summary"
-    );
-
     let read = tools
         .execute(&json!({
             "namespace": "pcp",
@@ -752,16 +724,6 @@ async fn pcp_tools_write_search_and_read_through_the_dynamic_bridge() {
     assert_eq!(
         read_json["pages"][0]["revision"]["payload"]["content"],
         "The PCP bridge remembers a brass telescope."
-    );
-    assert!(
-        read_json["pages"][0]["summary"]["content"]
-            .as_str()
-            .expect("summary content")
-            .contains("semantic observatory")
-    );
-    assert_eq!(
-        read_json["pages"][0]["validity"]["basisRevisionIds"][0],
-        derived_revision_id
     );
     assert!(
         read_json["pages"][0]["revision"]
@@ -791,6 +753,16 @@ async fn pcp_tools_write_search_and_read_through_the_dynamic_bridge() {
         traced_json["pages"][0]["revision"]["revisionId"],
         revision_id
     );
+    assert_eq!(
+        traced_json["pages"][0]["revision"]["sourceRefs"][0]["providerId"],
+        "symbiont:transcript"
+    );
+    assert!(
+        traced_json["pages"][0]["revision"]["sourceRefs"][0]["locator"]
+            .as_str()
+            .expect("transcript locator")
+            .starts_with("message/msg_")
+    );
 
     let derived_trace = tools
         .execute(&json!({
@@ -808,57 +780,16 @@ async fn pcp_tools_write_search_and_read_through_the_dynamic_bridge() {
         derived_trace_json["pages"][0]["revision"]["provenance"][0]["inputRevisionIds"][0],
         revision_id
     );
+    assert_eq!(
+        derived_trace_json["pages"][0]["revision"]["provenance"][0]["operation"],
+        "ingest"
+    );
     assert!(
         derived_trace_json["pages"][0]["relations"]
             .as_array()
             .expect("relations array")
-            .iter()
-            .any(|relation| relation["relationType"] == "derived_from")
+            .is_empty()
     );
-
-    let graph = tools
-        .execute(&json!({
-            "namespace": "pcp",
-            "tool": "search_pages",
-            "arguments": {
-                "query": page_id,
-                "strategy": "graph"
-            }
-        }))
-        .await;
-    assert_eq!(graph.response["success"], true);
-    let graph_json = tool_content_json(&graph.response);
-    assert!(
-        graph_json["hits"]
-            .as_array()
-            .expect("graph hits")
-            .iter()
-            .any(|hit| hit["pageId"] == derived_page_id)
-    );
-
-    let consolidation = json!({
-        "namespace": "pcp",
-        "tool": "consolidate_pages",
-        "arguments": {
-            "canonical_page_id": page_id,
-            "expected_canonical_revision_id": revision_id,
-            "replaced_pages": [{
-                "page_id": derived_page_id,
-                "expected_revision_id": derived_revision_id
-            }],
-            "content": "A brass telescope is the durable observatory instrument worth remembering."
-        }
-    });
-    let denied = tools
-        .execute_for_model(&consolidation, Some("test-model"), "interactive")
-        .await;
-    assert_eq!(denied.response["success"], false);
-    let approved = tools
-        .execute_for_model(&consolidation, Some("test-model"), "reconciliation_apply")
-        .await;
-    assert_eq!(approved.response["success"], true, "{}", approved.response);
-    let approved_json = tool_content_json(&approved.response);
-    assert_eq!(approved_json["created"], true);
 
     let _ = tokio::fs::remove_dir_all(root).await;
 }

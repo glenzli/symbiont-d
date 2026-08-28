@@ -14,12 +14,13 @@ use anyhow::{Context, Result};
 use chrono::{SecondsFormat, Utc};
 use getrandom::fill;
 use rusqlite::{Connection, OptionalExtension, params};
+use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use tokio::{sync::Mutex, task};
 
 use crate::memory::{MemoryEntry, MemoryRole, MessagePart};
 
-const SCHEMA_VERSION: &str = "1";
+const SCHEMA_VERSION: &str = "2";
 
 #[derive(Clone, Debug, Default)]
 pub struct TranscriptRestoreReport {
@@ -33,9 +34,28 @@ pub struct TranscriptMessage {
     pub message_id: String,
 }
 
+#[derive(Clone, Debug, Default, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TranscriptMessageLinks {
+    pub responds_to: Option<String>,
+    pub continues_from: Option<String>,
+    #[serde(default)]
+    pub input_revision_ids: Vec<String>,
+    #[serde(default)]
+    pub surfaced_hunch_revision_ids: Vec<String>,
+}
+
 #[derive(Clone, Debug, Default)]
 pub struct TranscriptRetraction {
     pub retracted_message_ids: Vec<String>,
+}
+
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MigrationTranscriptMessage {
+    pub sequence: i64,
+    pub message_id: String,
+    pub entry: MemoryEntry,
 }
 
 /// The connection is intentionally opened per operation.  It keeps all
@@ -101,6 +121,16 @@ impl TranscriptStore {
                     imported_at TEXT NOT NULL,
                     PRIMARY KEY(source_snapshot, source_revision_id)
                 );
+                CREATE TABLE IF NOT EXISTS transcript_message_links (
+                    message_id TEXT PRIMARY KEY,
+                    links_json TEXT NOT NULL,
+                    FOREIGN KEY(message_id) REFERENCES transcript_messages(message_id) ON DELETE CASCADE
+                );
+                CREATE TABLE IF NOT EXISTS transcript_pcp_migration_watermarks (
+                    pcp_identity_id TEXT PRIMARY KEY,
+                    completed_sequence INTEGER NOT NULL,
+                    updated_at TEXT NOT NULL
+                );
                 ",
             )?;
             connection.execute(
@@ -129,7 +159,11 @@ impl TranscriptStore {
             .context("join transcript archive restore")?
     }
 
-    pub async fn append(&self, mut entry: MemoryEntry) -> Result<TranscriptMessage> {
+    pub async fn append(
+        &self,
+        mut entry: MemoryEntry,
+        links: TranscriptMessageLinks,
+    ) -> Result<TranscriptMessage> {
         let _guard = self.mutation.lock().await;
         let message_id = entry.revision_id.clone().unwrap_or_else(new_message_id);
         entry.revision_id = Some(message_id.clone());
@@ -153,6 +187,10 @@ impl TranscriptStore {
                     stored.content,
                     serde_json::to_string(&stored)?,
                 ],
+            )?;
+            transaction.execute(
+                "INSERT INTO transcript_message_links(message_id, links_json) VALUES (?1, ?2)",
+                params![persisted_message_id, serde_json::to_string(&links)?],
             )?;
             transaction.commit()?;
             Ok(())
@@ -192,6 +230,120 @@ impl TranscriptStore {
             .context("join transcript selected read")?
     }
 
+    pub async fn links(&self, message_id: &str) -> Result<TranscriptMessageLinks> {
+        let path = self.path.clone();
+        let message_id = message_id.to_owned();
+        task::spawn_blocking(move || {
+            let connection = open_connection(&path)?;
+            let links = connection
+                .query_row(
+                    "SELECT links_json FROM transcript_message_links WHERE message_id = ?1",
+                    [message_id],
+                    |row| row.get::<_, String>(0),
+                )
+                .optional()?;
+            links
+                .map(|value| serde_json::from_str(&value).context("decode transcript links"))
+                .unwrap_or_else(|| Ok(TranscriptMessageLinks::default()))
+        })
+        .await
+        .context("join transcript link read")?
+    }
+
+    pub async fn max_visible_sequence(&self) -> Result<i64> {
+        let path = self.path.clone();
+        task::spawn_blocking(move || {
+            let connection = open_connection(&path)?;
+            connection
+                .query_row(
+                    "SELECT COALESCE(MAX(sequence), 0) FROM transcript_messages WHERE retracted_at IS NULL",
+                    [],
+                    |row| row.get(0),
+                )
+                .context("read transcript migration upper bound")
+        })
+        .await
+        .context("join transcript migration upper-bound read")?
+    }
+
+    pub async fn pcp_migration_watermark(&self, pcp_identity_id: &str) -> Result<i64> {
+        let path = self.path.clone();
+        let pcp_identity_id = pcp_identity_id.to_owned();
+        task::spawn_blocking(move || {
+            let connection = open_connection(&path)?;
+            connection
+                .query_row(
+                    "SELECT completed_sequence FROM transcript_pcp_migration_watermarks WHERE pcp_identity_id = ?1",
+                    [pcp_identity_id],
+                    |row| row.get(0),
+                )
+                .optional()
+                .map(|value| value.unwrap_or_default())
+                .context("read PCP transcript migration watermark")
+        })
+        .await
+        .context("join PCP transcript migration watermark read")?
+    }
+
+    pub async fn pcp_migration_batch(
+        &self,
+        after_sequence: i64,
+        through_sequence: i64,
+        limit: usize,
+    ) -> Result<Vec<MigrationTranscriptMessage>> {
+        let path = self.path.clone();
+        task::spawn_blocking(move || {
+            let connection = open_connection(&path)?;
+            let mut statement = connection.prepare(
+                "SELECT sequence, message_id, entry_json
+                 FROM transcript_messages
+                 WHERE retracted_at IS NULL AND sequence > ?1 AND sequence <= ?2
+                 ORDER BY sequence
+                 LIMIT ?3",
+            )?;
+            let rows = statement.query_map(
+                params![after_sequence, through_sequence, limit.clamp(1, 100) as i64],
+                |row| {
+                    let entry_json = row.get::<_, String>(2)?;
+                    Ok(MigrationTranscriptMessage {
+                        sequence: row.get(0)?,
+                        message_id: row.get(1)?,
+                        entry: serde_json::from_str(&entry_json).map_err(to_sql_error)?,
+                    })
+                },
+            )?;
+            rows.collect::<rusqlite::Result<Vec<_>>>()
+                .context("read PCP transcript migration batch")
+        })
+        .await
+        .context("join PCP transcript migration batch read")?
+    }
+
+    pub async fn advance_pcp_migration_watermark(
+        &self,
+        pcp_identity_id: &str,
+        completed_sequence: i64,
+    ) -> Result<()> {
+        let _guard = self.mutation.lock().await;
+        let path = self.path.clone();
+        let pcp_identity_id = pcp_identity_id.to_owned();
+        task::spawn_blocking(move || {
+            let connection = open_connection(&path)?;
+            connection.execute(
+                "INSERT INTO transcript_pcp_migration_watermarks(
+                    pcp_identity_id, completed_sequence, updated_at
+                 ) VALUES(?1, ?2, ?3)
+                 ON CONFLICT(pcp_identity_id) DO UPDATE SET
+                    completed_sequence=MAX(completed_sequence, excluded.completed_sequence),
+                    updated_at=excluded.updated_at",
+                params![pcp_identity_id, completed_sequence, now()],
+            )?;
+            Ok(())
+        })
+        .await
+        .context("join PCP transcript migration watermark write")?
+    }
+
     pub async fn retract_from(&self, message_id: &str) -> Result<TranscriptRetraction> {
         let _guard = self.mutation.lock().await;
         let path = self.path.clone();
@@ -204,6 +356,14 @@ impl TranscriptStore {
 
 fn open_connection(path: &Path) -> Result<Connection> {
     Connection::open(path).with_context(|| format!("open transcript database {}", path.display()))
+}
+
+fn now() -> String {
+    Utc::now().to_rfc3339_opts(SecondsFormat::Millis, true)
+}
+
+fn to_sql_error(error: serde_json::Error) -> rusqlite::Error {
+    rusqlite::Error::FromSqlConversionFailure(0, rusqlite::types::Type::Text, Box::new(error))
 }
 
 fn next_sequence(connection: &Connection) -> Result<i64> {
@@ -459,17 +619,73 @@ mod tests {
                 .expect("open transcript");
         assert_eq!(report.imported_messages, 0);
         let written = store
-            .append(entry(
-                MemoryRole::User,
-                "2026-08-15T00:00:00Z",
-                "local only",
-            ))
+            .append(
+                entry(MemoryRole::User, "2026-08-15T00:00:00Z", "local only"),
+                TranscriptMessageLinks::default(),
+            )
             .await
             .expect("append transcript message");
         assert!(written.message_id.starts_with("msg_"));
         let restored = store.recent(10).await.expect("read transcript");
         assert_eq!(restored.len(), 1);
         assert_eq!(restored[0].content, "local only");
+    }
+
+    #[tokio::test]
+    async fn checkpoints_model_judged_migration_per_pcp_identity() {
+        let temporary = tempfile::tempdir().expect("temporary directory");
+        let (store, _) =
+            TranscriptStore::open(temporary.path().join("transcript-migration.sqlite3"), None)
+                .await
+                .expect("open transcript");
+        for (at, content) in [
+            ("2026-08-15T00:00:00Z", "first"),
+            ("2026-08-15T00:01:00Z", "second"),
+            ("2026-08-15T00:02:00Z", "third"),
+        ] {
+            store
+                .append(
+                    entry(MemoryRole::User, at, content),
+                    TranscriptMessageLinks::default(),
+                )
+                .await
+                .expect("append migration source");
+        }
+        let upper = store
+            .max_visible_sequence()
+            .await
+            .expect("migration upper bound");
+        assert_eq!(upper, 3);
+        let first = store
+            .pcp_migration_batch(0, upper, 2)
+            .await
+            .expect("first migration batch");
+        assert_eq!(first.len(), 2);
+        assert_eq!(first[1].entry.content, "second");
+        store
+            .advance_pcp_migration_watermark("idn_new", first[1].sequence)
+            .await
+            .expect("advance migration");
+        assert_eq!(
+            store
+                .pcp_migration_watermark("idn_new")
+                .await
+                .expect("read migration watermark"),
+            2
+        );
+        assert_eq!(
+            store
+                .pcp_migration_watermark("idn_other")
+                .await
+                .expect("read independent watermark"),
+            0
+        );
+        let remaining = store
+            .pcp_migration_batch(2, upper, 2)
+            .await
+            .expect("remaining migration batch");
+        assert_eq!(remaining.len(), 1);
+        assert_eq!(remaining[0].entry.content, "third");
     }
 
     #[tokio::test]

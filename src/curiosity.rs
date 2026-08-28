@@ -2,14 +2,14 @@ use std::{collections::BTreeSet, sync::Arc};
 
 use anyhow::{Context, Result};
 use chrono::{Duration, SecondsFormat, Utc};
-use pcp_core::{
-    LifecycleStatus, Projection, ReadPage, ReadPagesRequest, SearchFilters, SearchMode,
-    SearchPagesRequest, SourceRef, WriteResult,
-};
+use pcp_core::WriteResult;
 use serde::Serialize;
 use serde_json::{Map, Value, json};
 
-use crate::continuity::ContinuityHost;
+use crate::{
+    continuity::ContinuityHost,
+    symbiont_state::{LocalContextDocument, SymbiontStateStore},
+};
 
 const HUNCH_KIND: &str = "symbiont_hunch";
 const MAX_HUNCH_FIELD_CHARS: usize = 4_000;
@@ -74,13 +74,6 @@ impl HunchState {
             Self::Watching => "watching",
             Self::Dormant => "dormant",
             Self::Resolved => "resolved",
-        }
-    }
-
-    fn lifecycle(self) -> LifecycleStatus {
-        match self {
-            Self::Germinating | Self::Watching => LifecycleStatus::Active,
-            Self::Dormant | Self::Resolved => LifecycleStatus::Archived,
         }
     }
 
@@ -174,61 +167,34 @@ pub struct CuriositySnapshot {
 #[derive(Clone)]
 pub struct CuriosityStore {
     continuity: Arc<ContinuityHost>,
+    state: Arc<SymbiontStateStore>,
 }
 
 impl CuriosityStore {
+    pub fn from_state(continuity: Arc<ContinuityHost>, state: Arc<SymbiontStateStore>) -> Self {
+        Self { continuity, state }
+    }
+
+    #[cfg(test)]
     pub fn new(continuity: Arc<ContinuityHost>) -> Self {
-        Self { continuity }
+        use std::time::{SystemTime, UNIX_EPOCH};
+
+        let nonce = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("clock")
+            .as_nanos();
+        let path = std::env::temp_dir().join(format!("symbiont-curiosity-state-{nonce}.sqlite3"));
+        Self::from_state(continuity, Arc::new(SymbiontStateStore::for_test(path)))
     }
 
     pub async fn snapshot(&self) -> Result<CuriositySnapshot> {
-        let hits = self
-            .continuity
-            .search(SearchPagesRequest {
-                query: HUNCH_KIND.to_owned(),
-                scopes: vec![self.continuity.project_scope().to_owned()],
-                mode: SearchMode::Exact,
-                term_match: pcp_core::SearchTermMatch::All,
-                projections: vec![Projection::Facets],
-                filters: SearchFilters {
-                    lifecycle_status: vec![LifecycleStatus::Active, LifecycleStatus::Archived],
-                    ..SearchFilters::default()
-                },
-                limit: MAX_HUNCHES,
-                cursor: None,
-            })
-            .await?;
-        if hits.hits.is_empty() {
-            return Ok(CuriositySnapshot::default());
-        }
-        let pages = self
-            .continuity
-            .read(ReadPagesRequest {
-                page_ids: Vec::new(),
-                revision_ids: hits
-                    .hits
-                    .iter()
-                    .map(|hit| hit.revision_id.clone())
-                    .collect(),
-                projections: vec![
-                    Projection::Manifest,
-                    Projection::Facets,
-                    Projection::Provenance,
-                    Projection::History,
-                ],
-                max_chars: 64_000,
-            })
-            .await?;
-        let mut by_revision = pages
+        let hunches = self
+            .state
+            .list_context_kind(HUNCH_KIND, MAX_HUNCHES as usize)
+            .await?
             .into_iter()
-            .filter_map(|page| Hunch::from_page(&page))
-            .map(|hunch| hunch.map(|hunch| (hunch.revision_id.clone(), hunch)))
-            .collect::<Result<std::collections::HashMap<_, _>>>()?;
-        let hunches = hits
-            .hits
-            .into_iter()
-            .filter_map(|hit| by_revision.remove(&hit.revision_id))
-            .collect::<Vec<_>>();
+            .filter_map(|document| Hunch::from_document(&document))
+            .collect::<Result<Vec<_>>>()?;
         let active_count = hunches
             .iter()
             .filter(|hunch| hunch.state.is_active())
@@ -259,9 +225,11 @@ impl CuriosityStore {
             eligible_after: None,
             feedback_assessment: None,
         });
-        self.continuity
-            .write_model_page(
-                Some(self.continuity.project_scope()),
+        self.continuity.verify_context_source_ids(&sources).await?;
+        let document = self
+            .state
+            .create_context(
+                HUNCH_KIND,
                 &hunch_markdown(
                     &draft.question,
                     &draft.why_alive,
@@ -269,19 +237,16 @@ impl CuriosityStore {
                     state,
                     None,
                 ),
+                sources,
                 Some(facets),
-                vec![SourceRef {
-                    provider_id: "symbiont_curiosity".to_owned(),
-                    locator: "symbiont://curiosity/hunch".to_owned(),
-                    media_type: Some("text/markdown".to_owned()),
-                    content_digest: None,
-                }],
-                sources.clone(),
-                Vec::new(),
-                None,
             )
             .await
-            .context("write Hunch Page")
+            .context("write local Hunch")?;
+        Ok(WriteResult {
+            page_id: document.document_id,
+            revision_id: document.revision_id,
+            created: true,
+        })
     }
 
     pub async fn revise(
@@ -327,17 +292,21 @@ impl CuriosityStore {
         let eligible_after = patch.eligible_after.or(current.eligible_after);
         let feedback_assessment = patch.feedback_assessment.or(current.feedback_assessment);
         let sources = normalize_sources(patch.source_revision_ids);
-        self.continuity
-            .revise_model_page(
-                page_id.to_owned(),
-                expected_revision_id.to_owned(),
-                hunch_markdown(
+        self.continuity.verify_context_source_ids(&sources).await?;
+        let document = self
+            .state
+            .revise_context(
+                page_id,
+                expected_revision_id,
+                HUNCH_KIND,
+                &hunch_markdown(
                     &question,
                     &why_alive,
                     &what_would_change_it,
                     state,
                     resolution.as_deref(),
                 ),
+                sources,
                 Some(hunch_facets(HunchFacetValues {
                     question: &question,
                     origin: current.origin,
@@ -352,18 +321,14 @@ impl CuriosityStore {
                     eligible_after: eligible_after.as_deref(),
                     feedback_assessment: feedback_assessment.as_deref(),
                 })),
-                vec![SourceRef {
-                    provider_id: "symbiont_curiosity".to_owned(),
-                    locator: format!("symbiont://curiosity/hunch/{page_id}"),
-                    media_type: Some("text/markdown".to_owned()),
-                    content_digest: None,
-                }],
-                state.lifecycle(),
-                sources,
-                None,
             )
             .await
-            .context("revise Hunch Page")
+            .context("revise local Hunch")?;
+        Ok(WriteResult {
+            page_id: document.document_id,
+            revision_id: document.revision_id,
+            created: false,
+        })
     }
 
     pub async fn retire(
@@ -428,11 +393,7 @@ impl CuriosityStore {
         let Some(surfaced) = self.read_revision(surfaced_revision_id).await? else {
             return Ok(None);
         };
-        let current_revision_id = self
-            .continuity
-            .current_revision_id(&surfaced.page_id)
-            .await?;
-        let Some(current) = self.read_revision(&current_revision_id).await? else {
+        let Some(current) = self.read_document(&surfaced.page_id).await? else {
             return Ok(None);
         };
         if !current.state.is_active() {
@@ -480,8 +441,7 @@ impl CuriosityStore {
     pub async fn pending_feedback_page_ids(&self, page_ids: &[String]) -> Result<Vec<String>> {
         let mut pending = Vec::new();
         for page_id in page_ids {
-            let current_revision_id = self.continuity.current_revision_id(page_id).await?;
-            let Some(current) = self.read_revision(&current_revision_id).await? else {
+            let Some(current) = self.read_document(page_id).await? else {
                 continue;
             };
             if current.state.is_active() && current.attention == HunchAttention::FeedbackPending {
@@ -586,31 +546,23 @@ impl CuriosityStore {
     }
 
     async fn read_revision(&self, revision_id: &str) -> Result<Option<Hunch>> {
-        let mut pages = self
-            .continuity
-            .read(ReadPagesRequest {
-                page_ids: Vec::new(),
-                revision_ids: vec![revision_id.to_owned()],
-                projections: vec![
-                    Projection::Manifest,
-                    Projection::Facets,
-                    Projection::Provenance,
-                    Projection::History,
-                ],
-                max_chars: 16_000,
-            })
-            .await?;
-        let Some(page) = pages.pop() else {
+        let Some(document) = self.state.read_context_revision(revision_id).await? else {
             return Ok(None);
         };
-        Hunch::from_page(&page).transpose()
+        Hunch::from_document(&document).transpose()
+    }
+
+    async fn read_document(&self, document_id: &str) -> Result<Option<Hunch>> {
+        let Some(document) = self.state.read_context_document(document_id).await? else {
+            return Ok(None);
+        };
+        Hunch::from_document(&document).transpose()
     }
 }
 
 impl Hunch {
-    fn from_page(page: &ReadPage) -> Option<Result<Self>> {
-        let revision = &page.revision;
-        let facets = revision.facets.as_ref()?.as_object()?;
+    fn from_document(document: &LocalContextDocument) -> Option<Result<Self>> {
+        let facets = document.facets.as_ref()?.as_object()?;
         if facet_text(facets, "kind") != Some(HUNCH_KIND) {
             return None;
         }
@@ -622,25 +574,16 @@ impl Hunch {
                 .context("unknown Hunch origin")?;
             let state = HunchState::parse(required_facet(facets, "hunchState")?.as_str())
                 .context("unknown Hunch state")?;
-            let history = page.history.iter().collect::<BTreeSet<_>>();
-            let source_revision_ids = revision
-                .provenance
-                .iter()
-                .flat_map(|event| event.input_revision_ids.iter().cloned())
-                .filter(|input| input != &revision.revision_id && !history.contains(input))
-                .collect::<BTreeSet<_>>()
-                .into_iter()
-                .collect();
             Ok(Self {
-                page_id: revision.page_id.clone(),
-                revision_id: revision.revision_id.clone(),
+                page_id: document.document_id.clone(),
+                revision_id: document.revision_id.clone(),
                 question,
                 origin,
                 why_alive,
                 what_would_change_it,
                 state,
                 resolution: facet_text(facets, "resolution").map(str::to_owned),
-                source_revision_ids,
+                source_revision_ids: document.source_revision_ids.clone(),
                 last_explored_at: facet_text(facets, "lastExploredAt").map(str::to_owned),
                 attention: facet_text(facets, "attentionState")
                     .and_then(HunchAttention::parse)
@@ -654,10 +597,7 @@ impl Hunch {
                     .map(str::to_owned),
                 eligible_after: facet_text(facets, "eligibleAfter").map(str::to_owned),
                 feedback_assessment: facet_text(facets, "feedbackAssessment").map(str::to_owned),
-                updated_at: revision
-                    .observed_at
-                    .clone()
-                    .unwrap_or_else(|| revision.created_at.clone()),
+                updated_at: document.updated_at.clone(),
             })
         })())
     }
@@ -977,7 +917,7 @@ mod tests {
                 .surfaced_hunch_revisions(&surfaced.page.revision_id)
                 .await
                 .expect("read surfaced relation"),
-            vec![awaiting.revision_id.clone()]
+            vec![created.revision_id.clone()]
         );
 
         let feedback = continuity

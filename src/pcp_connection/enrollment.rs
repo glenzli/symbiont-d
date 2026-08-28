@@ -19,7 +19,7 @@ use pcp_rpc::{
 use serde::{Deserialize, Serialize};
 use tokio::{fs, io::AsyncWriteExt, sync::Mutex};
 
-use crate::continuity::{CONVERSATION_NAMESPACE, PROJECT_NAMESPACE};
+use crate::continuity::PCP_NAMESPACE;
 
 #[cfg(unix)]
 use std::os::unix::fs::{FileTypeExt, MetadataExt, PermissionsExt};
@@ -344,12 +344,8 @@ fn client_claim() -> EnrollmentClientClaim {
 fn requested_access() -> RequestedAccess {
     RequestedAccess {
         mode: RequestedAccessMode::Contribute,
-        scopes: vec![
-            "user:self".to_owned(),
-            PROJECT_NAMESPACE.to_owned(),
-            CONVERSATION_NAMESPACE.to_owned(),
-        ],
-        allow_cross_scope_derivation: true,
+        scopes: vec![PCP_NAMESPACE.to_owned()],
+        allow_cross_scope_derivation: false,
     }
 }
 
@@ -863,18 +859,11 @@ mod v08_tests {
     };
 
     #[test]
-    fn enrollment_requests_contribute_for_canonical_scopes() {
+    fn enrollment_requests_contribute_for_the_single_symbiont_scope() {
         let request = requested_access();
         assert_eq!(request.mode, RequestedAccessMode::Contribute);
-        assert_eq!(
-            request.scopes,
-            vec![
-                "user:self".to_owned(),
-                PROJECT_NAMESPACE.to_owned(),
-                CONVERSATION_NAMESPACE.to_owned(),
-            ]
-        );
-        assert!(request.allow_cross_scope_derivation);
+        assert_eq!(request.scopes, vec![PCP_NAMESPACE.to_owned()]);
+        assert!(!request.allow_cross_scope_derivation);
     }
 
     #[tokio::test]
@@ -931,7 +920,7 @@ mod v08_tests {
         let written = active
             .client
             .ingest_page(IngestPageRequest {
-                namespace: CONVERSATION_NAMESPACE.to_owned(),
+                namespace: PCP_NAMESPACE.to_owned(),
                 kind: "integration_smoke".to_owned(),
                 observed_at: Some("2026-08-15T00:00:00.000Z".to_owned()),
                 source_span: Some(SourceSpan {
@@ -944,6 +933,7 @@ mod v08_tests {
                     content: "symbiont pcp v0.8 contribute integration smoke".to_owned(),
                 }),
                 source_refs: Vec::new(),
+                based_on_revision_ids: Vec::new(),
                 facets: Some(serde_json::json!({"kind": "integration_smoke"})),
                 external_event_id: Some(external_event_id),
             })
@@ -953,7 +943,7 @@ mod v08_tests {
             .client
             .search_pages(SearchPagesRequest {
                 query: "symbiont pcp v0.8 contribute integration smoke".to_owned(),
-                scopes: vec![CONVERSATION_NAMESPACE.to_owned()],
+                scopes: vec![PCP_NAMESPACE.to_owned()],
                 mode: SearchMode::Exact,
                 term_match: SearchTermMatch::All,
                 // Exact text search must include the payload surface; facets
@@ -1134,12 +1124,8 @@ mod tests {
         let access_one = AccessMode::Contribute.session(
             principal,
             "enrolled:reg-test:proc-one",
-            vec![
-                format!("user:{owner_id}"),
-                PROJECT_NAMESPACE.to_owned(),
-                CONVERSATION_NAMESPACE.to_owned(),
-            ],
-            true,
+            vec![PCP_NAMESPACE.to_owned()],
+            false,
         );
         let store_api: Arc<dyn PcpStore> = store.clone();
         let rpc_one = RunningRuntimeEndpoint::start(
@@ -1270,14 +1256,7 @@ mod tests {
 
     #[test]
     fn enrollment_requests_the_scopes_owned_by_continuity() {
-        assert_eq!(
-            requested_access().scopes,
-            vec![
-                "user:self".to_owned(),
-                PROJECT_NAMESPACE.to_owned(),
-                CONVERSATION_NAMESPACE.to_owned(),
-            ]
-        );
+        assert_eq!(requested_access().scopes, vec![PCP_NAMESPACE.to_owned()]);
     }
 
     #[test]
@@ -1289,16 +1268,12 @@ mod tests {
             generation: "proc-test".to_owned(),
         };
         let principal = ContinuityHost::access_session(owner_id).principal;
-        let access = |conversation: &str| {
+        let access = |scope: &str, allow_cross_scope_derivation: bool| {
             AccessMode::Contribute.session(
                 principal.clone(),
                 "enrolled:reg-test:proc-test",
-                vec![
-                    format!("user:{owner_id}"),
-                    PROJECT_NAMESPACE.to_owned(),
-                    conversation.to_owned(),
-                ],
-                true,
+                vec![scope.to_owned()],
+                allow_cross_scope_derivation,
             )
         };
         let session = |access| EnrollmentSession {
@@ -1311,11 +1286,15 @@ mod tests {
 
         assert!(session_matches_requested_access(
             &service,
-            &session(access(CONVERSATION_NAMESPACE))
+            &session(access(PCP_NAMESPACE, false))
         ));
         assert!(!session_matches_requested_access(
             &service,
-            &session(access("conversation:symbiont-d"))
+            &session(access("conversation:symbiont-d", false))
+        ));
+        assert!(!session_matches_requested_access(
+            &service,
+            &session(access(PCP_NAMESPACE, true))
         ));
     }
 

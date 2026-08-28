@@ -429,9 +429,13 @@ impl InferenceExecutor {
 
 fn pcp_maintenance_workload(request: &MaintenanceWorkerRequest) -> InferenceWorkload {
     match request {
-        MaintenanceWorkerRequest::SummarizePage { .. } => PCP_SUMMARY_WORKLOAD,
+        MaintenanceWorkerRequest::SummarizePage { .. }
+        | MaintenanceWorkerRequest::SummarizePages { .. } => PCP_SUMMARY_WORKLOAD,
         MaintenanceWorkerRequest::SelectPacking { .. }
+        | MaintenanceWorkerRequest::AnalyzePacking { .. }
         | MaintenanceWorkerRequest::SelectRelation { .. }
+        | MaintenanceWorkerRequest::ExtractTopic { .. }
+        | MaintenanceWorkerRequest::AssessArchive { .. }
         | MaintenanceWorkerRequest::SelectRetentionMilestones { .. } => {
             PCP_SEMANTIC_MAINTENANCE_WORKLOAD
         }

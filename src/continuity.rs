@@ -11,11 +11,12 @@ use pcp_client::EmbeddedPcpClient;
 use pcp_client::{DurablePageInventoryItem, PcpTenantApi};
 use pcp_core::{
     AccessPrincipal, AccessPrincipalType, AccessSession, Actor, ActorType,
-    AssessPageValidityRequest, CreateScopeRequest, IngestPageRequest, InitialRelation,
-    LifecycleStatus, LinkPagesRequest, PageMutability, PagePayload, Projection, ProvenanceEvent,
-    ReadPage, ReadPagesRequest, Relation, RevisePageRequest, Scope, SearchFilters, SearchMode,
-    SearchPagesRequest, SearchResult, SourceRef, SourceSpan, ValidityStanding, WritePageRequest,
-    WriteResult, WriteSummaryRequest, WriteSummaryResult, WriteValidityResult,
+    AssessPageValidityRequest, BrowseIndexOrder, CreateScopeRequest, IngestPageRequest,
+    InitialRelation, LifecycleStatus, LinkPagesRequest, PageMutability, PagePayload, Projection,
+    ProvenanceEvent, QueryContextRequest, QueryContextResponse, ReadPage, ReadPagesRequest,
+    Relation, RevisePageRequest, Scope, SearchFilters, SearchMode, SearchPagesRequest,
+    SearchResult, SourceRef, SourceSpan, ValidityStanding, WritePageRequest, WriteResult,
+    WriteSummaryRequest, WriteSummaryResult, WriteValidityResult,
 };
 #[cfg(test)]
 use pcp_store::PcpStore;
@@ -35,15 +36,14 @@ use crate::{
     },
     profile::{ProfileSnapshot, SetupStatus},
     signals::SignalEvent,
-    transcript::TranscriptStore,
+    transcript::{TranscriptMessageLinks, TranscriptStore},
     working_context::{WORKING_CONTEXT_SCAN_MESSAGES, WorkingContext},
 };
 
 const USER_SCOPE_LABEL: &str = "User context";
 pub const MAX_QUOTES_PER_MESSAGE: usize = 6;
 pub const MAX_QUOTE_TEXT_CHARS: usize = 6_000;
-pub(crate) const PROJECT_NAMESPACE: &str = "project:symbiont-d";
-pub(crate) const CONVERSATION_NAMESPACE: &str = "conversation:symbiont-d-main";
+pub(crate) const PCP_NAMESPACE: &str = "symbiont-d";
 const MODEL_ACTOR_ID: &str = "codex:symbiont-d";
 const SYSTEM_ACTOR_ID: &str = "symbiont-d";
 const MAX_MODEL_WRITE_CHARS: usize = 64_000;
@@ -140,26 +140,18 @@ impl SourceSequence {
 
 #[derive(Clone, Debug)]
 pub struct ScopePolicy {
-    pub user: String,
-    pub project: String,
-    pub conversation: String,
+    pub namespace: String,
 }
 
 impl ScopePolicy {
     fn for_owner(_owner_id: &str) -> Self {
         Self {
-            user: "user:self".to_owned(),
-            project: PROJECT_NAMESPACE.to_owned(),
-            conversation: CONVERSATION_NAMESPACE.to_owned(),
+            namespace: PCP_NAMESPACE.to_owned(),
         }
     }
 
     pub fn all(&self) -> Vec<String> {
-        vec![
-            self.user.clone(),
-            self.project.clone(),
-            self.conversation.clone(),
-        ]
+        vec![self.namespace.clone()]
     }
 }
 
@@ -226,6 +218,13 @@ pub struct ImageAssetPage {
     pub revised_prompt: Option<String>,
 }
 
+#[derive(Clone, Debug)]
+pub struct LocalMessageImage {
+    pub message_revision_id: String,
+    pub observed_at: String,
+    pub attachment: ImageAttachment,
+}
+
 impl ContinuityHost {
     /// Makes a user-addressed input signal durable only after the user chooses to reply to it.
     ///
@@ -251,7 +250,7 @@ impl ContinuityHost {
         let sequence = self.source_sequence.reserve().await?;
         self.store
             .ingest_page(IngestPageRequest {
-                namespace: self.scopes.conversation.clone(),
+                namespace: self.scopes.namespace.clone(),
                 kind: "external_signal".to_owned(),
                 observed_at: Some(observed_at.clone()),
                 source_span: Some(SourceSpan {
@@ -273,6 +272,7 @@ impl ContinuityHost {
                         content_digest: None,
                     })
                     .collect(),
+                based_on_revision_ids: Vec::new(),
                 facets: Some(json!({
                     "kind": "external_signal",
                     "signal_id": signal.id,
@@ -362,6 +362,19 @@ impl ContinuityHost {
     #[cfg(test)]
     pub async fn open_embedded_for_test(store: Arc<dyn PcpStore>) -> Result<Self> {
         let access = Self::access_session("host:symbiont-d");
+        store
+            .create_scope(
+                &access,
+                CreateScopeRequest {
+                    namespace: PCP_NAMESPACE.to_owned(),
+                    display_name: "symbiont-d".to_owned(),
+                    description: Some(
+                        "Selected durable information recorded by symbiont-d".to_owned(),
+                    ),
+                    parent_namespace: None,
+                },
+            )
+            .await?;
         let path = std::env::temp_dir().join(format!(
             "symbiont-d-test-transcript-{}-{}.sqlite3",
             std::process::id(),
@@ -383,16 +396,12 @@ impl ContinuityHost {
         self.scopes.all()
     }
 
-    pub fn conversation_scope(&self) -> &str {
-        &self.scopes.conversation
+    pub fn pcp_scope(&self) -> &str {
+        &self.scopes.namespace
     }
 
-    pub fn user_scope(&self) -> &str {
-        &self.scopes.user
-    }
-
-    pub fn project_scope(&self) -> &str {
-        &self.scopes.project
+    pub fn pcp_identity_id(&self) -> &str {
+        self.store.identity_id()
     }
 
     pub fn resolve_scopes(&self, requested: &[String]) -> Result<Vec<String>> {
@@ -428,8 +437,9 @@ impl ContinuityHost {
              selected durable source material for recall, not every turn and not a replayable chat \
              log. Current local message: `{current_revision}`; orientation: `{orientation}`; \
              latest checkpoint: `{checkpoint}`. Search then selectively read PCP material before \
-             relying on it or asking the user to repeat it. Derived Pages may use `{}` or `{}`.",
-            self.scopes.conversation, self.scopes.user, self.scopes.project
+             relying on it or asking the user to repeat it. Symbiont decides autonomously whether \
+             durable information is worth recording into this one Scope.",
+            self.scopes.namespace
         );
         if let Some(attachments) = current
             .map(|message| &message.attachment_revision_ids)
@@ -446,7 +456,7 @@ impl ContinuityHost {
     async fn latest_checkpoint_revision(&self) -> Option<String> {
         self.search(SearchPagesRequest {
             query: "conversation_checkpoint".to_owned(),
-            scopes: vec![self.scopes.conversation.clone()],
+            scopes: vec![self.scopes.namespace.clone()],
             mode: SearchMode::Exact,
             term_match: pcp_core::SearchTermMatch::All,
             projections: vec![Projection::Facets],
@@ -487,7 +497,7 @@ impl ContinuityHost {
         let result = self
             .search(SearchPagesRequest {
                 query: "conversation_event".to_owned(),
-                scopes: vec![self.scopes.conversation.clone()],
+                scopes: vec![self.scopes.namespace.clone()],
                 mode: SearchMode::Exact,
                 term_match: pcp_core::SearchTermMatch::All,
                 projections: vec![Projection::Facets],
@@ -564,7 +574,18 @@ impl ContinuityHost {
             metadata,
             delivery_state: None,
         };
-        let stored = self.transcript.append(entry).await?;
+        let stored = self
+            .transcript
+            .append(
+                entry,
+                TranscriptMessageLinks {
+                    responds_to: links.responds_to,
+                    continues_from: links.continues_from,
+                    input_revision_ids: links.input_revision_ids,
+                    surfaced_hunch_revision_ids: links.surfaced_hunch_revision_ids,
+                },
+            )
+            .await?;
         self.live_conversation.publish(stored.entry.clone()).await;
         Ok(StoredMessage {
             entry: stored.entry,
@@ -590,7 +611,7 @@ impl ContinuityHost {
             let result = self
                 .store
                 .ingest_page(IngestPageRequest {
-                    namespace: self.scopes.conversation.clone(),
+                    namespace: self.scopes.namespace.clone(),
                     kind: "image_asset".to_owned(),
                     observed_at: Some(observed_at.to_owned()),
                     source_span: Some(SourceSpan {
@@ -608,6 +629,7 @@ impl ContinuityHost {
                         media_type: Some("application/vnd.symbiont.image+json".to_owned()),
                         content_digest: Some(image.attachment.sha256.clone()),
                     }],
+                    based_on_revision_ids: Vec::new(),
                     facets: Some(json!({
                         "kind": "image_asset",
                         "sha256": image.attachment.sha256,
@@ -628,7 +650,7 @@ impl ContinuityHost {
         let result = self
             .search(SearchPagesRequest {
                 query: "image_asset".to_owned(),
-                scopes: vec![self.scopes.conversation.clone()],
+                scopes: vec![self.scopes.namespace.clone()],
                 mode: SearchMode::Exact,
                 term_match: pcp_core::SearchTermMatch::All,
                 projections: vec![Projection::Facets],
@@ -774,10 +796,25 @@ impl ContinuityHost {
         if message_revision_ids.len() > 20 {
             anyhow::bail!("at most 20 message Revisions can be inspected at once");
         }
+        let local_ids = self
+            .transcript
+            .by_ids(message_revision_ids)
+            .await?
+            .into_iter()
+            .filter_map(|entry| entry.revision_id)
+            .collect::<HashSet<_>>();
+        let pcp_revision_ids = message_revision_ids
+            .iter()
+            .filter(|revision_id| !local_ids.contains(*revision_id))
+            .cloned()
+            .collect::<Vec<_>>();
+        if pcp_revision_ids.is_empty() {
+            return Ok(Vec::new());
+        }
         let pages = self
             .read(ReadPagesRequest {
                 page_ids: Vec::new(),
-                revision_ids: message_revision_ids.to_vec(),
+                revision_ids: pcp_revision_ids,
                 projections: vec![Projection::Relations],
                 max_chars: 16_000,
             })
@@ -816,8 +853,122 @@ impl ContinuityHost {
             .collect())
     }
 
+    pub async fn local_message_images(
+        &self,
+        message_revision_ids: &[String],
+    ) -> Result<Vec<LocalMessageImage>> {
+        let mut images = Vec::new();
+        for entry in self.transcript.by_ids(message_revision_ids).await? {
+            let Some(message_revision_id) = entry.revision_id.clone() else {
+                continue;
+            };
+            for part in entry.parts {
+                if let MessagePart::Image { asset } = part {
+                    images.push(LocalMessageImage {
+                        message_revision_id: message_revision_id.clone(),
+                        observed_at: entry.at.clone(),
+                        attachment: asset,
+                    });
+                }
+            }
+        }
+        Ok(images)
+    }
+
     pub async fn recent_messages(&self, limit: usize) -> Result<Vec<MemoryEntry>> {
         self.transcript.recent(limit).await
+    }
+
+    pub async fn transcript_source_refs(&self, message_ids: &[String]) -> Result<Vec<SourceRef>> {
+        anyhow::ensure!(
+            message_ids.len() <= 100,
+            "one PCP record can cite at most 100 transcript messages"
+        );
+        let mut unique = message_ids
+            .iter()
+            .filter(|id| !id.trim().is_empty())
+            .cloned()
+            .collect::<Vec<_>>();
+        unique.sort();
+        unique.dedup();
+        if unique.is_empty() {
+            return Ok(Vec::new());
+        }
+        let found = self
+            .transcript
+            .by_ids(&unique)
+            .await?
+            .into_iter()
+            .filter_map(|entry| entry.revision_id)
+            .collect::<HashSet<_>>();
+        let missing = unique
+            .iter()
+            .filter(|id| !found.contains(*id))
+            .cloned()
+            .collect::<Vec<_>>();
+        anyhow::ensure!(
+            missing.is_empty(),
+            "transcript source messages were not found: {}",
+            missing.join(", ")
+        );
+        Ok(unique
+            .into_iter()
+            .map(|message_id| SourceRef {
+                provider_id: "symbiont:transcript".to_owned(),
+                locator: format!("message/{message_id}"),
+                media_type: Some("text/markdown".to_owned()),
+                content_digest: None,
+            })
+            .collect())
+    }
+
+    pub async fn verify_context_source_ids(&self, source_ids: &[String]) -> Result<()> {
+        let mut unique = source_ids
+            .iter()
+            .filter(|id| !id.trim().is_empty())
+            .cloned()
+            .collect::<Vec<_>>();
+        unique.sort();
+        unique.dedup();
+        if unique.is_empty() {
+            return Ok(());
+        }
+        let local = self
+            .transcript
+            .by_ids(&unique)
+            .await?
+            .into_iter()
+            .filter_map(|entry| entry.revision_id)
+            .collect::<HashSet<_>>();
+        let pcp_ids = unique
+            .iter()
+            .filter(|id| !local.contains(*id))
+            .cloned()
+            .collect::<Vec<_>>();
+        let mut available = local;
+        for chunk in pcp_ids.chunks(20) {
+            for page in self
+                .read(ReadPagesRequest {
+                    page_ids: Vec::new(),
+                    revision_ids: chunk.to_vec(),
+                    projections: vec![Projection::Manifest],
+                    max_chars: 256,
+                })
+                .await?
+            {
+                available.insert(page.revision.revision_id);
+            }
+        }
+        let missing = unique
+            .into_iter()
+            .filter(|id| !available.contains(id))
+            .collect::<Vec<_>>();
+        anyhow::ensure!(
+            missing.is_empty(),
+            "context sources were not found in the local transcript or PCP: {}",
+            missing.join(", ")
+        );
+        Ok(())
     }
 
     /// Reads one chronological page ending at `before_at`.
@@ -994,11 +1145,29 @@ impl ContinuityHost {
             .browse_index(
                 self.resolve_scopes(requested_scopes)?,
                 owned_page_kinds(INDEX_EXCLUDED_PAGE_KINDS),
+                BrowseIndexOrder::Recent,
                 limit,
                 cursor,
                 max_chars,
             )
             .await
+    }
+
+    pub async fn semantic_search(
+        &self,
+        mut request: QueryContextRequest,
+    ) -> Result<QueryContextResponse> {
+        request.scopes = self.resolve_scopes(&request.scopes)?;
+        self.store.semantic_search(request).await
+    }
+
+    pub async fn match_intent(
+        &self,
+        mut request: QueryContextRequest,
+        effort: pcp_core::IntentEffort,
+    ) -> Result<QueryContextResponse> {
+        request.scopes = self.resolve_scopes(&request.scopes)?;
+        self.store.match_intent(request, effort).await
     }
 
     pub async fn read(&self, request: ReadPagesRequest) -> Result<Vec<ReadPage>> {
@@ -1076,42 +1245,14 @@ impl ContinuityHost {
     }
 
     pub async fn surfaced_hunch_revisions(&self, message_revision_id: &str) -> Result<Vec<String>> {
-        let mut pages = self
-            .read(ReadPagesRequest {
-                page_ids: Vec::new(),
-                revision_ids: vec![message_revision_id.to_owned()],
-                projections: vec![Projection::Relations],
-                max_chars: 8_000,
-            })
-            .await?;
-        let Some(message) = pages.pop() else {
-            return Ok(Vec::new());
-        };
-        let mut page_ids = message
-            .relations
-            .into_iter()
-            .filter(|relation| {
-                relation.from_page_id == message.page.page_id
-                    && relation.relation_type == "surfaces_hunch"
-            })
-            .map(|relation| relation.to_page_id)
-            .collect::<Vec<_>>();
-        page_ids.sort();
-        page_ids.dedup();
-        if page_ids.is_empty() {
-            return Ok(Vec::new());
-        }
-        Ok(self
-            .read(ReadPagesRequest {
-                page_ids,
-                revision_ids: Vec::new(),
-                projections: vec![Projection::Manifest],
-                max_chars: 256,
-            })
+        let mut revisions = self
+            .transcript
+            .links(message_revision_id)
             .await?
-            .into_iter()
-            .map(|page| page.revision.revision_id)
-            .collect())
+            .surfaced_hunch_revision_ids;
+        revisions.sort();
+        revisions.dedup();
+        Ok(revisions)
     }
 
     pub async fn next_summary_candidate(&self, minimum_chars: usize) -> Result<Option<String>> {
@@ -1134,15 +1275,53 @@ impl ContinuityHost {
 
     pub async fn write_model_page(
         &self,
-        _namespace: Option<&str>,
-        _content: &str,
-        _facets: Option<Value>,
-        _source_refs: Vec<SourceRef>,
-        _source_revision_ids: Vec<String>,
-        _relations: Vec<InitialRelation>,
-        _idempotency_key: Option<String>,
+        namespace: Option<&str>,
+        content: &str,
+        facets: Option<Value>,
+        source_refs: Vec<SourceRef>,
+        source_revision_ids: Vec<String>,
+        relations: Vec<InitialRelation>,
+        idempotency_key: Option<String>,
     ) -> Result<WriteResult> {
-        anyhow::bail!("PCP v0.8 tenant mode does not permit model-authored Pages")
+        if let Some(namespace) = namespace {
+            anyhow::ensure!(
+                namespace == self.pcp_scope(),
+                "Symbiont can record only in its single PCP Scope"
+            );
+        }
+        let content = content.trim();
+        let content_chars = content.chars().count();
+        anyhow::ensure!(
+            (1..=MAX_MODEL_WRITE_CHARS).contains(&content_chars),
+            "recorded PCP content must contain 1-{MAX_MODEL_WRITE_CHARS} characters"
+        );
+        anyhow::ensure!(
+            relations.is_empty(),
+            "ordinary tenant recording cannot assert PCP Relations"
+        );
+        let kind = facets
+            .as_ref()
+            .and_then(|value| value.get("kind"))
+            .and_then(Value::as_str)
+            .filter(|kind| !kind.trim().is_empty())
+            .unwrap_or("durable_context")
+            .to_owned();
+        self.store
+            .ingest_page(IngestPageRequest {
+                namespace: self.scopes.namespace.clone(),
+                kind,
+                observed_at: Some(now()),
+                source_span: None,
+                payload: Some(PagePayload {
+                    media_type: "text/markdown".to_owned(),
+                    content: content.to_owned(),
+                }),
+                source_refs,
+                based_on_revision_ids: source_revision_ids,
+                facets,
+                external_event_id: idempotency_key,
+            })
+            .await
     }
 
     pub async fn write_model_summary(

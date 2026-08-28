@@ -1,4 +1,4 @@
-use super::{CONVERSATION_NAMESPACE, PROJECT_NAMESPACE, ScopePolicy, SourceSequence};
+use super::{PCP_NAMESPACE, ScopePolicy, SourceSequence};
 
 #[tokio::test]
 async fn source_sequence_is_durable_and_monotonic_across_reopen() {
@@ -19,9 +19,8 @@ async fn source_sequence_is_durable_and_monotonic_across_reopen() {
 }
 
 #[test]
-fn tenant_scope_policy_uses_the_canonical_user_self_scope() {
+fn tenant_scope_policy_uses_only_the_symbiont_scope() {
     let scopes = ScopePolicy::for_owner("idn_runtime_identity");
-    assert_eq!(scopes.user, "user:self");
-    assert_eq!(scopes.project, PROJECT_NAMESPACE);
-    assert_eq!(scopes.conversation, CONVERSATION_NAMESPACE);
+    assert_eq!(scopes.namespace, PCP_NAMESPACE);
+    assert_eq!(scopes.all(), vec![PCP_NAMESPACE.to_owned()]);
 }

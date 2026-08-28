@@ -10,9 +10,10 @@ use std::{
 };
 
 use anyhow::{Context, Result};
-use pcp_client::PcpTenantApi;
+use pcp_client::{ContentLibraryResult, ContentLibrarySummary, PcpTenantApi};
 use pcp_core::{
-    AccessSession, Capabilities, IngestPageRequest, ReadPage, ReadPagesRequest, Scope,
+    AccessSession, BrowseIndexOrder, Capabilities, IngestPageRequest, IntentEffort,
+    QueryContextRequest, QueryContextResponse, ReadPage, ReadPagesRequest, Scope,
     SearchPagesRequest, SearchResult, WriteResult,
 };
 use tokio::sync::Mutex;
@@ -288,11 +289,38 @@ impl PcpTenantApi for ManagedPcpClient {
     retrying_read!(browse_index(
         scopes: Vec<String>,
         excluded_page_kinds: Vec<String>,
+        order: BrowseIndexOrder,
         limit: u32,
         cursor: Option<String>,
         max_chars: u32,
     ) -> SearchResult);
+    retrying_read!(browse_content_pages(
+        scopes: Vec<String>,
+        query: Option<String>,
+        order: BrowseIndexOrder,
+        limit: u32,
+        cursor: Option<String>,
+        max_chars: u32,
+    ) -> ContentLibraryResult);
+    retrying_read!(browse_retrieval_pages(
+        scopes: Vec<String>,
+        query: Option<String>,
+        order: BrowseIndexOrder,
+        limit: u32,
+        cursor: Option<String>,
+        max_chars: u32,
+    ) -> ContentLibraryResult);
+    retrying_read!(content_library_summary(
+        requested_scopes: Vec<String>,
+    ) -> ContentLibrarySummary);
     retrying_read!(read_pages(request: ReadPagesRequest) -> Vec<ReadPage>);
+    retrying_read!(semantic_search(
+        request: QueryContextRequest,
+    ) -> QueryContextResponse);
+    retrying_read!(match_intent(
+        request: QueryContextRequest,
+        effort: IntentEffort,
+    ) -> QueryContextResponse);
     recovering_write!(ingest_page(request: IngestPageRequest) -> WriteResult);
 }
 

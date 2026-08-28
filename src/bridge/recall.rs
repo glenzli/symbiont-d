@@ -15,7 +15,7 @@ use tracing::warn;
 
 use crate::{
     asset::AssetStore,
-    continuity::{ContinuityHost, ImageAssetPage},
+    continuity::{ContinuityHost, ImageAssetPage, LocalMessageImage},
     curiosity::{CuriosityStore, HunchState},
     memory::{MemoryEntry, MemoryRole},
     profile::ProfileStore,
@@ -695,6 +695,10 @@ impl RecallService {
         let mut unique_revision_ids = revision_ids.to_vec();
         unique_revision_ids.sort();
         unique_revision_ids.dedup();
+        let local_images = self
+            .continuity
+            .local_message_images(&unique_revision_ids)
+            .await?;
         let mut image_revision_ids = Vec::new();
         for chunk in unique_revision_ids.chunks(20) {
             image_revision_ids.extend(self.continuity.attached_image_revision_ids(chunk).await?);
@@ -707,9 +711,55 @@ impl RecallService {
             .read_image_assets(&image_revision_ids)
             .await?;
         images.truncate(MAX_BRIDGE_IMAGES);
-        Ok(self
-            .project_images(images, &image_set, recalled_context)
-            .await)
+        let mut projected = self
+            .project_local_images(local_images, recalled_context)
+            .await;
+        projected.extend(
+            self.project_images(images, &image_set, recalled_context)
+                .await,
+        );
+        let mut seen = HashSet::new();
+        projected.retain(|image| seen.insert(image.asset_id.clone()));
+        projected.truncate(MAX_BRIDGE_IMAGES);
+        Ok(projected)
+    }
+
+    async fn project_local_images(
+        &self,
+        images: Vec<LocalMessageImage>,
+        recalled_context: &HashMap<String, String>,
+    ) -> Vec<BridgeImage> {
+        let mut projected = Vec::with_capacity(images.len());
+        for image in images {
+            let local_path = self
+                .assets
+                .local_path(&image.attachment.asset_id)
+                .await
+                .ok()
+                .map(|path| path.to_string_lossy().into_owned());
+            projected.push(BridgeImage {
+                revision_id: format!(
+                    "local-image:{}:{}",
+                    image.message_revision_id, image.attachment.asset_id
+                ),
+                asset_id: image.attachment.asset_id,
+                local_path,
+                url: image.attachment.url,
+                filename: image.attachment.filename,
+                mime_type: image.attachment.mime_type,
+                byte_size: image.attachment.byte_size,
+                width: image.attachment.width,
+                height: image.attachment.height,
+                observed_at: image.observed_at,
+                attached_to_revision_id: Some(image.message_revision_id.clone()),
+                source_type: Some("local_transcript".to_owned()),
+                context: recalled_context
+                    .get(&image.message_revision_id)
+                    .map(|value| truncate(value, MAX_SIGNAL_CHARS)),
+                matched_by: "local_message_attachment".to_owned(),
+            });
+        }
+        projected
     }
 
     async fn project_images(

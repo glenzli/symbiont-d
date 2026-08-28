@@ -74,6 +74,7 @@ const CONTEXT_MAINTENANCE_COMPLETE_MARKER: &str = "<symbiont-context-maintained/
 const PROFILE_REVIEW_COMPLETE_MARKER: &str = "<symbiont-profile-reviewed/>";
 const REFLECTION_COMPLETE_MARKER: &str = "<symbiont-reflected/>";
 const RECONCILIATION_COMPLETE_MARKER: &str = "<symbiont-reconciled/>";
+const PCP_TRANSCRIPT_MIGRATION_COMPLETE_MARKER: &str = "<symbiont-pcp-transcript-batch/>";
 const CONTINUATION_SILENT_MARKER: &str = "<symbiont-no-continuation/>";
 const ATTACKER_COMPLETE_MARKER: &str = "<symbiont-attacker-reviewed/>";
 // Starting an app-server includes initializing account state and Symbiont's
@@ -233,6 +234,20 @@ pub struct ReconciliationModelRequest<'a> {
     pub continuity_context: &'a str,
     pub input_events: watch::Receiver<u64>,
     pub events: mpsc::Sender<RuntimeEvent>,
+}
+
+pub struct PcpTranscriptMigrationRequest<'a> {
+    pub batch_bundle: &'a str,
+    pub compute: &'a ComputeConfig,
+    pub profile: &'a ProfileSnapshot,
+    pub continuity_context: &'a str,
+    pub input_events: watch::Receiver<u64>,
+    pub events: mpsc::Sender<RuntimeEvent>,
+}
+
+pub struct PcpTranscriptMigrationOutcome {
+    pub records_written: usize,
+    pub invocations: Vec<InvocationRecord>,
 }
 
 #[derive(Clone, Debug, Default)]
@@ -535,7 +550,7 @@ impl CodexClient {
                 .get(&thread_id)
                 .copied()
                 .unwrap_or_default(),
-            self.continuity.conversation_scope(),
+            self.continuity.pcp_scope(),
         );
         let needs_bridge = self.interactive_cursor.needs_bridge();
         let cursor = self.interactive_cursor.revision();
@@ -1242,6 +1257,65 @@ impl CodexClient {
             proposals,
             actions,
             interrupted: outcome.interrupted,
+        })
+    }
+
+    pub async fn migrate_transcript_batch(
+        &mut self,
+        request: PcpTranscriptMigrationRequest<'_>,
+    ) -> Result<PcpTranscriptMigrationOutcome> {
+        let prompt = format!(
+            "Re-evaluate one bounded batch from Symbiont's authoritative local transcript for a \
+             fresh PCP Store. This is a one-time migration, not a chat reply. Decide autonomously \
+             which information has plausible future value across platforms or thread resets. \
+             Record stable preferences or constraints, decisions with reasons, project state or \
+             boundaries, unresolved questions, consequential observations, and useful associations. \
+             Do not mirror the conversation, preserve routine execution chatter, or write an item \
+             merely because a message exists. Keep uncertainty explicit. Write at most twelve \
+             self-contained records with `pcp.write_page`; cite only exact `source_message_ids` from \
+             this batch. Use PCP semantic or exact read tools only to avoid a real duplicate. Do not \
+             modify Symbiont state, Hunches, files, or the transcript. When the whole batch has been \
+             judged, return exactly {PCP_TRANSCRIPT_MIGRATION_COMPLETE_MARKER}.\n\n\
+             <local-transcript-batch>\n{}\n</local-transcript-batch>",
+            request.batch_bundle
+        );
+        let thread_id = self.maintenance_thread_id.clone();
+        let mut outcome = self
+            .run_request(
+                thread_id.clone(),
+                text_input_items(&prompt),
+                ComputeLane::Critical,
+                "pcp_transcript_migration",
+                request.compute,
+                request.profile,
+                request.continuity_context,
+                None,
+                None,
+                false,
+                Some(request.input_events),
+                &request.events,
+            )
+            .await?;
+        if outcome.interrupted {
+            anyhow::bail!("PCP transcript migration batch was interrupted");
+        }
+        if outcome.text.trim() != PCP_TRANSCRIPT_MIGRATION_COMPLETE_MARKER {
+            anyhow::bail!("PCP transcript migration batch did not return its completion marker");
+        }
+        self.renew_background_thread(&thread_id, BackgroundThread::Maintenance)
+            .await;
+        let records_written = outcome
+            .invocations
+            .iter()
+            .flat_map(|invocation| &invocation.trace_steps)
+            .filter(|step| step.succeeded && step.namespace == "pcp" && step.tool == "write_page")
+            .count();
+        for invocation in &mut outcome.invocations {
+            invocation.produced_message = false;
+        }
+        Ok(PcpTranscriptMigrationOutcome {
+            records_written,
+            invocations: outcome.invocations,
         })
     }
 

@@ -2,10 +2,11 @@ use std::sync::Arc;
 
 use anyhow::{Context, Result};
 use pcp_core::{
-    Projection, ReadPagesRequest, SearchFilters, SearchMode, SearchPagesRequest, SearchTermMatch,
-    ValidityStanding,
+    IntentEffort, Projection, QueryContextRequest, ReadPagesRequest, SearchFilters, SearchMode,
+    SearchPagesRequest, SearchTermMatch, ValidityStanding,
 };
 use serde_json::{Value, json};
+use sha2::{Digest, Sha256};
 
 use crate::{
     attacker::SUBMIT_ATTACKER_ASSESSMENT_TOOL,
@@ -80,7 +81,7 @@ impl SymbiontTools {
     }
 
     pub(super) fn specifications() -> Value {
-        json!([
+        let mut specifications = json!([
             {
                 "type": "namespace",
                 "name": "symbiont",
@@ -862,6 +863,39 @@ impl SymbiontTools {
                     },
                     {
                         "type": "function",
+                        "name": "semantic_search",
+                        "description": "Retrieve a bounded context pack from PCP Runtime by semantic meaning. This is the default recall path when the user's wording may differ from the recorded Page.",
+                        "inputSchema": {
+                            "type": "object",
+                            "properties": {
+                                "query": {"type": "string"},
+                                "scopes": {"type": "array", "items": {"type": "string"}},
+                                "result_limit": {"type": "integer", "minimum": 1, "maximum": 50},
+                                "context_budget_chars": {"type": "integer", "minimum": 1000, "maximum": 64000}
+                            },
+                            "required": ["query"],
+                            "additionalProperties": false
+                        }
+                    },
+                    {
+                        "type": "function",
+                        "name": "match_intent",
+                        "description": "Retrieve and Router-review a bounded PCP context pack for an ambiguous or multi-part intent. Use only when semantic search alone cannot confidently select the relevant records.",
+                        "inputSchema": {
+                            "type": "object",
+                            "properties": {
+                                "query": {"type": "string"},
+                                "scopes": {"type": "array", "items": {"type": "string"}},
+                                "result_limit": {"type": "integer", "minimum": 1, "maximum": 50},
+                                "context_budget_chars": {"type": "integer", "minimum": 1000, "maximum": 64000},
+                                "effort": {"type": "string", "enum": ["low", "medium", "high"]}
+                            },
+                            "required": ["query"],
+                            "additionalProperties": false
+                        }
+                    },
+                    {
+                        "type": "function",
                         "name": "read_pages",
                         "description": "Read current Page heads by stable pageId, exact historical snapshots by revisionId, or both. content returns content, context adds interpretation and Page Relations, and full adds source/provenance diagnostics.",
                         "inputSchema": {
@@ -946,16 +980,23 @@ impl SymbiontTools {
                     {
                         "type": "function",
                         "name": "write_page",
-                        "description": "Create one durable revisioned Page. Supply its content, optional kind and Scope, and exact Revisions it is based on; the host creates provenance and stable derived_from links.",
+                        "description": "Record one self-contained item that Symbiont judges worth retaining. This is autonomous tenant ingest, not user approval and not raw transcript mirroring. Cite local transcript messages as source_message_ids and PCP derivation inputs only as based_on_revision_ids.",
                         "inputSchema": {
                             "type": "object",
                             "properties": {
-                                "scope": {"type": "string"},
                                 "kind": {"type": "string"},
                                 "content": {"type": "string"},
+                                "source_message_ids": {
+                                    "type": "array",
+                                    "items": {"type": "string"},
+                                    "maxItems": 100,
+                                    "description": "Exact local transcript message IDs supporting this record."
+                                },
                                 "based_on_revision_ids": {
                                     "type": "array",
-                                    "items": {"type": "string"}
+                                    "items": {"type": "string"},
+                                    "maxItems": 100,
+                                    "description": "Exact PCP Revision IDs actually used to derive this record."
                                 }
                             },
                             "required": ["content"],
@@ -1039,7 +1080,30 @@ impl SymbiontTools {
                     }
                 ]
             }
-        ])
+        ]);
+        if let Some(namespaces) = specifications.as_array_mut()
+            && let Some(pcp) = namespaces
+                .iter_mut()
+                .find(|namespace| namespace.get("name").and_then(Value::as_str) == Some("pcp"))
+            && let Some(tools) = pcp.get_mut("tools").and_then(Value::as_array_mut)
+        {
+            const TENANT_TOOLS: &[&str] = &[
+                "describe",
+                "list_scopes",
+                "browse_index",
+                "search_pages",
+                "semantic_search",
+                "match_intent",
+                "read_pages",
+                "write_page",
+            ];
+            tools.retain(|tool| {
+                tool.get("name")
+                    .and_then(Value::as_str)
+                    .is_some_and(|name| TENANT_TOOLS.contains(&name))
+            });
+        }
+        specifications
     }
 
     pub(super) fn scout_specifications() -> Value {
@@ -1055,6 +1119,8 @@ impl SymbiontTools {
                     "list_scopes",
                     "browse_index",
                     "search_pages",
+                    "semantic_search",
+                    "match_intent",
                     "read_pages",
                 ][..],
                 _ => &[][..],
@@ -1205,6 +1271,9 @@ impl SymbiontTools {
         arguments: &Value,
         run_origin: &str,
     ) -> Result<(String, Option<EscalationRequest>)> {
+        if run_origin == "pcp_transcript_migration" {
+            anyhow::bail!("Symbiont state tools are outside the PCP transcript migration boundary");
+        }
         if run_origin.starts_with("reconciliation_") && tool != "complete_reconciliation" {
             anyhow::bail!("{tool} is outside the dedicated durable-memory reconciliation boundary");
         }
@@ -1891,22 +1960,9 @@ impl SymbiontTools {
         run_origin: &str,
     ) -> Result<(String, Option<EscalationRequest>)> {
         if matches!(run_origin, "reconciliation_preview" | "autonomous_scout")
-            && matches!(
-                tool,
-                "assess_validity"
-                    | "write_summary"
-                    | "write_page"
-                    | "revise_page"
-                    | "consolidate_pages"
-                    | "relate_pages"
-            )
+            && tool == "write_page"
         {
             anyhow::bail!("this model stage is host-enforced read-only");
-        }
-        if tool == "consolidate_pages" && run_origin != "reconciliation_apply" {
-            anyhow::bail!(
-                "Page consolidation is available only to an approved reconciliation apply run"
-            );
         }
         let result = match tool {
             "describe" => json!({
@@ -1956,6 +2012,34 @@ impl SymbiontTools {
                     cursor: optional_text(arguments, "cursor").map(str::to_owned),
                 };
                 serde_json::to_value(self.continuity.search(request).await?)?
+            }
+            "semantic_search" => {
+                let request = QueryContextRequest {
+                    query: required_text(arguments, "query")?.to_owned(),
+                    scopes: string_array(arguments, "scopes")?,
+                    result_limit: optional_integer(arguments, "result_limit")
+                        .map(|value| value.clamp(1, 50) as u32),
+                    context_budget_chars: optional_integer(arguments, "context_budget_chars")
+                        .map(|value| value.clamp(1_000, 64_000) as u32),
+                };
+                serde_json::to_value(self.continuity.semantic_search(request).await?)?
+            }
+            "match_intent" => {
+                let request = QueryContextRequest {
+                    query: required_text(arguments, "query")?.to_owned(),
+                    scopes: string_array(arguments, "scopes")?,
+                    result_limit: optional_integer(arguments, "result_limit")
+                        .map(|value| value.clamp(1, 50) as u32),
+                    context_budget_chars: optional_integer(arguments, "context_budget_chars")
+                        .map(|value| value.clamp(1_000, 64_000) as u32),
+                };
+                let effort = match optional_text(arguments, "effort").unwrap_or("medium") {
+                    "low" => IntentEffort::Low,
+                    "medium" => IntentEffort::Medium,
+                    "high" => IntentEffort::High,
+                    other => anyhow::bail!("unknown intent effort: {other}"),
+                };
+                serde_json::to_value(self.continuity.match_intent(request, effort).await?)?
             }
             "read_pages" => {
                 let page_ids = string_array(arguments, "page_ids")?;
@@ -2036,16 +2120,32 @@ impl SymbiontTools {
             "write_page" => {
                 let content = required_text(arguments, "content")?;
                 let facets = optional_text(arguments, "kind").map(|kind| json!({"kind": kind}));
+                let source_message_ids = string_array(arguments, "source_message_ids")?;
+                let source_refs = self
+                    .continuity
+                    .transcript_source_refs(&source_message_ids)
+                    .await?;
+                let based_on_revision_ids = string_array(arguments, "based_on_revision_ids")?;
+                let mut digest = Sha256::new();
+                digest.update(content.trim().as_bytes());
+                for source in &source_message_ids {
+                    digest.update([0]);
+                    digest.update(source.as_bytes());
+                }
+                for revision in &based_on_revision_ids {
+                    digest.update([1]);
+                    digest.update(revision.as_bytes());
+                }
                 let written = self
                     .continuity
                     .write_model_page(
-                        optional_text(arguments, "scope"),
+                        None,
                         content,
                         facets,
+                        source_refs,
+                        based_on_revision_ids,
                         Vec::new(),
-                        string_array(arguments, "based_on_revision_ids")?,
-                        Vec::new(),
-                        None,
+                        Some(format!("symbiont-record:{:x}", digest.finalize())),
                     )
                     .await?;
                 json!({
@@ -2107,33 +2207,10 @@ impl SymbiontTools {
         if unknown.is_empty() {
             return Ok(());
         }
-        for chunk in unknown.chunks(20) {
-            let pages = self
-                .continuity
-                .read(ReadPagesRequest {
-                    page_ids: Vec::new(),
-                    revision_ids: chunk.to_vec(),
-                    projections: vec![Projection::Facets],
-                    max_chars: 256,
-                })
-                .await
-                .context("verify recalled Reflection source through PCP")?;
-            for page in pages {
-                let facets = page.revision.facets.as_ref();
-                let kind = facets
-                    .and_then(|value| value.get("kind"))
-                    .and_then(Value::as_str);
-                let role = facets
-                    .and_then(|value| value.get("role"))
-                    .and_then(Value::as_str);
-                if kind != Some("conversation_event") || !matches!(role, Some("user" | "assistant"))
-                {
-                    anyhow::bail!(
-                        "Reflection sources must be user or assistant conversation Revisions"
-                    );
-                }
-            }
-        }
+        self.continuity
+            .verify_context_source_ids(&unknown)
+            .await
+            .context("verify Reflection sources through the local transcript or PCP")?;
         self.reflection.register_verified_revisions(&unknown).await
     }
 }
@@ -2223,6 +2300,10 @@ fn integer(arguments: &Value, field: &str, default: u64) -> u64 {
         .get(field)
         .and_then(Value::as_u64)
         .unwrap_or(default)
+}
+
+fn optional_integer(arguments: &Value, field: &str) -> Option<u64> {
+    arguments.get(field).and_then(Value::as_u64)
 }
 
 fn string_array(arguments: &Value, field: &str) -> Result<Vec<String>> {
