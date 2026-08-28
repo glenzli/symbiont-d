@@ -71,6 +71,8 @@ bootstrap_label() {
 echo "Building symbiont-d..."
 "$CARGO_BIN" build --release --bins --manifest-path "$PROJECT_ROOT/Cargo.toml"
 
+"$SCRIPT_DIR/retire-legacy-pcp-services.sh"
+
 mkdir -p "$PLIST_DIR" "$LOG_DIR"
 TEMP_PLIST="$(mktemp "$PLIST_DIR/$LABEL.XXXXXX")"
 trap 'rm -f "$TEMP_PLIST"' EXIT
