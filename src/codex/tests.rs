@@ -9,7 +9,7 @@ use super::{
     client::{
         autonomous_response_is_superseded, context_revision_ids, extract_completed_response_text,
         extract_final_agent_message, generated_image_output, remember_generated_image,
-        text_and_image_input_items,
+        should_restart_app_server, text_and_image_input_items,
     },
     prompts::{
         context_fragments, developer_instructions, interaction_reflection_prompt,
@@ -34,6 +34,12 @@ use crate::{
 };
 use pcp_sqlite::SqlitePcpStore;
 use serde_json::json;
+
+#[test]
+fn terminal_reconnecting_errors_are_connection_failures() {
+    let error = anyhow::anyhow!("Reconnecting... 5/5");
+    assert!(should_restart_app_server(&error));
+}
 
 #[test]
 fn dynamic_tools_expose_host_and_pcp_namespaces() {

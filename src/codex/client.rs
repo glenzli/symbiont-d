@@ -83,6 +83,8 @@ const ATTACKER_COMPLETE_MARKER: &str = "<symbiont-attacker-reviewed/>";
 const APP_SERVER_START_TIMEOUT: Duration = Duration::from_secs(60);
 const APP_SERVER_START_ATTEMPTS: u8 = 2;
 const APP_SERVER_IDLE_TIMEOUT: Duration = Duration::from_secs(75);
+const LUNA_SENSE_TIMEOUT: Duration = Duration::from_secs(180);
+const APP_SERVER_STOP_TIMEOUT: Duration = Duration::from_secs(2);
 
 #[derive(Clone)]
 pub struct CodexConfig {
@@ -507,10 +509,7 @@ impl CodexClient {
             event = "codex_restart_started",
             "Codex app-server restart started"
         );
-        if let Err(error) = self._child.start_kill() {
-            debug!(%error, "could not immediately stop the failed Codex app-server");
-        }
-        let _ = timeout(Duration::from_secs(2), self._child.wait()).await;
+        stop_app_server_child(&mut self._child).await;
 
         let replacement = Self::start_with_retries(config, dependencies, rate_limits).await?;
         *self = replacement;
@@ -1363,25 +1362,34 @@ impl CodexClient {
         input_events: Option<watch::Receiver<u64>>,
         events: &mpsc::Sender<RuntimeEvent>,
     ) -> Result<ChatOutcome> {
-        let outcome = self
-            .run_request_inner(
-                thread_id,
-                first_input,
-                first_lane,
-                origin,
-                compute,
-                profile,
-                continuity_context,
-                working_context,
-                rollover,
-                allow_escalation,
-                input_events,
-                events,
-            )
-            .await;
+        let request = self.run_request_inner(
+            thread_id,
+            first_input,
+            first_lane,
+            origin,
+            compute,
+            profile,
+            continuity_context,
+            working_context,
+            rollover,
+            allow_escalation,
+            input_events,
+            events,
+        );
+        let outcome = if origin == "luna_sense" {
+            match timeout(LUNA_SENSE_TIMEOUT, request).await {
+                Ok(outcome) => outcome,
+                Err(_) => Err(anyhow::anyhow!(
+                    "Codex app-server Luna sensing exceeded {} seconds",
+                    LUNA_SENSE_TIMEOUT.as_secs()
+                )),
+            }
+        } else {
+            request.await
+        };
         match outcome {
             Ok(outcome) => Ok(outcome),
-            Err(error) if is_app_server_transport_failure(&error) => {
+            Err(error) if should_restart_app_server(&error) => {
                 let original_error = error.to_string();
                 tracing::warn!(
                     target: crate::runtime_log::TARGET,
@@ -2453,16 +2461,36 @@ fn is_app_server_transport_failure(error: &anyhow::Error) -> bool {
     .any(|needle| message.contains(needle))
 }
 
-pub(crate) fn is_recoverable_connection_error(error: &anyhow::Error) -> bool {
-    // The app server can surface its own live retry as an ordinary RPC error
-    // (for example, `Reconnecting... 2/5`). That is recoverable to callers,
-    // but it is not a broken transport: force-restarting it would cancel the
-    // recovery it is already performing.
+pub(super) fn should_restart_app_server(error: &anyhow::Error) -> bool {
     is_app_server_transport_failure(error)
         || error
             .to_string()
             .to_ascii_lowercase()
             .contains("reconnecting")
+}
+
+pub(crate) fn is_recoverable_connection_error(error: &anyhow::Error) -> bool {
+    should_restart_app_server(error)
+}
+
+async fn stop_app_server_child(child: &mut Child) {
+    if let Err(error) = child.start_kill() {
+        debug!(%error, "could not immediately stop the failed Codex app-server");
+    }
+    match timeout(APP_SERVER_STOP_TIMEOUT, child.wait()).await {
+        Ok(Ok(_)) => {}
+        Ok(Err(error)) => warn!(%error, "could not reap the failed Codex app-server"),
+        Err(_) => {
+            warn!(
+                timeout_seconds = APP_SERVER_STOP_TIMEOUT.as_secs(),
+                "timed out reaping the failed Codex app-server; forcing termination"
+            );
+            if let Err(error) = child.kill().await {
+                warn!(%error, "could not force-stop the failed Codex app-server");
+            }
+            let _ = timeout(APP_SERVER_STOP_TIMEOUT, child.wait()).await;
+        }
+    }
 }
 
 fn granular_approval_policy() -> Value {

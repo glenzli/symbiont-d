@@ -355,15 +355,19 @@ impl DriveInputStore {
         if !config.enabled {
             return Ok(empty_outcome());
         }
+        self.update_runtime(|runtime| runtime.last_started_at = Some(timestamp(Utc::now())))
+            .await?;
         let access_token = match self.oauth.access_token(config.credential_store).await {
             Ok(token) => token,
             Err(_) if !self.oauth.is_authorized(config.credential_store).await => {
                 return Ok(empty_outcome());
             }
-            Err(error) => return Err(error).context("authorize the personal Google Drive account"),
+            Err(error) => {
+                return self
+                    .failed_poll(error.context("authorize the personal Google Drive account"))
+                    .await;
+            }
         };
-        self.update_runtime(|runtime| runtime.last_started_at = Some(timestamp(Utc::now())))
-            .await?;
         let seen_file_ids = self
             .runtime
             .read()
@@ -403,20 +407,22 @@ impl DriveInputStore {
                     channel_failure: None,
                 })
             }
-            Err(error) => {
-                let message = compact_error(&format!("{error:#}"));
-                self.update_runtime(|runtime| {
-                    runtime.last_failed_at = Some(timestamp(Utc::now()));
-                    runtime.last_error = Some(message.clone());
-                })
-                .await?;
-                tracing::warn!(%error, "Google Drive Inbox input failed");
-                Ok(DriveInputOutcome {
-                    channel_failure: Some(message),
-                    ..empty_outcome()
-                })
-            }
+            Err(error) => self.failed_poll(error).await,
         }
+    }
+
+    async fn failed_poll(&self, error: anyhow::Error) -> Result<DriveInputOutcome> {
+        let message = compact_error(&format!("{error:#}"));
+        self.update_runtime(|runtime| {
+            runtime.last_failed_at = Some(timestamp(Utc::now()));
+            runtime.last_error = Some(message.clone());
+        })
+        .await?;
+        tracing::warn!(%error, "Google Drive Inbox input failed");
+        Ok(DriveInputOutcome {
+            channel_failure: Some(message),
+            ..empty_outcome()
+        })
     }
 
     pub async fn acknowledge_files(&self, file_ids: Vec<String>) -> Result<()> {

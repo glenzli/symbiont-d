@@ -552,8 +552,16 @@ async fn run_scheduler(
                             sleep(RETRY_DELAY).await;
                             continue;
                         }
-                        if completion.status != ExplorationIntentStatus::Superseded {
-                            last_attempt_at = Some(completion.attempted_at);
+                        // Triggered work can be requeued or completed by its owning
+                        // intent. A scheduled pass has no such owner, so even when it
+                        // yields to higher-priority activity it must consume the
+                        // attempt; otherwise the policy refresh immediately starts the
+                        // full intake again and can hot-loop on a degraded channel.
+                        if should_advance_attempt_watermark(completion.status, trigger.as_ref()) {
+                            advance_attempt_watermark(
+                                &mut last_attempt_at,
+                                completion.attempted_at,
+                            );
                             if completion.completed {
                                 last_completed_at = Some(completion.attempted_at);
                             }
@@ -634,6 +642,22 @@ async fn run_scheduler(
                                 )
                                 .await;
                         }
+                        // A failed pass still consumed the scheduled attempt. Without
+                        // advancing this watermark, the 30-second policy refresh starts
+                        // another full intake immediately and can monopolize the shared
+                        // Codex transport while an upstream dependency is unhealthy.
+                        advance_attempt_watermark(&mut last_attempt_at, Utc::now());
+                        tracing::warn!(
+                            target: crate::runtime_log::TARGET,
+                            event = "exploration_failed_with_backoff",
+                            trigger = trigger
+                                .as_ref()
+                                .map(ExplorationTrigger::as_str)
+                                .unwrap_or("scheduled"),
+                            interval_minutes = config.interval_minutes,
+                            error = %error,
+                            "exploration failed; the configured interval will apply before retry"
+                        );
                         set_error(&state, &manual_runs, trigger.as_ref(), error.to_string()).await;
                     }
                 }
@@ -732,6 +756,24 @@ fn evaluate_gate(
             until: Some(scheduled_at),
         }
     }
+}
+
+fn advance_attempt_watermark(
+    last_attempt_at: &mut Option<DateTime<Utc>>,
+    attempted_at: DateTime<Utc>,
+) {
+    *last_attempt_at = Some(
+        last_attempt_at
+            .map(|last| last.max(attempted_at))
+            .unwrap_or(attempted_at),
+    );
+}
+
+fn should_advance_attempt_watermark(
+    status: ExplorationIntentStatus,
+    trigger: Option<&ExplorationTrigger>,
+) -> bool {
+    status != ExplorationIntentStatus::Superseded || trigger.is_none()
 }
 
 async fn update_waiting_state(
@@ -2173,11 +2215,11 @@ mod tests {
     use super::{
         ExplorationAttemptStore, ExplorationIntent, ExplorationIntentOrigin,
         ExplorationIntentStatus, ExplorationPhase, ExplorationSnapshot, ExplorationTrigger, Gate,
-        ManualExplorationStatus, ManualExplorationStore, ambient_sensing_context,
-        bounded_message_excerpt, conversation_edge, evaluate_gate, exploration_working_context,
-        observation_is_current, quiet_end, refresh_manual_projection, set_error,
-        settle_sensing_only, should_settle_after_sensing_review, today_started_at,
-        trigger_runs_intake,
+        ManualExplorationStatus, ManualExplorationStore, advance_attempt_watermark,
+        ambient_sensing_context, bounded_message_excerpt, conversation_edge, evaluate_gate,
+        exploration_working_context, observation_is_current, quiet_end, refresh_manual_projection,
+        set_error, settle_sensing_only, should_advance_attempt_watermark,
+        should_settle_after_sensing_review, today_started_at, trigger_runs_intake,
     };
     use crate::{
         autonomy::{AutonomyConfig, QuietHours},
@@ -2189,6 +2231,33 @@ mod tests {
     #[test]
     fn daily_boundary_is_an_rfc3339_timestamp() {
         assert!(DateTime::parse_from_rfc3339(&today_started_at()).is_ok());
+    }
+
+    #[test]
+    fn a_failed_pass_advances_the_scheduler_watermark_without_regression() {
+        let first = Utc.with_ymd_and_hms(2026, 8, 29, 5, 0, 0).unwrap();
+        let failed_at = Utc.with_ymd_and_hms(2026, 8, 29, 5, 1, 0).unwrap();
+        let mut watermark = Some(first);
+
+        advance_attempt_watermark(&mut watermark, failed_at);
+        assert_eq!(watermark, Some(failed_at));
+
+        advance_attempt_watermark(&mut watermark, first);
+        assert_eq!(watermark, Some(failed_at));
+    }
+
+    #[test]
+    fn a_superseded_scheduled_pass_consumes_its_attempt() {
+        assert!(should_advance_attempt_watermark(
+            ExplorationIntentStatus::Superseded,
+            None,
+        ));
+
+        let triggered = ExplorationTrigger::DeferredFollowUp;
+        assert!(!should_advance_attempt_watermark(
+            ExplorationIntentStatus::Superseded,
+            Some(&triggered),
+        ));
     }
 
     #[test]
