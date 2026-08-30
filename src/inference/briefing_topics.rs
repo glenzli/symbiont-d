@@ -190,6 +190,7 @@ mod tests {
             briefing_topic_reviewed: false,
             hidden: false,
             dismissed: false,
+            duplicate_of_signal_id: None,
         }
     }
 

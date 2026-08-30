@@ -45,6 +45,7 @@ pub struct QueuedUserMessage {
     pub topic: Option<TopicContext>,
     pub external_contexts: Vec<ExternalContext>,
     pub minimum_lane: Option<ComputeLane>,
+    pub council_participant_ids: Vec<String>,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -379,6 +380,7 @@ mod tests {
             topic: None,
             external_contexts: Vec::new(),
             minimum_lane: None,
+            council_participant_ids: Vec::new(),
         }
     }
 

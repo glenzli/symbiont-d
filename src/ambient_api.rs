@@ -218,6 +218,14 @@ pub struct AmbientTopologyStore {
     credentials: SecretStore,
 }
 
+/// A resolved OpenAI-compatible connection for an explicitly selected
+/// consumer. The topology store remains the sole owner of persisted provider
+/// credentials; callers receive only a short-lived copy for one request.
+pub(crate) struct AmbientProviderAccess {
+    pub(crate) config: AmbientProviderConfig,
+    pub(crate) api_key: String,
+}
+
 impl AmbientTopologyStore {
     pub async fn open(config_path: PathBuf) -> Result<Self> {
         let config = match fs::read_to_string(&config_path).await {
@@ -317,6 +325,29 @@ impl AmbientTopologyStore {
 
     pub async fn luna_output_language(&self) -> LunaOutputLanguage {
         self.config.read().await.luna.output_language
+    }
+
+    pub(crate) async fn provider_access(&self, id: &str) -> Result<AmbientProviderAccess> {
+        let provider = self
+            .config
+            .read()
+            .await
+            .providers
+            .iter()
+            .find(|provider| provider.id == id)
+            .cloned()
+            .with_context(|| format!("ambient Provider {id} does not exist"))?;
+        if !provider.enabled {
+            anyhow::bail!("ambient Provider {id} is disabled");
+        }
+        let api_key = self
+            .credential_for(&provider)
+            .await?
+            .with_context(|| format!("ambient Provider {id} has no configured API key"))?;
+        Ok(AmbientProviderAccess {
+            config: provider,
+            api_key,
+        })
     }
 
     pub async fn update(&self, mut config: AmbientConfig) -> Result<AmbientSnapshot> {

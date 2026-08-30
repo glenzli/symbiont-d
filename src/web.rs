@@ -72,6 +72,11 @@ use crate::{
         MemoryEntry, MemoryRole, MessageDeliveryState, MessageMetadata, MessageQuote,
         MessageQuoteDraft, MessageRunMetadata,
     },
+    model_council::{
+        MAX_SELECTED_PARTICIPANTS, ModelCouncilConfig, ModelCouncilContribution,
+        ModelCouncilDiscussion, ModelCouncilService, ModelCouncilSnapshot, ModelCouncilStore,
+        synthesis_packet,
+    },
     outreach::PROPOSE_OUTREACH_TOOL,
     pcp_index::{PcpIndex, PcpIndexSnapshot},
     permission::{PermissionBroker, PermissionDecision, PermissionRequestView},
@@ -95,6 +100,7 @@ const INDEX_HTML: &str = include_str!("../web/index.html");
 const APP_JS: &str = include_str!("../web/app.js");
 const EPHEMERAL_DISCUSSION_UI_JS: &str = include_str!("../web/ephemeral-discussion-ui.js");
 const COMPUTE_MODE_UI_JS: &str = include_str!("../web/compute-mode-ui.js");
+const MODEL_COUNCIL_UI_JS: &str = include_str!("../web/model-council-ui.js");
 const ICONS_JS: &str = include_str!("../web/icons.js");
 const RICH_TEXT_JS: &str = include_str!("../web/rich-text.js");
 const RICH_TEXT_CSS: &str = include_str!("../web/rich-text.css");
@@ -164,6 +170,8 @@ pub struct AppState {
     compute: Arc<ComputeStore>,
     inference: Arc<InferenceExecutor>,
     ambient: Arc<AmbientTopologyStore>,
+    model_council_store: Arc<ModelCouncilStore>,
+    model_council: Arc<ModelCouncilService>,
     drive_input: Arc<DriveInputStore>,
     mail_input: Arc<MailInputStore>,
     audio_transcription: Arc<AudioTranscriptionStore>,
@@ -199,6 +207,8 @@ impl AppState {
         compute: Arc<ComputeStore>,
         inference: Arc<InferenceExecutor>,
         ambient: Arc<AmbientTopologyStore>,
+        model_council_store: Arc<ModelCouncilStore>,
+        model_council: Arc<ModelCouncilService>,
         drive_input: Arc<DriveInputStore>,
         mail_input: Arc<MailInputStore>,
         audio_transcription: Arc<AudioTranscriptionStore>,
@@ -235,6 +245,8 @@ impl AppState {
             compute,
             inference,
             ambient,
+            model_council_store,
+            model_council,
             drive_input,
             mail_input,
             audio_transcription,
@@ -267,6 +279,7 @@ struct ChatRequest {
     external_contexts: Vec<ExternalContext>,
     signal_revision_id: Option<String>,
     minimum_lane: Option<crate::compute::ComputeLane>,
+    council_participant_ids: Vec<String>,
 }
 
 struct IncomingChatRequest {
@@ -277,6 +290,7 @@ struct IncomingChatRequest {
     codex_task_ids: Vec<String>,
     signal_id: Option<String>,
     minimum_lane: Option<crate::compute::ComputeLane>,
+    council_participant_ids: Vec<String>,
 }
 
 #[derive(Default, Deserialize)]
@@ -305,6 +319,7 @@ struct BootstrapResponse {
     models: Vec<ModelInfo>,
     compute: ComputeConfig,
     ambient: AmbientSnapshot,
+    model_council: ModelCouncilSnapshot,
     drive_input: DriveInputSnapshot,
     mail_input: MailInputSnapshot,
     audio_transcription: AudioTranscriptionSnapshot,
@@ -569,6 +584,9 @@ enum WireEvent {
     Delta {
         text: String,
     },
+    CouncilContribution {
+        contribution: ModelCouncilContribution,
+    },
     Reset,
     Interrupted,
     Settled {
@@ -614,6 +632,7 @@ pub fn router(state: AppState) -> Router {
             get(ephemeral_discussion_ui_js),
         )
         .route("/compute-mode-ui.js", get(compute_mode_ui_js))
+        .route("/model-council-ui.js", get(model_council_ui_js))
         .route("/icons.js", get(icons_js))
         .route("/rich-text.js", get(rich_text_js))
         .route("/rich-text.css", get(rich_text_css))
@@ -720,6 +739,7 @@ pub fn router(state: AppState) -> Router {
             post(redeliver_exploration),
         )
         .route("/api/compute", post(update_compute))
+        .route("/api/model-council", post(update_model_council))
         .route("/api/ambient", post(update_ambient))
         .route(
             "/api/input-roles",
@@ -838,6 +858,13 @@ async fn compute_mode_ui_js() -> impl IntoResponse {
     (
         [(header::CONTENT_TYPE, "text/javascript; charset=utf-8")],
         COMPUTE_MODE_UI_JS,
+    )
+}
+
+async fn model_council_ui_js() -> impl IntoResponse {
+    (
+        [(header::CONTENT_TYPE, "text/javascript; charset=utf-8")],
+        MODEL_COUNCIL_UI_JS,
     )
 }
 
@@ -1124,6 +1151,7 @@ async fn bootstrap(State(state): State<AppState>) -> Result<Json<BootstrapRespon
         .map_err(ApiError::internal)?;
     let exploration = state.exploration.snapshot().await;
     let ambient = state.ambient.snapshot().await;
+    let model_council = state.model_council_store.snapshot().await;
     let drive_input = state.drive_input.snapshot().await;
     let mail_input = state.mail_input.snapshot().await;
     let identity = state.identity.snapshot().await;
@@ -1155,6 +1183,7 @@ async fn bootstrap(State(state): State<AppState>) -> Result<Json<BootstrapRespon
         models: state.compute.catalog().to_vec(),
         compute: state.compute.snapshot().await,
         ambient,
+        model_council,
         drive_input,
         mail_input,
         audio_transcription: state.audio_transcription.snapshot().await,
@@ -1370,6 +1399,18 @@ async fn update_compute(
 ) -> Result<Json<ComputeConfig>, ApiError> {
     state
         .compute
+        .update(config)
+        .await
+        .map(Json)
+        .map_err(ApiError::bad_request)
+}
+
+async fn update_model_council(
+    State(state): State<AppState>,
+    Json(config): Json<ModelCouncilConfig>,
+) -> Result<Json<ModelCouncilSnapshot>, ApiError> {
+    state
+        .model_council_store
         .update(config)
         .await
         .map(Json)
@@ -2258,6 +2299,7 @@ fn exploration_redelivery(trace: &TraceBundle) -> Option<ExplorationRedelivery> 
         pcp_tool_calls: trace.pcp_tool_calls,
         trace_id: Some(trace.trace_id.clone()),
         origin: Some("autonomous".to_owned()),
+        model_council: None,
     };
     Some(ExplorationRedelivery {
         message,
@@ -2744,6 +2786,7 @@ async fn parse_chat_request(mut multipart: Multipart) -> Result<IncomingChatRequ
     let mut codex_task_ids = Vec::new();
     let mut signal_id = None;
     let mut minimum_lane = None;
+    let mut council_participant_ids = Vec::new();
     while let Some(field) = multipart
         .next_field()
         .await
@@ -2830,6 +2873,28 @@ async fn parse_chat_request(mut multipart: Multipart) -> Result<IncomingChatRequ
                 }
                 signal_id = Some(value.to_owned());
             }
+            Some("councilParticipantId") => {
+                if council_participant_ids.len() >= MAX_SELECTED_PARTICIPANTS {
+                    return Err(ApiError::bad_request(format!(
+                        "A discussion can include at most {MAX_SELECTED_PARTICIPANTS} peer models."
+                    )));
+                }
+                let value = field.text().await.map_err(|error| {
+                    ApiError::bad_request(format!("Invalid model participant: {error}"))
+                })?;
+                let value = value.trim();
+                if value.is_empty()
+                    || value.len() > 64
+                    || !value
+                        .bytes()
+                        .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_'))
+                {
+                    return Err(ApiError::bad_request("Invalid model participant."));
+                }
+                if !council_participant_ids.iter().any(|id| id == value) {
+                    council_participant_ids.push(value.to_owned());
+                }
+            }
             _ => {}
         }
     }
@@ -2841,6 +2906,7 @@ async fn parse_chat_request(mut multipart: Multipart) -> Result<IncomingChatRequ
         codex_task_ids,
         signal_id,
         minimum_lane,
+        council_participant_ids,
     })
 }
 
@@ -2945,6 +3011,7 @@ async fn prepare_chat_request(
         external_contexts,
         signal_revision_id,
         minimum_lane,
+        council_participant_ids: incoming.council_participant_ids,
     })
 }
 
@@ -3037,6 +3104,7 @@ async fn store_user_message(
         topic: request.topic,
         external_contexts: request.external_contexts,
         minimum_lane: request.minimum_lane,
+        council_participant_ids: request.council_participant_ids,
     })
 }
 
@@ -3104,13 +3172,60 @@ async fn run_chat(
             Some(topic) => Some(state.topics.chat_history(&topic.id).await?),
             None => None,
         };
+        let user_text = conversation_batch_text(&batch, first_batch);
+        let mut council_ids = Vec::new();
+        for id in batch
+            .iter()
+            .flat_map(|message| &message.council_participant_ids)
+        {
+            if !council_ids.contains(id) && council_ids.len() < MAX_SELECTED_PARTICIPANTS {
+                council_ids.push(id.clone());
+            }
+        }
+        let mut council_invocations = Vec::new();
+        let mut council_discussion = None;
+        if !council_ids.is_empty() {
+            let _ = runtime_tx
+                .send(RuntimeEvent::Activity {
+                    label: format!("正在召集 {} 个潜水模型", council_ids.len()),
+                    model: "model-council".to_owned(),
+                    display_name: "多模型讨论".to_owned(),
+                    effort: "parallel".to_owned(),
+                    lane: "conversation".to_owned(),
+                })
+                .await;
+            let context = council_context(&state, scoped_history.as_deref()).await?;
+            let council = state
+                .model_council
+                .convene(&council_ids, &user_text, &context, input_events.clone())
+                .await?;
+            council_invocations = council.invocations;
+            if council.interrupted || state.conversation.has_pending(lease).await? {
+                state.usage.record_all(&council_invocations).await?;
+                let _ = wire_tx.send(WireEvent::Reset).await;
+                first_batch = false;
+                continue;
+            }
+            for contribution in &council.discussion.contributions {
+                let _ = wire_tx
+                    .send(WireEvent::CouncilContribution {
+                        contribution: contribution.clone(),
+                    })
+                    .await;
+            }
+            council_discussion = Some(council.discussion);
+        }
+        let chat_text = match council_discussion.as_ref() {
+            Some(discussion) => format!("{}\n\n{}", user_text, synthesis_packet(discussion)),
+            None => user_text,
+        };
         let outcome_result = state
             .codex
             .lock()
             .await
             .chat(
                 ChatInput {
-                    text: conversation_batch_text(&batch, first_batch),
+                    text: chat_text,
                     local_images: batch
                         .iter()
                         .flat_map(|message| message.local_images.clone())
@@ -3131,6 +3246,7 @@ async fn run_chat(
         let mut outcome = match outcome_result {
             Ok(outcome) => outcome,
             Err(error) => {
+                state.usage.record_all(&council_invocations).await?;
                 if state
                     .conversation
                     .is_interrupted(lease)
@@ -3150,6 +3266,11 @@ async fn run_chat(
                 return Err(error);
             }
         };
+        if let Some(discussion) = council_discussion {
+            attach_council_metadata(&mut outcome.metadata, &council_invocations, discussion);
+        }
+        council_invocations.append(&mut outcome.invocations);
+        outcome.invocations = council_invocations;
         if state.conversation.is_interrupted(lease).await? {
             state
                 .reflection
@@ -3404,6 +3525,61 @@ fn conversation_batch_text(batch: &[QueuedUserMessage], first_batch: bool) -> St
          mentioning batching or an earlier draft.\n\n{}",
         serde_json::to_string_pretty(&messages).unwrap_or_default()
     )
+}
+
+async fn council_context(
+    state: &AppState,
+    scoped_history: Option<&[MemoryEntry]>,
+) -> anyhow::Result<String> {
+    let messages = match scoped_history {
+        Some(messages) => messages.iter().rev().take(12).cloned().collect::<Vec<_>>(),
+        None => state.continuity.recent_messages(12).await?,
+    };
+    let mut messages = messages;
+    if scoped_history.is_some() {
+        messages.reverse();
+    }
+    Ok(serde_json::to_string_pretty(
+        &messages
+            .into_iter()
+            .map(|message| {
+                serde_json::json!({
+                    "role": message.role,
+                    "at": message.at,
+                    "content": message.content,
+                })
+            })
+            .collect::<Vec<_>>(),
+    )?)
+}
+
+fn attach_council_metadata(
+    metadata: &mut MessageMetadata,
+    invocations: &[crate::usage::InvocationRecord],
+    discussion: ModelCouncilDiscussion,
+) {
+    metadata.runs.splice(
+        0..0,
+        invocations.iter().map(|run| MessageRunMetadata {
+            model: run.effective_model.clone(),
+            display_name: run.model_display_name.clone(),
+            effort: run.effort.clone(),
+            lane: run.lane.clone(),
+            total_tokens: run.total_tokens,
+            duration_ms: run.duration_ms,
+        }),
+    );
+    metadata.total_tokens = metadata
+        .total_tokens
+        .saturating_add(invocations.iter().map(|run| run.total_tokens).sum::<u64>());
+    metadata.duration_ms = metadata.duration_ms.saturating_add(
+        invocations
+            .iter()
+            .map(|run| run.duration_ms)
+            .max()
+            .unwrap_or(0),
+    );
+    metadata.model_council = Some(discussion);
 }
 
 fn interactive_message_text(message: &QueuedUserMessage) -> String {

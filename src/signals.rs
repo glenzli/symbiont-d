@@ -1,4 +1,7 @@
-use std::path::PathBuf;
+use std::{
+    collections::{HashMap, HashSet},
+    path::PathBuf,
+};
 
 use anyhow::{Context, Result};
 use chrono::{DateTime, Duration, Local, NaiveDate, SecondsFormat, Utc};
@@ -8,7 +11,7 @@ use tokio::{
     sync::{RwLock, watch},
 };
 
-use crate::external_markdown::normalize_external_markdown;
+use crate::external_markdown::{normalize_external_markdown, source_urls};
 use crate::sensing::{
     InputRoleSnapshot, SensingCandidate, SensingDeduplicationReference, SensingPresentation,
     SensingSource, SensingSourceClass,
@@ -94,6 +97,11 @@ pub struct SignalEvent {
     /// which used `hidden` to suppress a source card after writing it to PCP.
     #[serde(default)]
     pub dismissed: bool,
+    /// Store-level duplicate suppression is not a user dismissal. Retain the
+    /// original record and its relations, but keep repeated deliveries out of
+    /// every visible projection.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub duplicate_of_signal_id: Option<String>,
 }
 
 #[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
@@ -207,22 +215,19 @@ impl SignalStore {
             return Ok(SignalPublishOutcome::RejectedStale);
         }
         let mut document = self.document.write().await;
-        let candidate_source_identities =
-            stable_source_identities(candidate.sources.iter().map(|source| source.url.as_str()));
+        let candidate_fingerprint = signal_fingerprint(&candidate.title, &candidate.summary);
+        let candidate_source_identities = candidate_delivery_identities(candidate);
         if document
             .signals
             .iter()
             .find(|signal| {
                 signal.candidate_id == candidate.id
-                    || signal.fingerprint == candidate.fingerprint
+                    || signal.fingerprint == candidate_fingerprint
                     || signal.kind == SignalKind::ExternalInput
                         && !candidate_source_identities.is_empty()
-                        && signal.sources.iter().any(|source| {
-                            crate::source_identity::canonical_delivery_identity(&source.url)
-                                .is_some_and(|identity| {
-                                    candidate_source_identities.contains(&identity)
-                                })
-                        })
+                        && signal_delivery_identities(signal)
+                            .iter()
+                            .any(|identity| candidate_source_identities.contains(identity))
             })
             .is_some()
         {
@@ -233,7 +238,7 @@ impl SignalStore {
             id: format!("signal_{}_{}", now.timestamp_millis(), sequence),
             kind: SignalKind::ExternalInput,
             candidate_id: candidate.id.clone(),
-            fingerprint: candidate.fingerprint.clone(),
+            fingerprint: candidate_fingerprint,
             actor: candidate.actor.clone(),
             content: content.trim().to_owned(),
             received_text: candidate.received_text.clone(),
@@ -255,6 +260,7 @@ impl SignalStore {
             briefing_topic_reviewed: false,
             hidden: false,
             dismissed: false,
+            duplicate_of_signal_id: None,
         };
         document.signals.push(event.clone());
         normalize_and_prune(&mut document, now);
@@ -328,6 +334,7 @@ impl SignalStore {
             briefing_topic_reviewed: false,
             hidden: false,
             dismissed: false,
+            duplicate_of_signal_id: None,
         };
         document.signals.push(event);
         normalize_and_prune(&mut document, now);
@@ -585,6 +592,7 @@ impl SignalStore {
             .iter()
             .rev()
             .filter(|signal| signal.kind == SignalKind::ExternalInput)
+            .filter(|signal| signal.duplicate_of_signal_id.is_none())
             .take(MAX_DEDUPLICATION_REFERENCES)
             .map(|signal| SensingDeduplicationReference {
                 reference_id: signal.id.clone(),
@@ -688,17 +696,17 @@ fn normalize_and_prune(document: &mut SignalDocument, now: DateTime<Utc>) -> boo
         // Before source cards became the visible provenance anchor, promotion
         // reused `hidden` to remove them from the chat stream. Recover those
         // legacy records, but never override an explicit user dismissal.
-        if signal.promoted_revision_id.is_some() && signal.hidden && !signal.dismissed {
+        if signal.promoted_revision_id.is_some()
+            && signal.hidden
+            && !signal.dismissed
+            && signal.duplicate_of_signal_id.is_none()
+        {
             signal.hidden = false;
             changed = true;
         }
-        if signal.fingerprint.trim().is_empty() {
-            signal.fingerprint = signal_fingerprint(
-                &signal.title,
-                &signal.summary,
-                signal.event_at.as_deref(),
-                &signal.sources,
-            );
+        let fingerprint = signal_fingerprint(&signal.title, &signal.summary);
+        if signal.fingerprint != fingerprint {
+            signal.fingerprint = fingerprint;
             changed = true;
         }
         if signal.received_text.trim().is_empty() {
@@ -740,7 +748,78 @@ fn normalize_and_prune(document: &mut SignalDocument, now: DateTime<Utc>) -> boo
         let drop_count = document.signals.len() - MAX_RETAINED_SIGNALS;
         document.signals.drain(0..drop_count);
     }
+    changed |= mark_duplicate_deliveries(&mut document.signals);
     changed || before != document.signals.len()
+}
+
+fn mark_duplicate_deliveries(signals: &mut [SignalEvent]) -> bool {
+    let mut changed = false;
+    let mut fingerprints = HashMap::<String, String>::new();
+    let mut sources = HashMap::<String, String>::new();
+    for signal in signals {
+        if signal.kind != SignalKind::ExternalInput {
+            continue;
+        }
+        let source_identities = signal_delivery_identities(signal);
+        let duplicate_of = fingerprints.get(&signal.fingerprint).cloned().or_else(|| {
+            source_identities
+                .iter()
+                .find_map(|identity| sources.get(identity).cloned())
+        });
+        if let Some(representative) = duplicate_of {
+            if signal.duplicate_of_signal_id.as_deref() != Some(&representative) {
+                signal.duplicate_of_signal_id = Some(representative);
+                changed = true;
+            }
+            if !signal.hidden {
+                signal.hidden = true;
+                changed = true;
+            }
+            continue;
+        }
+        if signal.duplicate_of_signal_id.take().is_some() {
+            changed = true;
+        }
+        fingerprints.insert(signal.fingerprint.clone(), signal.id.clone());
+        for identity in source_identities {
+            sources.entry(identity).or_insert_with(|| signal.id.clone());
+        }
+    }
+    changed
+}
+
+fn candidate_delivery_identities(candidate: &SensingCandidate) -> HashSet<String> {
+    let mut urls = candidate
+        .sources
+        .iter()
+        .map(|source| source.url.clone())
+        .collect::<Vec<_>>();
+    for text in [
+        candidate.title.as_str(),
+        candidate.summary.as_str(),
+        candidate.proposed_input.as_str(),
+        candidate.received_text.as_str(),
+    ] {
+        urls.extend(source_urls(text));
+    }
+    stable_source_identities(urls.iter().map(String::as_str))
+}
+
+fn signal_delivery_identities(signal: &SignalEvent) -> HashSet<String> {
+    let mut urls = signal
+        .sources
+        .iter()
+        .map(|source| source.url.clone())
+        .collect::<Vec<_>>();
+    for text in [
+        signal.title.as_str(),
+        signal.summary.as_str(),
+        signal.content.as_str(),
+        signal.received_text.as_str(),
+    ] {
+        urls.extend(source_urls(text));
+    }
+    stable_source_identities(urls.iter().map(String::as_str))
 }
 
 fn observed_before(signal: &SignalEvent, cutoff: DateTime<Utc>) -> bool {
@@ -774,24 +853,8 @@ fn event_is_too_old(event_at: Option<&str>, now: DateTime<Utc>) -> bool {
         .unwrap_or(false)
 }
 
-fn signal_fingerprint(
-    title: &str,
-    summary: &str,
-    event_at: Option<&str>,
-    sources: &[SensingSource],
-) -> String {
-    let mut urls = sources
-        .iter()
-        .map(|source| normalize(&source.url))
-        .collect::<Vec<_>>();
-    urls.sort();
-    format!(
-        "v2|{}|{}|{}|{}",
-        normalize(title),
-        normalize(summary),
-        event_at.map(normalize).unwrap_or_default(),
-        urls.join("|")
-    )
+fn signal_fingerprint(title: &str, summary: &str) -> String {
+    format!("v3|{}|{}", normalize(title), normalize(summary),)
 }
 
 fn bounded_deduplication_excerpt(value: &str) -> String {
@@ -824,7 +887,8 @@ mod tests {
     use std::time::{SystemTime, UNIX_EPOCH};
 
     use super::{
-        BriefingTopicAssignment, BriefingTopicStatus, SignalPublishOutcome, SignalStore, timestamp,
+        BriefingTopicAssignment, BriefingTopicStatus, SignalDocument, SignalPublishOutcome,
+        SignalStore, timestamp,
     };
     use crate::sensing::{
         InputRoleSnapshot, SensingCandidate, SensingPresentation, SensingSource, SensingSourceClass,
@@ -883,6 +947,55 @@ mod tests {
         let visible = store.visible(10).await.unwrap();
         assert_eq!(visible.len(), 1);
         assert_eq!(visible[0].candidate_id, "sense_1");
+        let _ = tokio::fs::remove_file(path).await;
+    }
+
+    #[tokio::test]
+    async fn opening_store_hides_legacy_drive_duplicates_without_deleting_provenance() {
+        let nonce = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let path = std::env::temp_dir().join(format!("symbiont-signals-drive-{nonce}.json"));
+        let store = SignalStore::open(path.clone()).await.unwrap();
+        let mut first = candidate("drive_first");
+        first.summary = "First digest wording for https://arxiv.org/abs/2608.12345".to_owned();
+        first.proposed_input = first.summary.clone();
+        first.received_text = first.summary.clone();
+        first.sources[0].url = "https://drive.google.com/open?id=document-one".to_owned();
+        store
+            .publish_with_content(&first, first.proposed_input.clone(), "credible".to_owned())
+            .await
+            .unwrap();
+        drop(store);
+
+        let mut document: SignalDocument =
+            serde_json::from_str(&tokio::fs::read_to_string(&path).await.unwrap()).unwrap();
+        let mut duplicate = document.signals[0].clone();
+        duplicate.id = "legacy-drive-duplicate".to_owned();
+        duplicate.candidate_id = "drive_second".to_owned();
+        duplicate.fingerprint = "v2|different-transport-document-and-time".to_owned();
+        duplicate.title = "A paraphrased headline from another digest".to_owned();
+        duplicate.summary =
+            "Different wording, same paper https://arxiv.org/pdf/2608.12345.pdf".to_owned();
+        duplicate.content = duplicate.summary.clone();
+        duplicate.received_text = duplicate.summary.clone();
+        duplicate.sources[0].url = "https://drive.google.com/open?id=document-two".to_owned();
+        duplicate.observed_at = timestamp(Utc::now());
+        document.signals.push(duplicate);
+        tokio::fs::write(&path, serde_json::to_vec_pretty(&document).unwrap())
+            .await
+            .unwrap();
+
+        let reopened = SignalStore::open(path.clone()).await.unwrap();
+        assert_eq!(reopened.visible(10).await.unwrap().len(), 1);
+        let duplicate = reopened
+            .get("legacy-drive-duplicate")
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(duplicate.hidden);
+        assert!(duplicate.duplicate_of_signal_id.is_some());
         let _ = tokio::fs::remove_file(path).await;
     }
 
@@ -967,7 +1080,9 @@ mod tests {
         );
         assert!(!settled.hidden);
 
-        let second = candidate("sense_topic_second");
+        let mut second = candidate("sense_topic_second");
+        second.title = "A separate local briefing item".to_owned();
+        second.summary = "A separate observation that still needs topic classification.".to_owned();
         store
             .publish_with_content(
                 &second,

@@ -2788,6 +2788,7 @@ fn metadata_for(invocations: &[InvocationRecord], origin: &str) -> MessageMetada
             .count() as u64,
         trace_id: invocations.first().map(|run| run.id.clone()),
         origin: Some(origin.to_owned()),
+        model_council: None,
     }
 }
 

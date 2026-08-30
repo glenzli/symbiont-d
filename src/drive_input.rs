@@ -464,7 +464,6 @@ struct DriveFile {
     id: String,
     name: String,
     mime_type: String,
-    created_time: String,
     #[serde(default)]
     web_view_link: Option<String>,
 }
@@ -501,7 +500,7 @@ async fn read_drive(
             ("pageSize", page_size.as_str()),
             ("supportsAllDrives", "true"),
             ("includeItemsFromAllDrives", "true"),
-            ("fields", "files(id,name,mimeType,createdTime,webViewLink)"),
+            ("fields", "files(id,name,mimeType,webViewLink)"),
         ])
         .send()
         .await
@@ -532,7 +531,12 @@ async fn read_drive(
         let candidates = ExternalDigest::new(
             file.name.clone(),
             &body,
-            Some(file.created_time.clone()),
+            // The Drive file timestamp is when the digest document was
+            // created, not when every event described by its sections
+            // happened. Candidate observation time is recorded when the file
+            // enters the local queue; assigning this timestamp as `event_at`
+            // made identical recurring sections look like new events.
+            None,
             DigestProvenance {
                 fallback_url,
                 source_detail: format!(
@@ -819,7 +823,6 @@ mod tests {
             id: format!("id-{name}"),
             name: name.to_owned(),
             mime_type: mime_type.to_owned(),
-            created_time: "2026-08-10T04:00:00Z".to_owned(),
             web_view_link: None,
         }
     }

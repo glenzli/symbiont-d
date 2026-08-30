@@ -2783,6 +2783,7 @@ mod tests {
                 pcp_tool_calls: 0,
                 trace_id: None,
                 origin: Some(origin.to_owned()),
+                model_council: None,
             }),
             delivery_state: None,
         }

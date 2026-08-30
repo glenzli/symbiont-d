@@ -4,7 +4,7 @@
 //! This module only turns one already-fetched document into independent,
 //! transient sensing candidates while preserving transport-specific provenance.
 
-use crate::external_markdown::{canonical_source_url, normalize_external_markdown};
+use crate::external_markdown::{normalize_external_markdown, source_urls};
 use crate::sensing::{SensingCandidateDraft, SensingSource, SensingSourceClass};
 
 const MAX_DOCUMENT_CHARS: usize = 24_000;
@@ -134,24 +134,11 @@ fn section_title(section: &str) -> String {
 }
 
 fn extract_sources(body: &str, title: &str, provenance: &DigestProvenance) -> Vec<SensingSource> {
-    let mut urls = Vec::new();
-    for token in body.split_whitespace() {
-        let token = token.trim_matches(|character: char| {
-            matches!(
-                character,
-                '<' | '>' | '(' | ')' | '[' | ']' | ',' | '.' | ';' | '"' | '\''
-            )
-        });
-        let Some(url) = canonical_source_url(token) else {
-            continue;
-        };
-        if !urls.contains(&url) {
-            urls.push(url);
-        }
-        if urls.len() == 3 {
-            break;
-        }
-    }
+    // Digest generators frequently join a Chinese label directly to `https://`
+    // without whitespace. Use the shared scanner rather than whitespace token
+    // splitting so the underlying article remains the delivery source instead
+    // of falling back to a new transport-document URL on every report.
+    let urls = source_urls(body).into_iter().take(3).collect::<Vec<_>>();
     if urls.is_empty() {
         vec![SensingSource {
             url: provenance.fallback_url.clone(),
@@ -304,6 +291,18 @@ mod tests {
                 .possible_connection
                 .as_deref()
                 .is_some_and(|value| value.contains("No project connection"))
+        );
+    }
+
+    #[test]
+    fn extracts_a_source_joined_directly_to_chinese_text() {
+        let candidate =
+            digest("权威榜单来源：https://bench.example/leaderboard 核心排名保持不变。")
+                .into_candidates()
+                .remove(0);
+        assert_eq!(
+            candidate.sources[0].url,
+            "https://bench.example/leaderboard"
         );
     }
 }

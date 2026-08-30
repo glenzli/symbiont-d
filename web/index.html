@@ -306,6 +306,23 @@
                   d="M14.1 2.65h2.1a2.1 2.1 0 0 1 2.1 2.1v.45a2.1 2.1 0 0 1-2.1 2.1h-.25l.5 1.45-2.35-1.45a2.1 2.1 0 0 1-2.1-2.1v-.45a2.1 2.1 0 0 1 2.1-2.1Z"
                 />
               </svg></button>
+              <div class="model-council-picker">
+                <button
+                  id="model-council-toggle"
+                  class="composer-tool-button model-council-toggle"
+                  type="button"
+                  title="召集模型讨论"
+                  aria-label="召集模型讨论"
+                  aria-expanded="false"
+                  aria-controls="model-council-menu"
+                  data-tooltip="模型讨论"
+                ><span aria-hidden="true">◌</span><small id="model-council-count" hidden></small></button>
+                <div id="model-council-menu" class="model-council-menu" hidden>
+                  <header><strong>召集模型讨论</strong><small>仅本轮唤起，最多 3 个</small></header>
+                  <div id="model-council-options" class="model-council-options"></div>
+                  <p id="model-council-status" role="status">默认潜水，不产生调用。</p>
+                </div>
+              </div>
             </div>
               <div id="voice-recording-status" class="voice-recording-status" role="status" hidden>
                 <span class="voice-recording-indicator" aria-hidden="true"></span>
@@ -916,6 +933,18 @@
             <div id="compute-policy-list" class="compute-policy-list"></div>
           </section>
 
+          <section class="model-council-settings">
+            <header>
+              <div>
+                <strong>潜水模型</strong>
+                <small>只有在输入框中明确点选后参与一次讨论；主 Symbiont 仍负责工具与记忆写入</small>
+              </div>
+              <button id="add-model-participant" class="icon-button" type="button" aria-label="添加潜水模型">＋</button>
+            </header>
+            <p class="settings-note">OpenAI 兼容参与者复用“外部来源”中的 Provider 连接和密钥；Infer Runtime 的模型字段填写公开 intent，可选点名 Deployment 或 Model Profile。</p>
+            <div id="model-participant-list" class="model-participant-list"></div>
+          </section>
+
           <footer class="dialog-actions">
             <span id="compute-save-state" role="status"></span>
             <button class="primary-button" type="submit">保存</button>
@@ -1328,6 +1357,25 @@
           <label class="toggle-row compact-toggle"><span>启用</span><input data-channel-field="enabled" type="checkbox" /></label>
         </div>
         <label class="field"><span>观察范围</span><textarea data-channel-field="focus" rows="2"></textarea></label>
+      </div>
+    </template>
+
+    <template id="model-participant-template">
+      <div class="model-participant-row" data-model-participant>
+        <div class="ambient-config-row-head"><strong class="model-participant-title">潜水模型</strong><button class="icon-button remove-model-participant" type="button" title="移除潜水模型">×</button></div>
+        <div class="field-grid">
+          <label class="field"><span>ID</span><input data-participant-field="id" type="text" /></label>
+          <label class="field"><span>显示名称</span><input data-participant-field="name" type="text" /></label>
+          <label class="field"><span>标记</span><input data-participant-field="avatar" type="text" maxlength="8" /></label>
+          <label class="toggle-row compact-toggle"><span>启用</span><input data-participant-field="enabled" type="checkbox" /></label>
+          <label class="field"><span>接入方式</span><select data-participant-field="transport"><option value="infer_runtime">Infer Runtime</option><option value="openai_responses">OpenAI 兼容 Responses</option></select></label>
+          <label class="field participant-provider-field"><span>Provider</span><select data-participant-field="providerId"></select></label>
+          <label class="field"><span>模型或 Intent</span><input data-participant-field="model" type="text" /></label>
+          <label class="field"><span>最大输出 token</span><input data-participant-field="maxOutputTokens" type="number" min="128" max="4096" /></label>
+          <label class="field participant-route-kind-field"><span>Infer 路由</span><select data-participant-field="routeKind"><option value="automatic">自动</option><option value="deployment">Deployment</option><option value="model_profile">Model Profile</option></select></label>
+          <label class="field participant-route-id-field"><span>路由 ID</span><input data-participant-field="routeId" type="text" /></label>
+        </div>
+        <label class="field"><span>讨论角色</span><textarea data-participant-field="role" rows="2" maxlength="400"></textarea></label>
       </div>
     </template>
 

@@ -51,6 +51,10 @@ export function renderRichText(target, source, options = {}) {
 
 export function renderMessageContent(target, entry, options = {}) {
   target.replaceChildren();
+  const council = entry?.metadata?.modelCouncil;
+  if (council?.contributions?.length) {
+    target.append(renderModelCouncil(council, options));
+  }
   const parts = entry?.parts?.length
     ? entry.parts
     : [{ type: "markdown", text: entry?.content || "" }];
@@ -132,6 +136,53 @@ export function renderMessageContent(target, entry, options = {}) {
       target.append(reference);
     }
   }
+}
+
+function renderModelCouncil(council, options) {
+  const discussion = document.createElement("details");
+  discussion.className = "message-model-council";
+  discussion.open = options.streaming === true;
+  const summary = document.createElement("summary");
+  const title = document.createElement("strong");
+  title.textContent = "模型讨论";
+  const count = document.createElement("small");
+  count.textContent = `${council.contributions.length} 个独立视角`;
+  summary.append(title, count);
+  const body = document.createElement("div");
+  body.className = "message-model-council-body";
+  for (const contribution of council.contributions) {
+    const article = document.createElement("article");
+    article.className = `model-contribution ${contribution.status || "completed"}`;
+    const header = document.createElement("header");
+    const avatar = document.createElement("span");
+    avatar.className = "model-contribution-avatar";
+    avatar.textContent = contribution.avatar || "◌";
+    const identity = document.createElement("span");
+    const name = document.createElement("strong");
+    name.textContent = contribution.name || contribution.participantId;
+    const role = document.createElement("small");
+    role.textContent = [contribution.role, contribution.model].filter(Boolean).join(" · ");
+    identity.append(name, role);
+    const state = document.createElement("small");
+    state.className = "model-contribution-state";
+    state.textContent = contribution.status === "failed" ? "失败" : contribution.status === "interrupted" ? "已停止" : "完成";
+    header.append(avatar, identity, state);
+    article.append(header);
+    if (contribution.content) {
+      const content = document.createElement("div");
+      content.className = "rich-text model-contribution-content";
+      renderRichText(content, contribution.content, options);
+      article.append(content);
+    } else if (contribution.error) {
+      const error = document.createElement("p");
+      error.className = "model-contribution-error";
+      error.textContent = contribution.error;
+      article.append(error);
+    }
+    body.append(article);
+  }
+  discussion.append(summary, body);
+  return discussion;
 }
 
 function formatQuoteTime(value) {

@@ -68,6 +68,9 @@ export function initSettings(state, actions = {}) {
     "#compute-policy-template",
   );
   const addComputePolicy = document.querySelector("#add-compute-policy");
+  const modelParticipantList = document.querySelector("#model-participant-list");
+  const modelParticipantTemplate = document.querySelector("#model-participant-template");
+  const addModelParticipant = document.querySelector("#add-model-participant");
   const autonomyForm = document.querySelector("#autonomy-form");
   const autonomyEnabled = document.querySelector("#autonomy-enabled");
   const attackerEnabled = document.querySelector("#attacker-enabled");
@@ -149,6 +152,75 @@ export function initSettings(state, actions = {}) {
     for (const policy of state.computePolicies || []) {
       appendComputePolicy(policy);
     }
+    renderModelCouncil();
+  }
+
+  function renderModelCouncil() {
+    modelParticipantList.replaceChildren();
+    for (const participant of state.modelCouncil?.participants || []) {
+      appendModelParticipant(participant);
+    }
+  }
+
+  function appendModelParticipant(participant = {}, focus = false) {
+    const row = modelParticipantTemplate.content.firstElementChild.cloneNode(true);
+    const field = (name) => row.querySelector(`[data-participant-field="${name}"]`);
+    field("id").value = participant.id || "new-peer";
+    field("name").value = participant.name || "新模型";
+    field("avatar").value = participant.avatar || "◌";
+    field("enabled").checked = participant.enabled === true;
+    field("transport").value = participant.transport || "infer_runtime";
+    field("model").value = participant.model || "language.respond";
+    field("maxOutputTokens").value = String(participant.maxOutputTokens || 900);
+    field("routeKind").value = participant.routeKind || "automatic";
+    field("routeId").value = participant.routeId || "";
+    field("role").value = participant.role || "提供独立视角，指出主判断可能忽略的假设。";
+    const provider = field("providerId");
+    provider.replaceChildren(
+      ...(state.ambient?.providers || []).map((item) => {
+        const option = document.createElement("option");
+        option.value = item.id;
+        option.textContent = item.id;
+        return option;
+      }),
+    );
+    provider.value = participant.providerId || provider.options[0]?.value || "";
+    row.querySelector(".model-participant-title").textContent = field("name").value;
+    modelParticipantList.append(row);
+    updateModelParticipantFields(row);
+    if (focus) field("name").focus();
+  }
+
+  function updateModelParticipantFields(row) {
+    const transport = row.querySelector('[data-participant-field="transport"]').value;
+    const routeKind = row.querySelector('[data-participant-field="routeKind"]').value;
+    const infer = transport === "infer_runtime";
+    row.querySelector(".participant-provider-field").hidden = infer;
+    row.querySelector(".participant-route-kind-field").hidden = !infer;
+    row.querySelector(".participant-route-id-field").hidden = !infer || routeKind === "automatic";
+  }
+
+  function modelCouncilFormValue() {
+    return {
+      participants: [...modelParticipantList.querySelectorAll("[data-model-participant]")].map((row) => {
+        const field = (name) => row.querySelector(`[data-participant-field="${name}"]`);
+        const infer = field("transport").value === "infer_runtime";
+        const routeKind = infer ? field("routeKind").value : "automatic";
+        return {
+          id: field("id").value.trim(),
+          enabled: field("enabled").checked,
+          name: field("name").value.trim(),
+          role: field("role").value.trim(),
+          avatar: field("avatar").value.trim(),
+          transport: field("transport").value,
+          providerId: infer ? null : field("providerId").value,
+          model: field("model").value.trim(),
+          routeKind,
+          routeId: infer && routeKind !== "automatic" ? field("routeId").value.trim() : null,
+          maxOutputTokens: Number(field("maxOutputTokens").value || 900),
+        };
+      }),
+    };
   }
 
   function renderAmbient() {
@@ -478,7 +550,16 @@ export function initSettings(state, actions = {}) {
         }),
         "话题规则保存失败",
       );
+      state.modelCouncil = await responseJson(
+        await fetch("/api/model-council", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(modelCouncilFormValue()),
+        }),
+        "潜水模型保存失败",
+      );
       renderCompute();
+      window.dispatchEvent(new Event("symbiont:model-council-updated"));
       computeSaveState.textContent = "已保存";
       return true;
     } catch (error) {
@@ -985,6 +1066,21 @@ export function initSettings(state, actions = {}) {
   computePolicyList.addEventListener("click", (event) => {
     const button = event.target.closest(".remove-compute-policy");
     if (button) button.closest(".compute-policy-row").remove();
+  });
+  addModelParticipant.addEventListener("click", () => appendModelParticipant({}, true));
+  modelParticipantList.addEventListener("click", (event) => {
+    const button = event.target.closest(".remove-model-participant");
+    if (button) button.closest("[data-model-participant]").remove();
+  });
+  modelParticipantList.addEventListener("change", (event) => {
+    const row = event.target.closest("[data-model-participant]");
+    if (row) updateModelParticipantFields(row);
+  });
+  modelParticipantList.addEventListener("input", (event) => {
+    const row = event.target.closest("[data-model-participant]");
+    if (row && event.target.matches('[data-participant-field="name"]')) {
+      row.querySelector(".model-participant-title").textContent = event.target.value || "潜水模型";
+    }
   });
   addAmbientProvider.addEventListener("click", () =>
     appendAmbientProvider(

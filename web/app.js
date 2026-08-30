@@ -12,6 +12,7 @@ import { initInputSignalRelations } from "/input-signal-relations.js";
 import { initInputBriefingUi } from "/input-briefing-ui.js";
 import { initConversationFocusUi } from "/conversation-focus-ui.js";
 import { initComputeModeUi } from "/compute-mode-ui.js";
+import { initModelCouncilUi } from "/model-council-ui.js";
 import { initComposerContextUi } from "/composer-context-ui.js";
 import { initVoiceInput } from "/voice-input.js";
 import { initMessageActions } from "/message-actions.js";
@@ -32,6 +33,7 @@ const appState = {
   models: [],
   compute: null,
   ambient: null,
+  modelCouncil: { participants: [], maximumSelected: 3 },
   driveInput: null,
   mailInput: null,
   inputRoles: { roles: [], avatarOptions: [] },
@@ -146,6 +148,7 @@ const settingsUi = initSettings(appState, {
   saveInputRoles: inputRoleUi.save,
   refreshInputRoles: inputRoleUi.refresh,
 });
+const modelCouncilUi = initModelCouncilUi({ state: appState, notify: notifyComposer });
 const permissionUi = initPermissionUi(appState);
 const composerContextUi = initComposerContextUi({
   state: appState,
@@ -1024,6 +1027,7 @@ async function bootstrap() {
     identityUi.render();
     inputRoleUi.render();
     settingsUi.render();
+    modelCouncilUi.configUpdated();
     voiceInput.configUpdated();
     explorationUi.runtimeUpdated();
     composerContextUi.configUpdated();
@@ -1061,6 +1065,21 @@ async function consumeStream(response, pending, outgoing) {
   let completed = false;
   let interrupted = false;
   let settled = null;
+  let councilContributions = [];
+
+  const renderPending = () => {
+    renderMessageContent(
+      pending.querySelector(".message-body"),
+      {
+        content: receivedText,
+        parts: receivedText ? [{ type: "markdown", text: receivedText }] : [],
+        metadata: councilContributions.length
+          ? { modelCouncil: { contributions: councilContributions } }
+          : null,
+      },
+      { streaming: true },
+    );
+  };
 
   while (true) {
     const { value, done } = await reader.read();
@@ -1079,15 +1098,17 @@ async function consumeStream(response, pending, outgoing) {
         receivedText += event.text;
         pending.classList.remove("pending", "response-placeholder");
         pending.classList.add("streaming");
-        renderRichText(
-          pending.querySelector(".message-body"),
-          receivedText,
-          { streaming: true },
-        );
+        renderPending();
         topicUi?.streamResponse(receivedText);
+        conversation.scrollTop = conversation.scrollHeight;
+      } else if (event.type === "councilContribution") {
+        councilContributions.push(event.contribution);
+        pending.classList.remove("response-placeholder");
+        renderPending();
         conversation.scrollTop = conversation.scrollHeight;
       } else if (event.type === "reset") {
         receivedText = "";
+        councilContributions = [];
         pending.classList.add("pending", "response-placeholder");
         pending.classList.remove("streaming");
         pending.querySelector(".message-body").textContent = "";
@@ -1126,6 +1147,7 @@ async function sendMessage(
   topic = null,
   codexTaskIds = [],
   signalId = selectedSignalId,
+  councilParticipantIds = [],
 ) {
   if (!text.trim() && !images.length && !quotes.length && !codexTaskIds.length) return;
   if (busy) {
@@ -1137,6 +1159,7 @@ async function sendMessage(
       topic,
       codexTaskIds,
       signalId,
+      councilParticipantIds,
     );
     return;
   }
@@ -1171,7 +1194,7 @@ async function sendMessage(
   try {
     const response = await fetch("/api/chat", {
       method: "POST",
-      body: chatBody(text, images, minimumLane, quotes, topic, codexTaskIds, signalId),
+      body: chatBody(text, images, minimumLane, quotes, topic, codexTaskIds, signalId, councilParticipantIds),
     });
     const result = await consumeStream(response, pending, outgoing);
     if (result.interrupted) {
@@ -1322,6 +1345,7 @@ async function appendToActiveResponse(
   topic,
   codexTaskIds = [],
   signalId = selectedSignalId,
+  councilParticipantIds = [],
 ) {
   const signal = appState.signals.find((item) => item.id === signalId) || null;
   const localEntry = localUserEntry(text, images, quotes, topic, signal);
@@ -1338,7 +1362,7 @@ async function appendToActiveResponse(
   try {
     const response = await fetch("/api/chat/append", {
       method: "POST",
-      body: chatBody(text, images, minimumLane, quotes, topic, codexTaskIds, signalId),
+      body: chatBody(text, images, minimumLane, quotes, topic, codexTaskIds, signalId, councilParticipantIds),
     });
     const entry = await response.json();
     if (!response.ok) throw new Error(entry.error || "无法追加消息。");
@@ -1431,6 +1455,7 @@ function chatBody(
   topic = null,
   codexTaskIds = [],
   signalId = null,
+  councilParticipantIds = [],
 ) {
   const body = new FormData();
   body.append("message", text);
@@ -1443,6 +1468,9 @@ function chatBody(
   for (const image of images) body.append("image", image.file, image.file.name);
   for (const taskId of codexTaskIds) body.append("codexTaskId", taskId);
   if (signalId) body.append("signalId", signalId);
+  for (const participantId of councilParticipantIds) {
+    body.append("councilParticipantId", participantId);
+  }
   return body;
 }
 
@@ -1630,6 +1658,7 @@ composer.addEventListener("submit", (event) => {
   if (codexTaskIds === null) return;
   if (!text && !images.length && !quotes.length && !codexTaskIds.length) return;
   const topic = topicUi.consume();
+  const councilParticipantIds = modelCouncilUi.consume();
   input.value = "";
   selectedImages = [];
   quoteUi.clear();
@@ -1638,7 +1667,7 @@ composer.addEventListener("submit", (event) => {
   renderAttachmentTray();
   resizeComposer();
   signalTyping(false);
-  sendMessage(text, images, minimumLane, quotes, topic, codexTaskIds);
+  sendMessage(text, images, minimumLane, quotes, topic, codexTaskIds, selectedSignalId, councilParticipantIds);
 });
 
 input.addEventListener("input", () => {

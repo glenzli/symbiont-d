@@ -6454,3 +6454,180 @@ button:disabled {
     box-shadow: 0 0 0 0 transparent;
   }
 }
+.model-council-picker {
+  position: relative;
+}
+
+.model-council-toggle {
+  position: relative;
+  font-size: 17px;
+}
+
+.model-council-toggle.active {
+  color: var(--accent, #315f8b);
+  background: color-mix(in srgb, currentColor 10%, transparent);
+}
+
+#model-council-count {
+  position: absolute;
+  right: -3px;
+  top: -4px;
+  min-width: 15px;
+  height: 15px;
+  padding: 0 3px;
+  border-radius: 8px;
+  background: #315f8b;
+  color: white;
+  font-size: 9px;
+  line-height: 15px;
+}
+
+.model-council-menu {
+  position: absolute;
+  left: 0;
+  bottom: calc(100% + 10px);
+  z-index: 30;
+  width: min(330px, 78vw);
+  padding: 12px;
+  border: 1px solid var(--border-color, #d8d8d8);
+  border-radius: 12px;
+  background: var(--panel-background, #fff);
+  box-shadow: 0 14px 40px rgb(0 0 0 / 14%);
+}
+
+.model-council-menu header,
+.model-council-options label,
+.model-council-settings > header,
+.model-participant-row .ambient-config-row-head {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.model-council-menu header {
+  justify-content: space-between;
+  margin-bottom: 8px;
+}
+
+.model-council-menu header small,
+.model-council-menu > p {
+  color: var(--muted-text, #777);
+  font-size: 11px;
+}
+
+.model-council-options label {
+  padding: 8px 4px;
+  cursor: pointer;
+}
+
+.model-council-options label > span:last-child {
+  display: grid;
+  min-width: 0;
+}
+
+.model-council-options label small {
+  overflow: hidden;
+  color: var(--muted-text, #777);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.model-council-option-avatar,
+.model-contribution-avatar {
+  display: grid;
+  flex: 0 0 auto;
+  place-items: center;
+  width: 28px;
+  height: 28px;
+  border-radius: 50%;
+  background: rgb(80 100 130 / 10%);
+}
+
+.model-council-settings {
+  margin-top: 24px;
+  padding-top: 20px;
+  border-top: 1px solid var(--border-color, #ddd);
+}
+
+.model-council-settings > header {
+  justify-content: space-between;
+}
+
+.model-council-settings > header > div {
+  display: grid;
+  gap: 4px;
+}
+
+.model-council-settings small,
+.model-council-settings .settings-note {
+  color: var(--muted-text, #777);
+}
+
+.model-participant-row {
+  margin-top: 12px;
+  padding: 14px;
+  border: 1px solid var(--border-color, #ddd);
+  border-radius: 12px;
+}
+
+.model-participant-row .ambient-config-row-head {
+  justify-content: space-between;
+  margin-bottom: 10px;
+}
+
+.message-model-council {
+  margin: 0 0 14px;
+  border: 1px solid rgb(60 90 125 / 18%);
+  border-radius: 12px;
+  background: rgb(70 100 135 / 4%);
+}
+
+.message-model-council > summary {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 10px 12px;
+  cursor: pointer;
+}
+
+.message-model-council > summary small,
+.model-contribution header small {
+  color: var(--muted-text, #777);
+}
+
+.message-model-council-body {
+  display: grid;
+  gap: 10px;
+  padding: 0 10px 10px;
+}
+
+.model-contribution {
+  padding: 10px;
+  border-radius: 9px;
+  background: var(--panel-background, #fff);
+}
+
+.model-contribution header {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+}
+
+.model-contribution header > span:nth-child(2) {
+  display: grid;
+  min-width: 0;
+}
+
+.model-contribution-state {
+  margin-left: auto;
+}
+
+.model-contribution-content {
+  margin: 8px 0 0 37px;
+}
+
+.model-contribution-error {
+  margin: 8px 0 0 37px;
+  color: #a34848;
+  font-size: 12px;
+}

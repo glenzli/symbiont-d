@@ -620,6 +620,7 @@ mod tests {
             briefing_topic_reviewed: false,
             hidden: false,
             dismissed: false,
+            duplicate_of_signal_id: None,
         };
 
         let message = |offset: i64| MemoryEntry {
@@ -673,6 +674,7 @@ mod tests {
             briefing_topic_reviewed: false,
             hidden: false,
             dismissed: false,
+            duplicate_of_signal_id: None,
         }];
 
         assert!(store.initialize_existing(&inputs).await.unwrap());
@@ -716,6 +718,7 @@ mod tests {
             briefing_topic_reviewed: false,
             hidden: false,
             dismissed: false,
+            duplicate_of_signal_id: None,
         };
         let original = signal(
             "signal_original",

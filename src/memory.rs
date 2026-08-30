@@ -5,6 +5,7 @@ use serde::{Deserialize, Serialize};
 use tokio::fs;
 
 use crate::asset::ImageAttachment;
+use crate::model_council::ModelCouncilDiscussion;
 
 const FILE_HEADER: &str = "# symbiont-d memory\n\n";
 const ENTRY_PREFIX: &str = "<!-- symbiont-d:entry ";
@@ -136,6 +137,8 @@ pub struct MessageMetadata {
     pub trace_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub origin: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model_council: Option<ModelCouncilDiscussion>,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]

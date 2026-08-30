@@ -590,18 +590,15 @@ fn prune_expired(pool: &mut CandidatePool, now: DateTime<Utc>) -> bool {
 }
 
 fn candidate_fingerprint(draft: &SensingCandidateDraft) -> String {
-    let mut sources = draft
-        .sources
-        .iter()
-        .map(|source| normalize(&source.url))
-        .collect::<Vec<_>>();
-    sources.sort();
+    // v3 is an exact content-delivery identity. Transport document URLs and
+    // observation timestamps may legitimately change while a daily digest
+    // repeats the same section verbatim; neither should defeat deterministic
+    // suppression. Materially changed evidence changes the bounded summary
+    // and remains eligible for semantic review.
     format!(
-        "v2|{}|{}|{}|{}",
+        "v3|{}|{}",
         normalize(&draft.title),
         normalize(&draft.summary),
-        draft.event_at.as_deref().map(normalize).unwrap_or_default(),
-        sources.join("|")
     )
 }
 

@@ -30,6 +30,7 @@ mod luna_input;
 mod mail_input;
 mod maintenance;
 mod memory;
+mod model_council;
 mod outreach;
 mod pcp_connection;
 mod pcp_index;
@@ -87,6 +88,7 @@ use inference::InferenceExecutor;
 use input_roles::InputRoleStore;
 use luna_input::LunaInput;
 use mail_input::MailInputStore;
+use model_council::{ModelCouncilService, ModelCouncilStore};
 use pcp_index::PcpIndex;
 use permission::PermissionBroker;
 use profile::ProfileStore;
@@ -392,6 +394,19 @@ async fn main() -> Result<()> {
         )
         .await?,
     );
+    let model_council_store = Arc::new(
+        ModelCouncilStore::open(resolve_data_path(
+            &workspace,
+            "SYMBIONT_MODEL_COUNCIL_PATH",
+            "model-council.toml",
+        ))
+        .await?,
+    );
+    let model_council = Arc::new(ModelCouncilService::new(
+        Arc::clone(&model_council_store),
+        Arc::clone(&ambient_provider),
+        Arc::clone(&infer_runtime),
+    )?);
     let inference = Arc::new(InferenceExecutor::new(infer_runtime));
     let signals = Arc::new(
         SignalStore::open(resolve_data_path(
@@ -585,6 +600,8 @@ async fn main() -> Result<()> {
         compute,
         Arc::clone(&inference),
         ambient_provider,
+        model_council_store,
+        model_council,
         drive_input,
         mail_input,
         audio_transcription,
