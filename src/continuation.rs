@@ -16,11 +16,11 @@ use tokio::{
 use tracing::warn;
 
 use crate::{
-    codex::{CodexClient, RuntimeEvent},
+    codex::{CodexClient, InteractiveScope, RuntimeEvent},
     compute::ComputeStore,
     continuity::{ContinuityHost, MessageLinks},
     conversation::ConversationCoordinator,
-    memory::MemoryRole,
+    memory::{MemoryRole, MessageTopicReference},
     profile::ProfileStore,
     reflection::ReflectionStore,
     usage::UsageStore,
@@ -29,6 +29,7 @@ use crate::{
 const MIN_DELAY_SECONDS: u64 = 5;
 const MAX_DELAY_SECONDS: u64 = 90;
 const UNARMED_TTL: Duration = Duration::from_secs(120);
+const MAX_TOPIC_CONTINUATION_MESSAGES: usize = 200;
 static CONTINUATION_ID: AtomicU64 = AtomicU64::new(1);
 
 #[derive(Clone)]
@@ -55,6 +56,8 @@ pub struct ArmedContinuation {
     pub source_assistant_revision_id: String,
     pub input_revision_ids: Vec<String>,
     pub input_epoch: u64,
+    pub interactive_scope: InteractiveScope,
+    pub topic: Option<MessageTopicReference>,
 }
 
 #[derive(Clone)]
@@ -129,6 +132,8 @@ impl ContinuationQueue {
         source_assistant_revision_id: String,
         input_revision_ids: Vec<String>,
         input_epoch: u64,
+        interactive_scope: InteractiveScope,
+        topic: Option<MessageTopicReference>,
     ) -> Result<Option<String>> {
         let mut state = self.state.lock().await;
         let Some(id) = reservation_ids
@@ -151,6 +156,8 @@ impl ContinuationQueue {
             source_assistant_revision_id,
             input_revision_ids,
             input_epoch,
+            interactive_scope,
+            topic,
         };
         drop(state);
 
@@ -281,6 +288,14 @@ async fn run_continuation(
     let profile = profile.snapshot().await;
     let continuity_context = "This is a short continuation of the immediately preceding conversation. Use the native \
          thread or the supplied exact working-context bridge; do not perform broad recall.";
+    let scoped_history = if let Some(topic_id) = job.interactive_scope.topic_id() {
+        let revision_ids = reflection
+            .episode_revision_ids(topic_id, MAX_TOPIC_CONTINUATION_MESSAGES)
+            .await?;
+        Some(continuity.messages_by_revision_ids(&revision_ids).await?)
+    } else {
+        None
+    };
     let Ok(mut client) = codex.try_lock() else {
         queue.complete(&job.id).await;
         return Ok(());
@@ -289,6 +304,8 @@ async fn run_continuation(
     let event_drain = tokio::spawn(async move { while runtime_events.recv().await.is_some() {} });
     let mut outcome = client
         .continue_conversation(
+            &job.interactive_scope,
+            scoped_history.as_deref(),
             &job.reason,
             &compute,
             &profile,
@@ -327,14 +344,19 @@ async fn run_continuation(
                     input_revision_ids,
                     surfaced_hunch_revision_ids: Vec::new(),
                     quotes: Vec::new(),
-                    topic: None,
+                    topic: job.topic.clone(),
                 },
             )
             .await?;
         codex
             .lock()
             .await
-            .mark_interactive_revision(stored.page.revision_id.clone());
+            .mark_interactive_revision(&job.interactive_scope, stored.page.revision_id.clone());
+        if let Some(topic_id) = job.interactive_scope.topic_id() {
+            reflection
+                .attach_episode_messages(topic_id, std::slice::from_ref(&stored.page.revision_id))
+                .await?;
+        }
         reflection
             .record_message(
                 &stored.entry,
@@ -389,6 +411,8 @@ mod tests {
                 "assistant-revision".to_owned(),
                 Vec::new(),
                 1,
+                InteractiveScope::Main,
+                None,
             )
             .await
             .expect("arm");

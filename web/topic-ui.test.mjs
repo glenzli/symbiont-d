@@ -6,6 +6,10 @@ import {
   isMessageExpanded,
   topicMessageKey,
 } from "./topic-expansion.js";
+import {
+  messageBelongsToTopic,
+  topicChatMessageKey,
+} from "./topic-chat.js";
 
 test("a newly opened topic pack expands its conversation by default", () => {
   const state = createTopicExpansion();
@@ -29,5 +33,23 @@ test("message expansion keys prefer durable transcript identities", () => {
   assert.match(
     topicMessageKey({ role: "assistant", at: "2026-08-20", content: "fallback" }, 2),
     /^assistant:2026-08-20:2:fallback$/,
+  );
+});
+
+test("topic chat projects only messages carrying the active topic reference", () => {
+  const message = {
+    revisionId: "msg_topic",
+    parts: [{ type: "topic", topic: { topicId: "ep_active", title: "Active" } }],
+  };
+
+  assert.equal(messageBelongsToTopic(message, "ep_active"), true);
+  assert.equal(messageBelongsToTopic(message, "ep_other"), false);
+  assert.equal(messageBelongsToTopic({ parts: [] }, "ep_active"), false);
+});
+
+test("topic chat deduplication uses the canonical transcript revision", () => {
+  assert.equal(
+    topicChatMessageKey({ revisionId: "msg_durable", content: "same transcript" }),
+    "msg_durable",
   );
 });

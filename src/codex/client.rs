@@ -28,6 +28,7 @@ use super::{
         ChatDisposition, InteractiveDeltaGate, interaction_disposition_prompt,
         interpret_interactive_output,
     },
+    interactive_threads::InteractiveThreads,
     prompts::{
         additional_context_value, context_fragments, context_maintenance_prompt,
         developer_instructions, interaction_reflection_prompt, luna_sensing_developer_instructions,
@@ -50,7 +51,7 @@ use crate::{
         ContextFragment, ContextSnapshot, ExecutionTraceEvent, NativeThreadSnapshot, TraceEventKind,
     },
     exploration::ExplorationIntentQueue,
-    memory::{MessageMetadata, MessageRunMetadata},
+    memory::{MemoryEntry, MessageMetadata, MessageRunMetadata},
     outreach::{OutreachCandidate, PROPOSE_OUTREACH_TOOL},
     permission::PermissionBroker,
     profile::{ProfileSnapshot, ProfileStore},
@@ -59,7 +60,7 @@ use crate::{
         ReconciliationProposal,
     },
     reflection::ReflectionStore,
-    rollover::{self, NativeThreadCursor, RolloverDecision, ThreadContextPressure},
+    rollover::{self, RolloverDecision, ThreadContextPressure},
     sensing::SensingCandidateDraft,
     symbiont_context::SymbiontContextStore,
     usage::{InvocationRecord, ToolTraceStep},
@@ -222,6 +223,8 @@ pub struct ChatInput {
     pub local_images: Vec<PathBuf>,
     pub current_revision_id: String,
     pub reply_to_revision_id: Option<String>,
+    pub interactive_scope: super::InteractiveScope,
+    pub scoped_history: Option<Vec<MemoryEntry>>,
     pub initial_lane: ComputeLane,
     pub input_events: watch::Receiver<u64>,
 }
@@ -300,7 +303,7 @@ pub struct CodexClient {
     stdin: ChildStdin,
     stdout: Lines<BufReader<ChildStdout>>,
     next_id: u64,
-    interactive_thread_id: String,
+    interactive_threads: InteractiveThreads,
     luna_sensing_thread_id: String,
     autonomous_scout_thread_id: String,
     autonomous_review_thread_id: String,
@@ -309,7 +312,6 @@ pub struct CodexClient {
     temporary_discussion_thread_id: String,
     workspace: PathBuf,
     continuity: Arc<ContinuityHost>,
-    interactive_cursor: NativeThreadCursor,
     tools: SymbiontTools,
     models: Vec<ModelInfo>,
     thread_usage: HashMap<String, TokenBreakdown>,
@@ -441,7 +443,7 @@ impl CodexClient {
             stdin,
             stdout: BufReader::new(stdout).lines(),
             next_id: 1,
-            interactive_thread_id: String::new(),
+            interactive_threads: InteractiveThreads::new(String::new()),
             luna_sensing_thread_id: String::new(),
             autonomous_scout_thread_id: String::new(),
             autonomous_review_thread_id: String::new(),
@@ -450,7 +452,6 @@ impl CodexClient {
             temporary_discussion_thread_id: String::new(),
             workspace: config.workspace.clone(),
             continuity: Arc::clone(&dependencies.continuity),
-            interactive_cursor: NativeThreadCursor::new(),
             tools: SymbiontTools::new(
                 Arc::clone(&dependencies.continuity),
                 Arc::clone(&dependencies.profile),
@@ -474,9 +475,10 @@ impl CodexClient {
         client.initialize().await?;
         client.models = client.load_models().await?;
         client.refresh_rate_limits().await;
-        client.interactive_thread_id = client
+        let interactive_thread_id = client
             .start_thread(&config.workspace, ToolSurface::Full)
             .await?;
+        client.interactive_threads = InteractiveThreads::new(interactive_thread_id);
         client.luna_sensing_thread_id = client
             .start_thread(&config.workspace, ToolSurface::LunaSensing)
             .await?;
@@ -542,7 +544,16 @@ impl CodexClient {
             .into_iter()
             .any(|lane| compute.allows_escalation(first_lane, lane));
         let first_input = self.user_input_items(&input, first_lane, compute)?;
-        let thread_id = self.interactive_thread_id.clone();
+        self.ensure_interactive_scope(&input.interactive_scope)
+            .await?;
+        let (thread_id, needs_bridge, cursor) = {
+            let thread = self.interactive_threads.select(&input.interactive_scope);
+            (
+                thread.thread_id.clone(),
+                thread.cursor.needs_bridge(),
+                thread.cursor.revision().map(str::to_owned),
+            )
+        };
         let rollover = rollover::decide(
             self.thread_context_pressure.get(&thread_id),
             self.thread_compactions
@@ -551,16 +562,23 @@ impl CodexClient {
                 .unwrap_or_default(),
             self.continuity.pcp_scope(),
         );
-        let needs_bridge = self.interactive_cursor.needs_bridge();
-        let cursor = self.interactive_cursor.revision();
-        let working_context = self
-            .continuity
-            .working_context(
-                cursor,
+        let working_context = match input.scoped_history.as_deref() {
+            Some(history) => WorkingContext::build(
+                history,
+                cursor.as_deref(),
                 Some(&input.current_revision_id),
                 input.reply_to_revision_id.as_deref(),
-            )
-            .await?;
+            ),
+            None => {
+                self.continuity
+                    .working_context(
+                        cursor.as_deref(),
+                        Some(&input.current_revision_id),
+                        input.reply_to_revision_id.as_deref(),
+                    )
+                    .await?
+            }
+        };
         let mut outcome = self
             .run_request(
                 thread_id.clone(),
@@ -578,15 +596,19 @@ impl CodexClient {
             )
             .await?;
         if needs_bridge {
-            self.interactive_cursor.bridge_completed();
+            self.interactive_threads
+                .select(&input.interactive_scope)
+                .cursor
+                .bridge_completed();
         }
         if let Some(rollover) = rollover {
             let workspace = self.workspace.clone();
             match self.start_thread(&workspace, ToolSurface::Full).await {
                 Ok(next_thread_id) => {
-                    self.interactive_thread_id = next_thread_id.clone();
-                    self.interactive_cursor.rotate();
-                    self.clear_thread_state(&thread_id);
+                    let previous = self
+                        .interactive_threads
+                        .replace(&input.interactive_scope, next_thread_id.clone());
+                    self.clear_thread_state(&previous);
                     if let Some(invocation) = outcome.invocations.last_mut() {
                         push_trace_event(
                             &mut invocation.trace_events,
@@ -611,6 +633,8 @@ impl CodexClient {
 
     pub async fn continue_conversation(
         &mut self,
+        interactive_scope: &super::InteractiveScope,
+        scoped_history: Option<&[MemoryEntry]>,
         reason: &str,
         compute: &ComputeConfig,
         profile: &ProfileSnapshot,
@@ -628,10 +652,24 @@ impl CodexClient {
              browse, call tools, mention this reservation, or write a report-style preamble. If \
              nothing distinct remains, return exactly {CONTINUATION_SILENT_MARKER}."
         );
-        let thread_id = self.interactive_thread_id.clone();
-        let needs_bridge = self.interactive_cursor.needs_bridge();
+        self.ensure_interactive_scope(interactive_scope).await?;
+        let (thread_id, needs_bridge, cursor) = {
+            let thread = self.interactive_threads.select(interactive_scope);
+            (
+                thread.thread_id.clone(),
+                thread.cursor.needs_bridge(),
+                thread.cursor.revision().map(str::to_owned),
+            )
+        };
         let working_context = if needs_bridge {
-            Some(self.continuity.working_context(None, None, None).await?)
+            Some(match scoped_history {
+                Some(history) => WorkingContext::build(history, cursor.as_deref(), None, None),
+                None => {
+                    self.continuity
+                        .working_context(cursor.as_deref(), None, None)
+                        .await?
+                }
+            })
         } else {
             None
         };
@@ -652,7 +690,10 @@ impl CodexClient {
             )
             .await?;
         if needs_bridge && !outcome.interrupted {
-            self.interactive_cursor.bridge_completed();
+            self.interactive_threads
+                .select(interactive_scope)
+                .cursor
+                .bridge_completed();
         }
         if outcome.text.trim() == CONTINUATION_SILENT_MARKER {
             outcome.text.clear();
@@ -700,20 +741,47 @@ impl CodexClient {
         outcome
     }
 
-    pub fn mark_interactive_revision(&mut self, revision_id: String) {
-        self.interactive_cursor.mark(revision_id);
+    pub fn mark_interactive_revision(
+        &mut self,
+        interactive_scope: &super::InteractiveScope,
+        revision_id: String,
+    ) {
+        if self.interactive_threads.contains(interactive_scope) {
+            self.interactive_threads
+                .select(interactive_scope)
+                .cursor
+                .mark(revision_id);
+        }
     }
 
     pub async fn reset_interactive_thread(&mut self) -> Result<()> {
-        let previous = self.interactive_thread_id.clone();
         let workspace = self.workspace.clone();
         let next = self
             .start_thread(&workspace, ToolSurface::Full)
             .await
             .context("start a fresh interactive Codex thread after message retraction")?;
-        self.interactive_thread_id = next;
-        self.interactive_cursor.rotate();
-        self.clear_thread_state(&previous);
+        let previous = self.interactive_threads.reset(next);
+        for thread_id in previous {
+            self.clear_thread_state(&thread_id);
+        }
+        Ok(())
+    }
+
+    async fn ensure_interactive_scope(&mut self, scope: &super::InteractiveScope) -> Result<()> {
+        let Some(topic_id) = scope.topic_id() else {
+            return Ok(());
+        };
+        if self.interactive_threads.contains(scope) {
+            return Ok(());
+        }
+        let workspace = self.workspace.clone();
+        let thread_id = self.start_thread(&workspace, ToolSurface::Full).await?;
+        for evicted in self
+            .interactive_threads
+            .insert_topic(topic_id.to_owned(), thread_id)
+        {
+            self.clear_thread_state(&evicted);
+        }
         Ok(())
     }
 

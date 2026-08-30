@@ -3,6 +3,7 @@ mod autonomous;
 mod client;
 mod images;
 mod interaction_output;
+mod interactive_threads;
 mod prompts;
 mod task_bridge;
 mod task_source_client;
@@ -18,6 +19,7 @@ pub use client::{
 };
 pub use images::import_generated_images;
 pub use interaction_output::ChatDisposition;
+pub use interactive_threads::InteractiveScope;
 #[cfg(test)]
 pub use task_bridge::CodexTaskMessage;
 pub use task_bridge::{CodexTaskDetail, CodexTaskSummary};

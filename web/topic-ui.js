@@ -6,8 +6,12 @@ import {
   setMessageExpanded,
   topicMessageKey,
 } from "/topic-expansion.js";
+import {
+  messageBelongsToTopic,
+  topicChatMessageKey,
+} from "/topic-chat.js";
 
-export function initTopicUi({ conversation, focusComposer, applyAvatar }) {
+export function initTopicUi({ conversation, focusComposer, applyAvatar, renderMessage }) {
   const openButton = document.querySelector("#open-topics");
   const dialog = document.querySelector("#topic-dialog");
   const status = document.querySelector("#topic-dialog-status");
@@ -17,6 +21,13 @@ export function initTopicUi({ conversation, focusComposer, applyAvatar }) {
   const trayTitle = document.querySelector("#topic-target-title");
   const openSelected = document.querySelector("#open-selected-topic");
   const clearSelected = document.querySelector("#clear-topic-target");
+  const chatShell = document.querySelector("#topic-chat-shell");
+  const chatConversation = document.querySelector("#topic-chat-conversation");
+  const chatTitle = document.querySelector("#topic-chat-title");
+  const chatSummary = document.querySelector("#topic-chat-summary");
+  const chatStatus = document.querySelector("#topic-chat-status");
+  const exitChat = document.querySelector("#exit-topic-chat");
+  const inspectChat = document.querySelector("#inspect-topic-chat");
 
   let topics = [];
   let selectedTopicId = null;
@@ -24,6 +35,8 @@ export function initTopicUi({ conversation, focusComposer, applyAvatar }) {
   let activeDetail = null;
   let selectedView = "current";
   let loadEpoch = 0;
+  let chatLoadEpoch = 0;
+  let pendingResponse = null;
   const selectedViews = new Map();
   const packExpansion = new Map();
 
@@ -32,6 +45,10 @@ export function initTopicUi({ conversation, focusComposer, applyAvatar }) {
     if (pendingTopic) open(pendingTopic.id);
   });
   clearSelected.addEventListener("click", () => clear());
+  exitChat.addEventListener("click", () => clear());
+  inspectChat.addEventListener("click", () => {
+    if (pendingTopic) open(pendingTopic.id);
+  });
   list.addEventListener("click", (event) => {
     const button = event.target.closest("[data-topic-id]");
     if (button) select(button.dataset.topicId);
@@ -78,7 +95,7 @@ export function initTopicUi({ conversation, focusComposer, applyAvatar }) {
     if (!button) return;
     const item = topics.find(({ topic }) => topic.id === button.dataset.continueTopic);
     if (!item) return;
-    set({ id: item.topic.id, title: item.topic.title });
+    void set({ id: item.topic.id, title: item.topic.title });
     dialog.close();
     focusComposer();
   });
@@ -193,23 +210,150 @@ export function initTopicUi({ conversation, focusComposer, applyAvatar }) {
     }
   }
 
-  function set(topic) {
+  async function set(topic) {
     if (!topic?.id || !topic?.title) return;
     pendingTopic = { id: topic.id, title: topic.title };
     trayTitle.textContent = topic.title;
     tray.hidden = false;
+    conversation.hidden = true;
+    chatShell.hidden = false;
+    chatTitle.textContent = topic.title;
+    chatSummary.textContent = "这里优先使用该主题的既有内容，但不限制讨论范围。";
+    chatStatus.textContent = "正在读取主题聊天";
+    chatConversation.replaceChildren();
+    pendingResponse = null;
+    const epoch = ++chatLoadEpoch;
+    try {
+      const payload = await responseJson(
+        await fetch(`/api/topics/${encodeURIComponent(topic.id)}`),
+        "无法读取主题聊天",
+      );
+      if (epoch !== chatLoadEpoch || pendingTopic?.id !== topic.id) return;
+      chatTitle.textContent = payload.topic.title;
+      chatSummary.textContent = payload.topic.summary || "围绕这个主题继续，但不限制讨论范围。";
+      chatConversation.replaceChildren();
+      for (const [index, message] of (payload.messages || []).entries()) {
+        appendChatMessage(message, { index, scroll: false });
+      }
+      chatStatus.textContent = payload.messages?.length
+        ? ""
+        : "这个主题还没有可显示的对话记录";
+      chatConversation.scrollTop = chatConversation.scrollHeight;
+    } catch (error) {
+      if (epoch === chatLoadEpoch && pendingTopic?.id === topic.id) {
+        chatStatus.textContent = error.message;
+      }
+    }
+    focusComposer();
   }
 
   function clear() {
+    chatLoadEpoch += 1;
     pendingTopic = null;
+    pendingResponse = null;
     trayTitle.textContent = "";
     tray.hidden = true;
+    chatConversation.replaceChildren();
+    chatStatus.textContent = "";
+    chatShell.hidden = true;
+    conversation.hidden = false;
   }
 
   function consume() {
-    const topic = pendingTopic;
-    clear();
-    return topic;
+    return pendingTopic ? { ...pendingTopic } : null;
+  }
+
+  function appendChatMessage(message, { index = 0, scroll = true } = {}) {
+    const key = topicChatMessageKey(message, index);
+    if (message.revisionId) {
+      const existing = chatConversation.querySelector(
+        `.message[data-revision-id="${CSS.escape(message.revisionId)}"]`,
+      );
+      if (existing) return existing;
+    }
+    const element = renderMessage(message, {
+      container: chatConversation,
+      scroll,
+    });
+    element.dataset.topicChatKey = key;
+    return element;
+  }
+
+  function appendLocal(message) {
+    if (!pendingTopic || !messageBelongsToTopic(message, pendingTopic.id)) return null;
+    const element = appendChatMessage(message);
+    element.classList.add("topic-chat-outgoing");
+    return element;
+  }
+
+  function acceptOutgoing(message) {
+    if (!pendingTopic || !messageBelongsToTopic(message, pendingTopic.id)) return;
+    const outgoing = [...chatConversation.querySelectorAll(".topic-chat-outgoing")]
+      .find((element) => !element.dataset.revisionId);
+    if (!outgoing) {
+      appendChatMessage(message);
+      return;
+    }
+    if (message.revisionId) outgoing.dataset.revisionId = message.revisionId;
+    renderMessageContent(outgoing.querySelector(".message-body"), message);
+  }
+
+  function beginResponse(message) {
+    if (!pendingTopic) return;
+    pendingResponse?.remove();
+    pendingResponse = appendChatMessage(message);
+    pendingResponse.classList.add("pending", "response-placeholder");
+  }
+
+  function setResponseActivity(label) {
+    if (!pendingResponse) return;
+    pendingResponse.classList.add("pending");
+    pendingResponse.classList.remove("response-placeholder", "streaming");
+    pendingResponse.querySelector(".message-body").textContent = label;
+  }
+
+  function streamResponse(text) {
+    if (!pendingResponse) return;
+    pendingResponse.classList.remove("pending", "response-placeholder");
+    pendingResponse.classList.add("streaming");
+    renderRichText(pendingResponse.querySelector(".message-body"), text, {
+      streaming: true,
+    });
+    chatConversation.scrollTop = chatConversation.scrollHeight;
+  }
+
+  function resetResponse() {
+    if (!pendingResponse) return;
+    pendingResponse.classList.add("pending", "response-placeholder");
+    pendingResponse.classList.remove("streaming");
+    pendingResponse.querySelector(".message-body").textContent = "";
+  }
+
+  function completeResponse(message) {
+    pendingResponse?.remove();
+    pendingResponse = null;
+    if (pendingTopic && messageBelongsToTopic(message, pendingTopic.id)) {
+      appendChatMessage(message);
+    }
+  }
+
+  function cancelResponse() {
+    pendingResponse?.remove();
+    pendingResponse = null;
+  }
+
+  function appendIncoming(message) {
+    if (pendingTopic && messageBelongsToTopic(message, pendingTopic.id)) {
+      appendChatMessage(message);
+    }
+  }
+
+  function remove(revisionIds) {
+    for (const revisionId of revisionIds) {
+      chatConversation
+        .querySelector(`.message[data-revision-id="${CSS.escape(revisionId)}"]`)
+        ?.remove();
+    }
   }
 
   function renderEmpty(text) {
@@ -229,7 +373,22 @@ export function initTopicUi({ conversation, focusComposer, applyAvatar }) {
     return expansion;
   }
 
-  return { clear, consume, open, set };
+  return {
+    acceptOutgoing,
+    appendIncoming,
+    appendLocal,
+    beginResponse,
+    cancelResponse,
+    clear,
+    completeResponse,
+    consume,
+    open,
+    remove,
+    resetResponse,
+    set,
+    setResponseActivity,
+    streamResponse,
+  };
 }
 
 function renderViewTabs(selectedView) {

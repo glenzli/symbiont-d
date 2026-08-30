@@ -112,6 +112,7 @@ let responseWaitTimer = null;
 let responseDelayTimer = null;
 let stoppingResponse = false;
 let selectedSignalId = null;
+let topicUi = null;
 const manualExplorationReceiptIds = new Set();
 const displayedSignalIds = new Set();
 const inputSignalRelations = initInputSignalRelations(conversation);
@@ -219,9 +220,10 @@ const quoteUi = initQuoteUi({
   },
   notify: notifyComposer,
 });
-const topicUi = initTopicUi({
+topicUi = initTopicUi({
   conversation,
   applyAvatar: identityUi.applyAvatar,
+  renderMessage: appendMessage,
   focusComposer() {
     input.focus();
     resizeComposer();
@@ -347,6 +349,7 @@ function appendMessage(entry, options = {}) {
       deliveryState: options.deliveryState,
       failureReason: options.failureReason,
     });
+    if (options.incoming) topicUi?.appendIncoming(entry);
   }
   if (options.scroll !== false) {
     target.scrollTop = target.scrollHeight;
@@ -754,6 +757,7 @@ function setActivity(message, event) {
   message.classList.remove("response-placeholder");
   message.classList.add("pending");
   body.textContent = event.label;
+  topicUi?.setResponseActivity(event.label);
   connectionStatus.textContent = "在线";
   setRuntimeStatus(event.label, "working");
   foot.hidden = false;
@@ -776,6 +780,7 @@ function applyAccepted(message, entry) {
   renderMessageContent(message.querySelector(".message-body"), entry);
   messageSync.track(message, entry, { interactive: true });
   messageActions.update(message, entry, { deliveryState: "pending" });
+  topicUi?.acceptOutgoing(entry);
 }
 
 function applyComplete(message, entry) {
@@ -1079,12 +1084,14 @@ async function consumeStream(response, pending, outgoing) {
           receivedText,
           { streaming: true },
         );
+        topicUi?.streamResponse(receivedText);
         conversation.scrollTop = conversation.scrollHeight;
       } else if (event.type === "reset") {
         receivedText = "";
         pending.classList.add("pending", "response-placeholder");
         pending.classList.remove("streaming");
         pending.querySelector(".message-body").textContent = "";
+        topicUi?.resetResponse();
         connectionStatus.textContent = "正在回应";
       } else if (event.type === "interrupted") {
         interrupted = true;
@@ -1097,6 +1104,7 @@ async function consumeStream(response, pending, outgoing) {
           messageActions.update(message, null, { deliveryState: "delivered" });
         }
         applyComplete(pending, event.message);
+        topicUi?.completeResponse(event.message);
         applyCompletionProjection(event);
       } else if (event.type === "error") {
         throw new Error(event.error);
@@ -1135,6 +1143,7 @@ async function sendMessage(
   const signal = appState.signals.find((item) => item.id === signalId) || null;
   const localEntry = localUserEntry(text, images, quotes, topic, signal);
   const outgoing = appendMessage(localEntry, { deliveryState: "pending" });
+  topicUi?.appendLocal(localEntry);
   activeOutgoing = [outgoing];
   const pending = appendMessage(
     {
@@ -1149,6 +1158,11 @@ async function sendMessage(
     .querySelector(".message-body")
     .setAttribute("aria-label", `${identityUi.displayName()} 正在回应`);
   activePending = pending;
+  topicUi?.beginResponse({
+    role: "assistant",
+    at: new Date().toISOString(),
+    content: "正在为你的消息准备回复…",
+  });
   activityStartedAt = Date.now();
   setBusy(true);
   connectionStatus.textContent = "正在回应";
@@ -1162,12 +1176,14 @@ async function sendMessage(
     const result = await consumeStream(response, pending, outgoing);
     if (result.interrupted) {
       pending.remove();
+      topicUi?.cancelResponse();
       for (const message of activeOutgoing) {
         messageActions.update(message, null, { deliveryState: "stopped" });
       }
       notifyComposer("已停止回复");
     } else if (result.settled) {
       pending.remove();
+      topicUi?.cancelResponse();
       for (const message of activeOutgoing) {
         messageActions.update(message, null, { deliveryState: "delivered" });
       }
@@ -1175,6 +1191,7 @@ async function sendMessage(
     }
   } catch (error) {
     pending.remove();
+    topicUi?.cancelResponse();
     const failedOutgoing = [...activeOutgoing];
     for (const message of failedOutgoing) {
       messageActions.update(message, null, {
@@ -1307,9 +1324,11 @@ async function appendToActiveResponse(
   signalId = selectedSignalId,
 ) {
   const signal = appState.signals.find((item) => item.id === signalId) || null;
-  const outgoing = appendMessage(localUserEntry(text, images, quotes, topic, signal), {
+  const localEntry = localUserEntry(text, images, quotes, topic, signal);
+  const outgoing = appendMessage(localEntry, {
     deliveryState: "pending",
   });
+  topicUi?.appendLocal(localEntry);
   if (activePending?.isConnected) {
     conversation.append(activePending);
     conversation.scrollTop = conversation.scrollHeight;
@@ -1549,6 +1568,7 @@ async function retractMessage(message, entry) {
 
 function removeMessages(revisionIds, fallback) {
   messageSync.remove(revisionIds);
+  topicUi?.remove(revisionIds);
   for (const revisionId of revisionIds) {
     conversation
       .querySelector(

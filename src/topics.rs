@@ -5,7 +5,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::{
     continuity::ContinuityHost,
-    memory::{MemoryEntry, MessageTopicReference},
+    memory::{MemoryEntry, MemoryRole, MessageTopicReference},
     reflection::{ConversationEpisode, ReflectionStore},
 };
 
@@ -81,19 +81,27 @@ impl TopicService {
         let Some(topic) = self.reflection.episode(id).await? else {
             return Ok(None);
         };
-        let revision_ids = self
-            .reflection
-            .episode_revision_ids(id, MAX_TOPIC_MESSAGES)
-            .await?;
-        let messages = self
-            .continuity
-            .messages_by_revision_ids(&revision_ids)
-            .await?;
+        let (revision_ids, messages) = self.messages(id).await?;
         Ok(Some(TopicDetail {
             message_count: revision_ids.len() as u64,
             topic,
             messages,
         }))
+    }
+
+    pub async fn chat_history(&self, id: &str) -> Result<Vec<MemoryEntry>> {
+        let (_, messages) = self.messages(id).await?;
+        Ok(messages)
+    }
+
+    pub async fn latest_assistant_revision(&self, id: &str) -> Result<Option<String>> {
+        Ok(self
+            .chat_history(id)
+            .await?
+            .into_iter()
+            .rev()
+            .find(|message| matches!(message.role, MemoryRole::Assistant))
+            .and_then(|message| message.revision_id))
     }
 
     pub async fn resolve_context(&self, id: &str) -> Result<TopicContext> {
@@ -116,6 +124,18 @@ impl TopicService {
         self.reflection
             .attach_episode_messages(id, revision_ids)
             .await
+    }
+
+    async fn messages(&self, id: &str) -> Result<(Vec<String>, Vec<MemoryEntry>)> {
+        let revision_ids = self
+            .reflection
+            .episode_revision_ids(id, MAX_TOPIC_MESSAGES)
+            .await?;
+        let messages = self
+            .continuity
+            .messages_by_revision_ids(&revision_ids)
+            .await?;
+        Ok((revision_ids, messages))
     }
 }
 
@@ -191,6 +211,16 @@ mod tests {
             .record_message(&assistant.entry, Some(&user.page.revision_id), false, &[])
             .await
             .expect("reflect assistant message");
+        continuity
+            .ingest_message(
+                MemoryRole::Assistant,
+                "An unrelated exchange must not leak into the topic bridge.",
+                Vec::new(),
+                None,
+                MessageLinks::default(),
+            )
+            .await
+            .expect("store unrelated message");
         let topic = reflection
             .upsert_episode(EpisodeInput {
                 id: None,
@@ -225,6 +255,23 @@ mod tests {
             .await
             .expect("resolve topic context");
         assert_eq!(context.title, topic.title);
+        let history = service
+            .chat_history(&topic.id)
+            .await
+            .expect("read topic chat history");
+        assert_eq!(history.len(), 2);
+        assert!(
+            history
+                .iter()
+                .all(|message| !message.content.contains("unrelated exchange"))
+        );
+        assert_eq!(
+            service
+                .latest_assistant_revision(&topic.id)
+                .await
+                .expect("read topic reply anchor"),
+            Some(assistant.page.revision_id)
+        );
 
         let _ = tokio::fs::remove_dir_all(root).await;
     }

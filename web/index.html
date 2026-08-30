@@ -146,6 +146,29 @@
             <p>它在这里。</p>
           </div>
         </section>
+        <section id="topic-chat-shell" class="topic-chat-shell" hidden>
+          <header class="topic-chat-header">
+            <button
+              id="exit-topic-chat"
+              class="topic-chat-back"
+              type="button"
+              aria-label="返回全部对话"
+            ><i data-lucide="undo-2" aria-hidden="true"></i></button>
+            <div class="topic-chat-heading">
+              <small>主题聊天</small>
+              <strong id="topic-chat-title"></strong>
+              <span id="topic-chat-summary"></span>
+            </div>
+            <button id="inspect-topic-chat" class="topic-chat-inspect" type="button">主题透镜</button>
+          </header>
+          <div
+            id="topic-chat-conversation"
+            class="conversation topic-chat-conversation"
+            aria-live="polite"
+            aria-label="主题聊天"
+          ></div>
+          <p id="topic-chat-status" class="topic-chat-status" role="status"></p>
+        </section>
         <div
           id="conversation-focus-banner"
           class="conversation-focus-banner"
@@ -155,7 +178,7 @@
           <span><i data-lucide="eye-off" aria-hidden="true"></i>已隐藏 <strong id="conversation-focus-hidden-count">0</strong> 条外部输入与异议</span>
           <button id="conversation-focus-show-all" type="button">显示全部</button>
         </div>
-        <div class="conversation-floating-controls">
+        <div id="conversation-floating-controls" class="conversation-floating-controls">
           <button
             id="toggle-conversation-focus"
             class="conversation-focus-toggle"
@@ -207,7 +230,7 @@
         <div id="quote-tray" class="quote-tray" aria-label="待发送引用" hidden></div>
         <div id="topic-target-tray" class="topic-target-tray" hidden>
           <button id="open-selected-topic" type="button" title="查看当前主题">
-            <small>主题</small>
+            <small>主题聊天</small>
             <span id="topic-target-title"></span>
           </button>
           <button

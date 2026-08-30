@@ -116,6 +116,7 @@ const EXPLORATION_RECEIPT_JS: &str = include_str!("../web/exploration-receipt.js
 const REFLECTION_UI_JS: &str = include_str!("../web/reflection-ui.js");
 const RECONCILIATION_UI_JS: &str = include_str!("../web/reconciliation-ui.js");
 const TOPIC_UI_JS: &str = include_str!("../web/topic-ui.js");
+const TOPIC_CHAT_JS: &str = include_str!("../web/topic-chat.js");
 const TOPIC_EXPANSION_JS: &str = include_str!("../web/topic-expansion.js");
 const MESSAGE_SYNC_JS: &str = include_str!("../web/message-sync.js");
 const MESSAGE_HISTORY_JS: &str = include_str!("../web/message-history.js");
@@ -634,6 +635,7 @@ pub fn router(state: AppState) -> Router {
         .route("/reflection-ui.js", get(reflection_ui_js))
         .route("/reconciliation-ui.js", get(reconciliation_ui_js))
         .route("/topic-ui.js", get(topic_ui_js))
+        .route("/topic-chat.js", get(topic_chat_js))
         .route("/topic-expansion.js", get(topic_expansion_js))
         .route("/message-sync.js", get(message_sync_js))
         .route("/message-history.js", get(message_history_js))
@@ -983,6 +985,13 @@ async fn topic_ui_js() -> impl IntoResponse {
     (
         [(header::CONTENT_TYPE, "text/javascript; charset=utf-8")],
         TOPIC_UI_JS,
+    )
+}
+
+async fn topic_chat_js() -> impl IntoResponse {
+    (
+        [(header::CONTENT_TYPE, "text/javascript; charset=utf-8")],
+        TOPIC_CHAT_JS,
     )
 }
 
@@ -2949,11 +2958,18 @@ async fn store_user_message(
         .iter()
         .map(|image| image.path.clone())
         .collect();
-    let reply_to_revision_id = state
-        .continuity
-        .latest_assistant_revision()
-        .await
-        .map_err(ApiError::internal)?;
+    let reply_to_revision_id = match request.topic.as_ref() {
+        Some(topic) => state
+            .topics
+            .latest_assistant_revision(&topic.id)
+            .await
+            .map_err(ApiError::internal)?,
+        None => state
+            .continuity
+            .latest_assistant_revision()
+            .await
+            .map_err(ApiError::internal)?,
+    };
     let stored = state
         .continuity
         .ingest_message(
@@ -3035,7 +3051,7 @@ async fn run_chat(
     let mut active_topics = Vec::<TopicContext>::new();
     let mut first_batch = true;
     let mut input_events = state.conversation.subscribe_input();
-    let (outcome, last_user_revision_id, response_input_epoch) = loop {
+    let (outcome, last_user_revision_id, response_input_epoch, interactive_scope, primary_topic) = loop {
         let batch = match state.conversation.settle_and_take(lease).await? {
             SettledConversation::Messages(batch) => batch,
             SettledConversation::Interrupted => {
@@ -3056,6 +3072,11 @@ async fn run_chat(
         let reply_to_revision_id = batch
             .first()
             .and_then(|message| message.reply_to_revision_id.clone());
+        let primary_topic = current.topic.clone();
+        let interactive_scope = primary_topic
+            .as_ref()
+            .map(|topic| crate::codex::InteractiveScope::Topic(topic.id.clone()))
+            .unwrap_or(crate::codex::InteractiveScope::Main);
         for message in &batch {
             source_revision_ids.push(message.stored.page.revision_id.clone());
             source_revision_ids.extend(message.stored.attachment_revision_ids.clone());
@@ -3079,6 +3100,10 @@ async fn run_chat(
             route.context
         );
         let continuity_context = format!("{}\n\n{}", continuity_base, state.bridge.prompt().await);
+        let scoped_history = match primary_topic.as_ref() {
+            Some(topic) => Some(state.topics.chat_history(&topic.id).await?),
+            None => None,
+        };
         let outcome_result = state
             .codex
             .lock()
@@ -3092,6 +3117,8 @@ async fn run_chat(
                         .collect(),
                     current_revision_id: current.stored.page.revision_id.clone(),
                     reply_to_revision_id: reply_to_revision_id.clone(),
+                    interactive_scope: interactive_scope.clone(),
+                    scoped_history,
                     initial_lane: route.lane,
                     input_events: input_events.clone(),
                 },
@@ -3179,13 +3206,22 @@ async fn run_chat(
             outcome,
             current.stored.page.revision_id.clone(),
             *input_events.borrow(),
+            interactive_scope,
+            primary_topic,
         );
     };
     drop(runtime_tx);
     runtime_forwarder.await?;
     state.usage.record_all(&outcome.invocations).await?;
     if !outcome.disposition.produces_message() {
-        return finish_non_reply_chat(&state, outcome, last_user_revision_id, wire_tx).await;
+        return finish_non_reply_chat(
+            &state,
+            outcome,
+            last_user_revision_id,
+            interactive_scope,
+            wire_tx,
+        )
+        .await;
     }
     let generated_images =
         import_generated_images(&state.assets, &outcome.generated_images).await?;
@@ -3207,7 +3243,7 @@ async fn run_chat(
                 input_revision_ids,
                 surfaced_hunch_revision_ids: Vec::new(),
                 quotes: Vec::new(),
-                topic: active_topics.last().map(TopicContext::message_reference),
+                topic: primary_topic.as_ref().map(TopicContext::message_reference),
             },
         )
         .await?;
@@ -3215,7 +3251,7 @@ async fn run_chat(
         .codex
         .lock()
         .await
-        .mark_interactive_revision(stored_message.page.revision_id.clone());
+        .mark_interactive_revision(&interactive_scope, stored_message.page.revision_id.clone());
     state
         .reflection
         .record_message(&stored_message.entry, Some(&last_user_revision_id), &[])
@@ -3236,6 +3272,8 @@ async fn run_chat(
             stored_message.page.revision_id.clone(),
             continuation_input_revision_ids,
             response_input_epoch,
+            interactive_scope,
+            primary_topic.as_ref().map(TopicContext::message_reference),
         )
         .await
     {
@@ -3268,6 +3306,7 @@ async fn finish_non_reply_chat(
     state: &AppState,
     outcome: ChatOutcome,
     last_user_revision_id: String,
+    interactive_scope: crate::codex::InteractiveScope,
     wire_tx: mpsc::Sender<WireEvent>,
 ) -> anyhow::Result<()> {
     let reaction = outcome.disposition.reaction().map(str::to_owned);
@@ -3297,7 +3336,7 @@ async fn finish_non_reply_chat(
         .codex
         .lock()
         .await
-        .mark_interactive_revision(last_user_revision_id.clone());
+        .mark_interactive_revision(&interactive_scope, last_user_revision_id.clone());
     state
         .reflection
         .record_turn_disposition(&last_user_revision_id, reaction.as_deref())
