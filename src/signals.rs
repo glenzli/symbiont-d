@@ -10,8 +10,10 @@ use tokio::{
 
 use crate::external_markdown::normalize_external_markdown;
 use crate::sensing::{
-    InputRoleSnapshot, SensingCandidate, SensingPresentation, SensingSource, SensingSourceClass,
+    InputRoleSnapshot, SensingCandidate, SensingDeduplicationReference, SensingPresentation,
+    SensingSource, SensingSourceClass,
 };
+use crate::source_identity::stable_source_identities;
 
 const RETENTION_DAYS: i64 = 30;
 const MAX_EVENT_AGE_DAYS: i64 = 45;
@@ -123,22 +125,6 @@ pub(crate) struct BriefingTopicAssignment {
     pub(crate) topic: String,
 }
 
-/// Bounded, read-only comparison material for the existing ambient review.
-/// Hidden and promoted signals remain eligible so dismissing or adopting an
-/// input cannot make the same event publishable again under different prose.
-#[derive(Clone, Debug, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct SignalDeduplicationReference {
-    pub signal_id: String,
-    pub fingerprint: String,
-    pub actor_name: String,
-    pub title: String,
-    pub excerpt: String,
-    pub source_urls: Vec<String>,
-    pub event_at: Option<String>,
-    pub observed_at: String,
-}
-
 #[derive(Default, Deserialize, Serialize)]
 struct SignalDocument {
     #[serde(default)]
@@ -221,11 +207,22 @@ impl SignalStore {
             return Ok(SignalPublishOutcome::RejectedStale);
         }
         let mut document = self.document.write().await;
+        let candidate_source_identities =
+            stable_source_identities(candidate.sources.iter().map(|source| source.url.as_str()));
         if document
             .signals
             .iter()
             .find(|signal| {
-                signal.candidate_id == candidate.id || signal.fingerprint == candidate.fingerprint
+                signal.candidate_id == candidate.id
+                    || signal.fingerprint == candidate.fingerprint
+                    || signal.kind == SignalKind::ExternalInput
+                        && !candidate_source_identities.is_empty()
+                        && signal.sources.iter().any(|source| {
+                            crate::source_identity::canonical_delivery_identity(&source.url)
+                                .is_some_and(|identity| {
+                                    candidate_source_identities.contains(&identity)
+                                })
+                        })
             })
             .is_some()
         {
@@ -581,7 +578,7 @@ impl SignalStore {
         *self.changes.borrow()
     }
 
-    pub async fn deduplication_references(&self) -> Vec<SignalDeduplicationReference> {
+    pub async fn deduplication_references(&self) -> Vec<SensingDeduplicationReference> {
         let document = self.document.read().await;
         document
             .signals
@@ -589,8 +586,8 @@ impl SignalStore {
             .rev()
             .filter(|signal| signal.kind == SignalKind::ExternalInput)
             .take(MAX_DEDUPLICATION_REFERENCES)
-            .map(|signal| SignalDeduplicationReference {
-                signal_id: signal.id.clone(),
+            .map(|signal| SensingDeduplicationReference {
+                reference_id: signal.id.clone(),
                 fingerprint: signal.fingerprint.clone(),
                 actor_name: signal.actor.name.clone(),
                 title: signal.title.clone(),
@@ -1122,6 +1119,46 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn stable_source_identity_deduplicates_paraphrased_arxiv_delivery() {
+        let nonce = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let path =
+            std::env::temp_dir().join(format!("symbiont-signals-source-identity-{nonce}.json"));
+        let store = SignalStore::open(path.clone()).await.unwrap();
+        let mut first = candidate("sense_collaboration_tax_first");
+        first.title = "The Collaboration Tax".to_owned();
+        first.sources[0].url = "https://arxiv.org/abs/2608.22152".to_owned();
+        assert!(matches!(
+            store
+                .publish_with_content(&first, first.proposed_input.clone(), "credible".to_owned())
+                .await
+                .unwrap(),
+            SignalPublishOutcome::Published
+        ));
+
+        let mut repeated = candidate("sense_collaboration_tax_rephrased");
+        repeated.title = "Why multi-agent coordination can erase gains".to_owned();
+        repeated.summary = "A differently worded summary of the same paper.".to_owned();
+        repeated.fingerprint = "v2|deliberately-different".to_owned();
+        repeated.sources[0].url = "https://arxiv.org/pdf/2608.22152.pdf".to_owned();
+        assert!(matches!(
+            store
+                .publish_with_content(
+                    &repeated,
+                    repeated.proposed_input.clone(),
+                    "credible again".to_owned(),
+                )
+                .await
+                .unwrap(),
+            SignalPublishOutcome::Existing
+        ));
+        assert_eq!(store.visible(10).await.unwrap().len(), 1);
+        let _ = tokio::fs::remove_file(path).await;
+    }
+
+    #[tokio::test]
     async fn dismissed_signal_stays_hidden_without_becoming_republishable() {
         let nonce = SystemTime::now()
             .duration_since(UNIX_EPOCH)
@@ -1188,7 +1225,7 @@ mod tests {
 
         let references = store.deduplication_references().await;
         assert_eq!(references.len(), 1);
-        assert_eq!(references[0].signal_id, signal.id);
+        assert_eq!(references[0].reference_id, signal.id);
         assert_eq!(references[0].actor_name, "Test observer");
         assert_eq!(
             references[0].source_urls,
@@ -1241,7 +1278,7 @@ mod tests {
         assert_eq!(challenge.related_signal_ids, vec![source.id]);
         let references = store.deduplication_references().await;
         assert_eq!(references.len(), 1);
-        assert_eq!(references[0].signal_id, visible[0].id);
+        assert_eq!(references[0].reference_id, visible[0].id);
         let _ = tokio::fs::remove_file(path).await;
     }
 

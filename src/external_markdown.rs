@@ -4,7 +4,11 @@
 //! complete text, but present links as compact labels and point them at the
 //! actual source whenever a redirect exposes one.
 
+use std::collections::HashSet;
+
 use reqwest::Url;
+
+const MAX_SOURCE_URLS: usize = 8;
 
 pub(crate) fn normalize_external_markdown(value: &str) -> String {
     let value = unescape_systematically_escaped_markdown(value);
@@ -93,6 +97,39 @@ pub(crate) fn canonical_source_url(value: &str) -> Option<String> {
         }
     }
     Some(parsed.to_string())
+}
+
+/// Extracts a bounded set of HTTP source URLs from plain text or Markdown.
+///
+/// Conversation messages are not an archival source registry, but URLs they
+/// explicitly discuss are useful negative evidence for the next sensing pass.
+pub(crate) fn source_urls(value: &str) -> Vec<String> {
+    let mut remaining = value;
+    let mut seen = HashSet::new();
+    let mut urls = Vec::new();
+    while urls.len() < MAX_SOURCE_URLS {
+        let Some(start) = find_url_start(remaining) else {
+            break;
+        };
+        let tail = &remaining[start..];
+        let token_end = tail
+            .char_indices()
+            .find_map(|(index, character)| character.is_whitespace().then_some(index))
+            .unwrap_or(tail.len());
+        let token = tail[..token_end].trim_end_matches(|character: char| {
+            matches!(
+                character,
+                ')' | ']' | '>' | '"' | '\'' | '.' | ',' | ';' | '，' | '。' | '；' | '、'
+            )
+        });
+        if let Some(url) = canonical_source_url(token)
+            && seen.insert(url.clone())
+        {
+            urls.push(url);
+        }
+        remaining = &tail[token_end..];
+    }
+    urls
 }
 
 fn standalone_source_url(line: &str) -> Option<String> {
@@ -234,5 +271,18 @@ mod tests {
     fn preserves_isolated_markdown_escapes_and_math_delimiters() {
         let value = "使用 \\* 表示字面星号，并保留公式：\\[x + y\\]。";
         assert_eq!(normalize_external_markdown(value), value);
+    }
+
+    #[test]
+    fn extracts_sources_from_markdown_and_naked_urls_without_duplicates() {
+        let value = "[The Collaboration Tax](https://arxiv.org/abs/2608.22152) and https://arxiv.org/abs/2608.22152。";
+        assert_eq!(source_urls(value), vec!["https://arxiv.org/abs/2608.22152"]);
+    }
+
+    #[test]
+    fn extracted_sources_unwrap_google_redirects() {
+        let value =
+            "https://www.google.com/url?q=https%3A%2F%2Farxiv.org%2Fabs%2F2608.22152&source=gmail";
+        assert_eq!(source_urls(value), vec!["https://arxiv.org/abs/2608.22152"]);
     }
 }

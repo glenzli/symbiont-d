@@ -25,6 +25,7 @@ use crate::{
     profile::{ProfileStore, SetupStatus},
     sensing::{InputRoleSnapshot, SensingSource},
     signals::{SignalEvent, SignalPublishOutcome, SignalStore},
+    source_identity::stable_source_identities,
     usage::{InvocationRecord, UsageStore},
 };
 
@@ -181,12 +182,29 @@ impl AttackerStore {
             .iter()
             .map(String::as_str)
             .collect::<HashSet<_>>();
+        let mut seen_source_identities = signals
+            .iter()
+            .filter(|signal| reviewed.contains(signal.id.as_str()))
+            .flat_map(|signal| {
+                stable_source_identities(signal.sources.iter().map(|source| source.url.as_str()))
+            })
+            .collect::<HashSet<_>>();
         let mut review = Vec::new();
         let mut skipped = Vec::new();
         for signal in signals
             .iter()
             .filter(|signal| !reviewed.contains(signal.id.as_str()))
         {
+            let source_identities =
+                stable_source_identities(signal.sources.iter().map(|source| source.url.as_str()));
+            if source_identities
+                .iter()
+                .any(|identity| seen_source_identities.contains(identity))
+            {
+                skipped.push(signal.clone());
+                continue;
+            }
+            seen_source_identities.extend(source_identities);
             if is_near_current_conversation(signal, conversation) {
                 if review.len() < MAX_BATCH_SIZE {
                     review.push(signal.clone());
@@ -660,6 +678,66 @@ mod tests {
         assert!(store.initialize_existing(&inputs).await.unwrap());
         assert!(store.pending(&inputs, &[]).await.review.is_empty());
         assert!(!store.initialize_existing(&inputs).await.unwrap());
+        let _ = tokio::fs::remove_file(path).await;
+    }
+
+    #[tokio::test]
+    async fn repeated_source_is_skipped_after_its_original_was_reviewed() {
+        let nonce = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let path = std::env::temp_dir().join(format!("symbiont-attacker-source-{nonce}.json"));
+        let store = AttackerStore::open(path.clone()).await.unwrap();
+        let signal = |id: &str, title: &str, url: &str| SignalEvent {
+            id: id.to_owned(),
+            kind: crate::signals::SignalKind::ExternalInput,
+            candidate_id: format!("candidate_{id}"),
+            fingerprint: format!("v2|{id}"),
+            actor: InputRoleSnapshot::ambient("luna", "Luna", "gpt-test", "codex"),
+            content: title.to_owned(),
+            received_text: title.to_owned(),
+            presentation: crate::sensing::SensingPresentation::Original,
+            qualification_note: None,
+            title: title.to_owned(),
+            summary: title.to_owned(),
+            sources: vec![SensingSource {
+                url: url.to_owned(),
+                detail: "paper".to_owned(),
+            }],
+            source_class: crate::sensing::SensingSourceClass::Research,
+            event_at: None,
+            observed_at: timestamp(Utc::now()),
+            review_reason: "credible".to_owned(),
+            related_signal_ids: vec![],
+            promoted_revision_id: None,
+            briefing_topic: None,
+            briefing_topic_status: crate::signals::BriefingTopicStatus::Unclassified,
+            briefing_topic_reviewed: false,
+            hidden: false,
+            dismissed: false,
+        };
+        let original = signal(
+            "signal_original",
+            "The Collaboration Tax",
+            "https://arxiv.org/abs/2608.22152",
+        );
+        let repeated = signal(
+            "signal_repeated",
+            "Coordination overhead revisited",
+            "https://arxiv.org/pdf/2608.22152.pdf",
+        );
+
+        assert!(
+            store
+                .initialize_existing(std::slice::from_ref(&original))
+                .await
+                .unwrap()
+        );
+        let pending = store.pending(&[original, repeated.clone()], &[]).await;
+        assert!(pending.review.is_empty());
+        assert_eq!(pending.skipped.len(), 1);
+        assert_eq!(pending.skipped[0].id, repeated.id);
         let _ = tokio::fs::remove_file(path).await;
     }
 }

@@ -23,8 +23,8 @@ use tokio::{sync::watch, time, time::Instant};
 use crate::{
     ambient_api::LunaOutputLanguage,
     infer_runtime::{InferRuntimeAccess, sdk_error_summary},
-    sensing::SensingCandidate,
-    signals::{BriefingTopicAssignment, SignalDeduplicationReference, SignalEvent},
+    sensing::{SensingCandidate, SensingDeduplicationReference},
+    signals::{BriefingTopicAssignment, SignalEvent},
     usage::InvocationRecord,
 };
 
@@ -218,7 +218,7 @@ impl InferenceExecutor {
     pub(crate) async fn classify_sensing_duplicates(
         &self,
         candidates: &[SensingCandidate],
-        recent_signals: &[SignalDeduplicationReference],
+        recent_signals: &[SensingDeduplicationReference],
         input_events: watch::Receiver<u64>,
     ) -> InferenceAttempt<Vec<String>> {
         let interrupted = input_events.has_changed().unwrap_or(true);

@@ -37,6 +37,7 @@ use crate::{
     conversation::ConversationCoordinator,
     curiosity::CuriosityStore,
     drive_input::DriveInputStore,
+    external_markdown::source_urls,
     inference::{InferenceAttempt, InferenceExecutor, hard_deduplicate},
     luna_input::LunaInput,
     mail_input::MailInputStore,
@@ -44,7 +45,10 @@ use crate::{
     outreach::all_budgets_exhausted,
     profile::{ProfileStore, SetupStatus},
     reflection::ReflectionStore,
-    sensing::{SensingCandidate, SensingIntakeBrief, SensingStore, format_candidate_pool},
+    sensing::{
+        SensingCandidate, SensingDeduplicationReference, SensingIntakeBrief, SensingStore,
+        format_candidate_pool,
+    },
     signals::{SignalPublishOutcome, SignalStore},
     symbiont_context::SymbiontContextStore,
     usage::{UsageHeadline, UsageStore},
@@ -63,6 +67,10 @@ const EXPLORATION_MESSAGE_EXCERPT_CHARS: usize = 700;
 const EXPLORATION_EDGE_EXCERPT_CHARS: usize = 900;
 const SENSING_CHAT_TAIL: usize = 2;
 const SENSING_MESSAGE_EXCERPT_CHARS: usize = 320;
+const SENSING_SOURCE_CHAT_TAIL: usize = 64;
+const MAX_SENSING_DEDUPLICATION_REFERENCES: usize = 32;
+const MAX_SENSING_LEDGER_REFERENCES: usize = 12;
+const SENSING_REFERENCE_EXCERPT_CHARS: usize = 480;
 const RETRY_DELAY: Duration = Duration::from_secs(2);
 static MANUAL_RUN_SEQUENCE: AtomicU64 = AtomicU64::new(1);
 
@@ -875,6 +883,9 @@ async fn run_once(
     let compute = compute.snapshot().await;
     let profile = profile.snapshot().await;
     let recent_messages = continuity.recent_messages(EXPLORATION_CHAT_TAIL).await?;
+    let source_history = continuity.recent_messages(SENSING_SOURCE_CHAT_TAIL).await?;
+    let deduplication_references =
+        sensing_deduplication_references(signals.deduplication_references().await, &source_history);
     let (runtime_tx, mut runtime_rx) = mpsc::channel(64);
     let activity_state = Arc::clone(&state);
     let activity_task = tokio::spawn(async move {
@@ -940,7 +951,7 @@ async fn run_once(
                     return Err(error);
                 }
             };
-            ambient_sensing_context(&recent_messages, &intake_brief)
+            ambient_sensing_context(&recent_messages, &intake_brief, &deduplication_references)
         } else {
             String::new()
         };
@@ -1197,7 +1208,6 @@ async fn run_once(
         }
 
         if !reviewed_candidates.is_empty() {
-            let deduplication_references = signals.deduplication_references().await;
             let hard_deduplication =
                 hard_deduplicate(&reviewed_candidates, &deduplication_references);
             let mut duplicate_candidate_ids = hard_deduplication.duplicate_candidate_ids;
@@ -1874,7 +1884,61 @@ fn exploration_working_context(
     truncated
 }
 
-fn ambient_sensing_context(messages: &[MemoryEntry], brief: &SensingIntakeBrief) -> String {
+fn sensing_deduplication_references(
+    mut references: Vec<SensingDeduplicationReference>,
+    messages: &[MemoryEntry],
+) -> Vec<SensingDeduplicationReference> {
+    references.extend(
+        messages
+            .iter()
+            .enumerate()
+            .filter(|(_, entry)| matches!(entry.role, MemoryRole::User | MemoryRole::Assistant))
+            .filter_map(|(index, entry)| {
+                let source_urls = source_urls(&entry.content);
+                (!source_urls.is_empty()).then(|| SensingDeduplicationReference {
+                    reference_id: entry
+                        .revision_id
+                        .clone()
+                        .unwrap_or_else(|| format!("conversation:{}:{index}", entry.at)),
+                    fingerprint: String::new(),
+                    actor_name: match entry.role {
+                        MemoryRole::User => "user",
+                        MemoryRole::Assistant => "symbiont-d",
+                        MemoryRole::Memory => "memory",
+                    }
+                    .to_owned(),
+                    title: bounded_message_excerpt(
+                        entry
+                            .content
+                            .lines()
+                            .find(|line| !line.trim().is_empty())
+                            .unwrap_or("Conversation source"),
+                        180,
+                    ),
+                    excerpt: bounded_message_excerpt(
+                        &entry.content,
+                        SENSING_REFERENCE_EXCERPT_CHARS,
+                    ),
+                    source_urls,
+                    event_at: None,
+                    observed_at: entry.at.clone(),
+                })
+            }),
+    );
+    references.sort_by(|left, right| {
+        let left = DateTime::parse_from_rfc3339(&left.observed_at).ok();
+        let right = DateTime::parse_from_rfc3339(&right.observed_at).ok();
+        right.cmp(&left)
+    });
+    references.truncate(MAX_SENSING_DEDUPLICATION_REFERENCES);
+    references
+}
+
+fn ambient_sensing_context(
+    messages: &[MemoryEntry],
+    brief: &SensingIntakeBrief,
+    recent_sources: &[SensingDeduplicationReference],
+) -> String {
     let mut lines = vec![
         "<ambient-sensing-context>".to_owned(),
         format!(
@@ -1882,9 +1946,26 @@ fn ambient_sensing_context(messages: &[MemoryEntry], brief: &SensingIntakeBrief)
             brief.id, brief.label, brief.brief
         ),
         "<open-discovery>Also allow one credible signal outside this channel when it has factual novelty, changed interpretation, accumulated real-world evidence, or current discussion value. It may be recent rather than same-day and need not be unknown to the user. Breadth emerges across rotated passes; do not turn one pass into a generic news roundup.</open-discovery>".to_owned(),
+        "The recent source ledger records sources already delivered or explicitly discussed. Do not submit the same underlying source again under new prose. A genuinely new revision, result, evidence source, or accumulated reaction may be submitted only when the cited URL makes that change explicit.".to_owned(),
+        "<recent-source-ledger role=\"negative-delivery-evidence\">".to_owned(),
+    ];
+    for reference in recent_sources.iter().take(MAX_SENSING_LEDGER_REFERENCES) {
+        lines.push(format!(
+            "<source>{}</source>",
+            reference
+                .source_urls
+                .iter()
+                .take(3)
+                .cloned()
+                .collect::<Vec<_>>()
+                .join(" | ")
+        ));
+    }
+    lines.extend([
+        "</recent-source-ledger>".to_owned(),
         "The recent user edge below is an optional downstream ranking hint only. It must not gate intake, define the search domain, or be turned into memory or durable interests.".to_owned(),
         "<recent-user-edge role=\"ranking-hint\">".to_owned(),
-    ];
+    ]);
     for entry in messages
         .iter()
         .rev()
@@ -2218,8 +2299,9 @@ mod tests {
         ManualExplorationStatus, ManualExplorationStore, advance_attempt_watermark,
         ambient_sensing_context, bounded_message_excerpt, conversation_edge, evaluate_gate,
         exploration_working_context, observation_is_current, quiet_end, refresh_manual_projection,
-        set_error, settle_sensing_only, should_advance_attempt_watermark,
-        should_settle_after_sensing_review, today_started_at, trigger_runs_intake,
+        sensing_deduplication_references, set_error, settle_sensing_only,
+        should_advance_attempt_watermark, should_settle_after_sensing_review, today_started_at,
+        trigger_runs_intake,
     };
     use crate::{
         autonomy::{AutonomyConfig, QuietHours},
@@ -2615,7 +2697,8 @@ mod tests {
             brief: "Scan concrete cultural developments without requiring a project connection.",
         };
 
-        let context = ambient_sensing_context(&messages, &brief);
+        let references = sensing_deduplication_references(Vec::new(), &messages);
+        let context = ambient_sensing_context(&messages, &brief, &references);
 
         assert!(context.contains("intake-channel id=\"culture_and_ideas\""));
         assert!(context.contains("must not gate intake"));
@@ -2623,6 +2706,33 @@ mod tests {
         assert!(context.contains("recent user hint two"));
         assert!(!context.contains("old user topic"));
         assert!(!context.contains("assistant framing"));
+    }
+
+    #[test]
+    fn ambient_sensing_treats_discussed_sources_as_negative_delivery_evidence() {
+        let messages = vec![message(
+            MemoryRole::User,
+            "2026-08-01T00:03:00Z",
+            "We already discussed [The Collaboration Tax](https://arxiv.org/abs/2608.22152).",
+            None,
+        )];
+        let brief = SensingIntakeBrief {
+            id: "research",
+            label: "Research and methods",
+            brief: "Scan recent research.",
+        };
+
+        let references = sensing_deduplication_references(Vec::new(), &messages);
+        let context = ambient_sensing_context(&messages, &brief, &references);
+
+        assert_eq!(references.len(), 1);
+        assert_eq!(
+            references[0].source_urls,
+            vec!["https://arxiv.org/abs/2608.22152"]
+        );
+        assert!(context.contains("negative-delivery-evidence"));
+        assert!(context.contains("https://arxiv.org/abs/2608.22152"));
+        assert!(context.contains("Do not submit the same underlying source again"));
     }
 
     #[test]

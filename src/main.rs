@@ -44,6 +44,7 @@ mod secrets;
 mod sensing;
 mod signal_retention;
 mod signals;
+mod source_identity;
 mod startup;
 mod symbiont_context;
 mod symbiont_state;

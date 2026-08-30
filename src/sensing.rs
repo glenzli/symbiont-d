@@ -212,6 +212,24 @@ pub struct SensingCandidate {
     pub(crate) fingerprint: String,
 }
 
+/// Bounded comparison material from a prior signal or conversation turn.
+///
+/// The sensing pipeline owns this generic shape so transcript history and the
+/// transient signal store can contribute equivalent redelivery evidence
+/// without depending on one another's persistence types.
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SensingDeduplicationReference {
+    pub reference_id: String,
+    pub fingerprint: String,
+    pub actor_name: String,
+    pub title: String,
+    pub excerpt: String,
+    pub source_urls: Vec<String>,
+    pub event_at: Option<String>,
+    pub observed_at: String,
+}
+
 #[derive(Default, Deserialize, Serialize)]
 struct CandidatePool {
     candidates: Vec<SensingCandidate>,

@@ -7,12 +7,11 @@
 use std::collections::HashSet;
 
 use anyhow::{Context, Result};
-use reqwest::Url;
 use serde::{Deserialize, Serialize};
 
 use crate::{
-    external_markdown::canonical_source_url, sensing::SensingCandidate,
-    signals::SignalDeduplicationReference,
+    sensing::{SensingCandidate, SensingDeduplicationReference},
+    source_identity::canonical_delivery_identity,
 };
 
 const MAX_RECENT_COMPARISONS: usize = 12;
@@ -61,7 +60,7 @@ struct RecentRecord<'a> {
 /// representative; recent delivered signals always win over a new candidate.
 pub(crate) fn hard_deduplicate(
     candidates: &[SensingCandidate],
-    recent_signals: &[SignalDeduplicationReference],
+    recent_signals: &[SensingDeduplicationReference],
 ) -> HardDeduplication {
     let mut seen = recent_signals
         .iter()
@@ -83,7 +82,7 @@ pub(crate) fn hard_deduplicate(
 
 pub(super) fn runtime_prompt(
     candidates: &[SensingCandidate],
-    recent_signals: &[SignalDeduplicationReference],
+    recent_signals: &[SensingDeduplicationReference],
 ) -> Result<String> {
     let candidates = candidates
         .iter()
@@ -140,7 +139,7 @@ field `duplicates`, an array of objects containing `candidate`, `same_as`, and a
 /// rather than invalidating the whole classifier output.
 pub(super) fn validated_duplicate_ids(
     candidates: &[SensingCandidate],
-    recent_signals: &[SignalDeduplicationReference],
+    recent_signals: &[SensingDeduplicationReference],
     decisions: Vec<SensingDuplicateDecision>,
 ) -> Vec<String> {
     let recent_count = bounded_recent(recent_signals).len();
@@ -190,13 +189,13 @@ fn candidate_identity_keys(candidate: &SensingCandidate) -> Vec<String> {
         candidate
             .sources
             .iter()
-            .filter_map(|source| canonical_source_identity(&source.url))
+            .filter_map(|source| canonical_delivery_identity(&source.url))
             .map(|url| format!("source:{url}")),
     );
     keys
 }
 
-fn reference_identity_keys(reference: &SignalDeduplicationReference) -> Vec<String> {
+fn reference_identity_keys(reference: &SensingDeduplicationReference) -> Vec<String> {
     let mut keys = Vec::new();
     if reference.fingerprint.starts_with("v2|") {
         keys.push(format!("fingerprint:{}", reference.fingerprint));
@@ -205,73 +204,15 @@ fn reference_identity_keys(reference: &SignalDeduplicationReference) -> Vec<Stri
         reference
             .source_urls
             .iter()
-            .filter_map(|url| canonical_source_identity(url))
+            .filter_map(|url| canonical_delivery_identity(url))
             .map(|url| format!("source:{url}")),
     );
     keys
 }
 
-fn canonical_source_identity(value: &str) -> Option<String> {
-    let canonical = canonical_source_url(value)?;
-    let mut url = Url::parse(&canonical).ok()?;
-    url.set_fragment(None);
-    let retained_query = url
-        .query_pairs()
-        .filter(|(key, _)| !is_tracking_parameter(key))
-        .map(|(key, value)| (key.into_owned(), value.into_owned()))
-        .collect::<Vec<_>>();
-    url.set_query(None);
-    if !retained_query.is_empty() {
-        url.query_pairs_mut().extend_pairs(retained_query);
-    }
-    let host = url.host_str()?.to_ascii_lowercase();
-    let path = url.path().trim_end_matches('/').to_ascii_lowercase();
-    if host == "doi.org" && path.len() > 1 {
-        return Some(format!("doi:{path}"));
-    }
-    if matches!(host.as_str(), "arxiv.org" | "www.arxiv.org") {
-        let identifier = path
-            .strip_prefix("/abs/")
-            .or_else(|| path.strip_prefix("/pdf/"))?
-            .trim_end_matches(".pdf");
-        if has_arxiv_version(identifier) {
-            return Some(format!("arxiv:{identifier}"));
-        }
-        return None;
-    }
-    if host == "github.com" {
-        let segments = path
-            .split('/')
-            .filter(|segment| !segment.is_empty())
-            .collect::<Vec<_>>();
-        let exact_release =
-            segments.len() >= 5 && segments[2] == "releases" && segments[3] == "tag";
-        let exact_commit = segments.len() >= 4 && segments[2] == "commit";
-        if exact_release || exact_commit {
-            return Some(format!("github:{}", segments.join("/")));
-        }
-    }
-    None
-}
-
-fn has_arxiv_version(identifier: &str) -> bool {
-    identifier
-        .rsplit_once('v')
-        .is_some_and(|(base, version)| !base.is_empty() && version.parse::<u32>().is_ok())
-}
-
-fn is_tracking_parameter(key: &str) -> bool {
-    let key = key.to_ascii_lowercase();
-    key.starts_with("utm_")
-        || matches!(
-            key.as_str(),
-            "fbclid" | "gclid" | "ref" | "ref_src" | "source" | "sa" | "ust" | "ved"
-        )
-}
-
 fn bounded_recent(
-    recent_signals: &[SignalDeduplicationReference],
-) -> &[SignalDeduplicationReference] {
+    recent_signals: &[SensingDeduplicationReference],
+) -> &[SensingDeduplicationReference] {
     &recent_signals[..recent_signals.len().min(MAX_RECENT_COMPARISONS)]
 }
 
@@ -317,9 +258,9 @@ mod tests {
         }
     }
 
-    fn recent(id: &str, url: &str) -> SignalDeduplicationReference {
-        SignalDeduplicationReference {
-            signal_id: id.to_owned(),
+    fn recent(id: &str, url: &str) -> SensingDeduplicationReference {
+        SensingDeduplicationReference {
+            reference_id: id.to_owned(),
             fingerprint: String::new(),
             actor_name: "Luna".to_owned(),
             title: "Earlier delivery".to_owned(),
@@ -343,6 +284,35 @@ mod tests {
         );
         assert!(result.survivors.is_empty());
         assert_eq!(result.duplicate_candidate_ids, vec!["new"]);
+    }
+
+    #[test]
+    fn hard_deduplication_blocks_repeated_unversioned_arxiv_papers() {
+        let candidates = vec![candidate(
+            "new",
+            "The Collaboration Tax, paraphrased again",
+            "https://arxiv.org/abs/2608.22152",
+        )];
+        let result = hard_deduplicate(
+            &candidates,
+            &[recent("conversation", "https://arxiv.org/abs/2608.22152")],
+        );
+        assert!(result.survivors.is_empty());
+        assert_eq!(result.duplicate_candidate_ids, vec!["new"]);
+    }
+
+    #[test]
+    fn hard_deduplication_preserves_explicit_new_arxiv_revisions() {
+        let candidates = vec![candidate(
+            "new",
+            "Revised paper",
+            "https://arxiv.org/abs/2608.22152v2",
+        )];
+        let result = hard_deduplicate(
+            &candidates,
+            &[recent("old", "https://arxiv.org/abs/2608.22152v1")],
+        );
+        assert_eq!(result.survivors.len(), 1);
     }
 
     #[test]
