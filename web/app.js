@@ -115,6 +115,7 @@ let responseDelayTimer = null;
 let stoppingResponse = false;
 let selectedSignalId = null;
 let topicUi = null;
+let modelCouncilUi = null;
 const manualExplorationReceiptIds = new Set();
 const displayedSignalIds = new Set();
 const inputSignalRelations = initInputSignalRelations(conversation);
@@ -148,7 +149,6 @@ const settingsUi = initSettings(appState, {
   saveInputRoles: inputRoleUi.save,
   refreshInputRoles: inputRoleUi.refresh,
 });
-const modelCouncilUi = initModelCouncilUi({ state: appState, notify: notifyComposer });
 const permissionUi = initPermissionUi(appState);
 const composerContextUi = initComposerContextUi({
   state: appState,
@@ -231,6 +231,15 @@ topicUi = initTopicUi({
     input.focus();
     resizeComposer();
   },
+  onScopeChange() {
+    modelCouncilUi?.scopeChanged();
+  },
+});
+modelCouncilUi = initModelCouncilUi({
+  state: appState,
+  notify: notifyComposer,
+  input,
+  getTopic: () => topicUi.consume(),
 });
 const computeModeUi = initComputeModeUi();
 const voiceInput = initVoiceInput({
@@ -1106,6 +1115,8 @@ async function consumeStream(response, pending, outgoing) {
         pending.classList.remove("response-placeholder");
         renderPending();
         conversation.scrollTop = conversation.scrollHeight;
+      } else if (event.type === "councilState") {
+        modelCouncilUi.applyActivation(event.activation);
       } else if (event.type === "reset") {
         receivedText = "";
         councilContributions = [];
@@ -1213,6 +1224,7 @@ async function sendMessage(
       turnDispositionUi.apply(result.settled, { announce: true });
     }
   } catch (error) {
+    void modelCouncilUi.refreshActivation();
     pending.remove();
     topicUi?.cancelResponse();
     const failedOutgoing = [...activeOutgoing];
@@ -1243,6 +1255,7 @@ async function sendMessage(
         extractTopic(first),
         codexTaskIds,
         signalId,
+        councilParticipantIds,
       );
     });
   } finally {
@@ -1374,6 +1387,7 @@ async function appendToActiveResponse(
       }
     }, 1200);
   } catch (error) {
+    void modelCouncilUi.refreshActivation();
     messageActions.update(outgoing, null, {
       deliveryState: "failed",
       failureReason: error.message,
@@ -1654,11 +1668,13 @@ composer.addEventListener("submit", (event) => {
   const images = selectedImages;
   const quotes = quoteUi.drafts();
   const minimumLane = computeMode.value;
+  const topic = topicUi.consume();
+  const councilParticipantIds = modelCouncilUi.prepare(text);
+  if (councilParticipantIds === null) return;
   const codexTaskIds = composerContextUi.consume();
   if (codexTaskIds === null) return;
   if (!text && !images.length && !quotes.length && !codexTaskIds.length) return;
-  const topic = topicUi.consume();
-  const councilParticipantIds = modelCouncilUi.consume();
+  modelCouncilUi.commit(councilParticipantIds);
   input.value = "";
   selectedImages = [];
   quoteUi.clear();

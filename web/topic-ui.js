@@ -11,7 +11,13 @@ import {
   topicChatMessageKey,
 } from "/topic-chat.js";
 
-export function initTopicUi({ conversation, focusComposer, applyAvatar, renderMessage }) {
+export function initTopicUi({
+  conversation,
+  focusComposer,
+  applyAvatar,
+  renderMessage,
+  onScopeChange,
+}) {
   const openButton = document.querySelector("#open-topics");
   const dialog = document.querySelector("#topic-dialog");
   const status = document.querySelector("#topic-dialog-status");
@@ -213,6 +219,7 @@ export function initTopicUi({ conversation, focusComposer, applyAvatar, renderMe
   async function set(topic) {
     if (!topic?.id || !topic?.title) return;
     pendingTopic = { id: topic.id, title: topic.title };
+    onScopeChange?.(pendingTopic);
     trayTitle.textContent = topic.title;
     tray.hidden = false;
     conversation.hidden = true;
@@ -257,6 +264,7 @@ export function initTopicUi({ conversation, focusComposer, applyAvatar, renderMe
     chatStatus.textContent = "";
     chatShell.hidden = true;
     conversation.hidden = false;
+    onScopeChange?.(null);
   }
 
   function consume() {

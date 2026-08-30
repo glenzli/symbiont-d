@@ -141,18 +141,27 @@ export function renderMessageContent(target, entry, options = {}) {
 function renderModelCouncil(council, options) {
   const discussion = document.createElement("details");
   discussion.className = "message-model-council";
-  discussion.open = options.streaming === true;
+  discussion.open =
+    options.streaming === true ||
+    council.contributions.some((contribution) => contribution.directlyMentioned === true);
   const summary = document.createElement("summary");
   const title = document.createElement("strong");
-  title.textContent = "模型讨论";
+  title.textContent = "参与模型";
   const count = document.createElement("small");
-  count.textContent = `${council.contributions.length} 个独立视角`;
+  const responses = council.contributions.filter(
+    (contribution) => contribution.action !== "silent" && contribution.content,
+  ).length;
+  const silent = council.contributions.length - responses;
+  count.textContent = [responses ? `${responses} 个回应` : "", silent ? `${silent} 个静默或离场` : ""]
+    .filter(Boolean)
+    .join(" · ");
   summary.append(title, count);
   const body = document.createElement("div");
   body.className = "message-model-council-body";
   for (const contribution of council.contributions) {
     const article = document.createElement("article");
     article.className = `model-contribution ${contribution.status || "completed"}`;
+    article.classList.toggle("directly-mentioned", contribution.directlyMentioned === true);
     const header = document.createElement("header");
     const avatar = document.createElement("span");
     avatar.className = "model-contribution-avatar";
@@ -165,7 +174,7 @@ function renderModelCouncil(council, options) {
     identity.append(name, role);
     const state = document.createElement("small");
     state.className = "model-contribution-state";
-    state.textContent = contribution.status === "failed" ? "失败" : contribution.status === "interrupted" ? "已停止" : "完成";
+    state.textContent = contributionState(contribution);
     header.append(avatar, identity, state);
     article.append(header);
     if (contribution.content) {
@@ -179,10 +188,26 @@ function renderModelCouncil(council, options) {
       error.textContent = contribution.error;
       article.append(error);
     }
+    if (contribution.note) {
+      const note = document.createElement("p");
+      note.className = "model-contribution-note";
+      note.textContent = contribution.note;
+      article.append(note);
+    }
     body.append(article);
   }
   discussion.append(summary, body);
   return discussion;
+}
+
+function contributionState(contribution) {
+  if (contribution.status === "failed") return "失败";
+  if (contribution.status === "interrupted") return "已停止";
+  if (contribution.status === "silent") return "本轮静默";
+  if (contribution.status === "left") {
+    return contribution.content ? "回应后离场" : "已离场";
+  }
+  return contribution.directlyMentioned ? "已回应 @" : "已回应";
 }
 
 function formatQuoteTime(value) {

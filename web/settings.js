@@ -1079,7 +1079,7 @@ export function initSettings(state, actions = {}) {
   modelParticipantList.addEventListener("input", (event) => {
     const row = event.target.closest("[data-model-participant]");
     if (row && event.target.matches('[data-participant-field="name"]')) {
-      row.querySelector(".model-participant-title").textContent = event.target.value || "潜水模型";
+      row.querySelector(".model-participant-title").textContent = event.target.value || "参与模型";
     }
   });
   addAmbientProvider.addEventListener("click", () =>

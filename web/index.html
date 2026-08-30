@@ -228,6 +228,12 @@
         <div id="attachment-tray" class="attachment-tray" hidden></div>
         <div id="codex-context-tray" class="codex-context-tray" hidden></div>
         <div id="quote-tray" class="quote-tray" aria-label="待发送引用" hidden></div>
+        <div
+          id="model-council-active"
+          class="model-council-active"
+          aria-label="当前参与模型"
+          hidden
+        ></div>
         <div id="topic-target-tray" class="topic-target-tray" hidden>
           <button id="open-selected-topic" type="button" title="查看当前主题">
             <small>主题聊天</small>
@@ -250,6 +256,13 @@
             placeholder="说点什么…"
             autocomplete="off"
           ></textarea>
+          <div
+            id="model-mention-menu"
+            class="model-mention-menu"
+            role="listbox"
+            aria-label="选择要加入的模型"
+            hidden
+          ></div>
           <div class="composer-footer">
             <div class="composer-input-tools">
               <button
@@ -311,16 +324,16 @@
                   id="model-council-toggle"
                   class="composer-tool-button model-council-toggle"
                   type="button"
-                  title="召集模型讨论"
-                  aria-label="召集模型讨论"
+                  title="让模型加入当前主题"
+                  aria-label="让模型加入当前主题"
                   aria-expanded="false"
                   aria-controls="model-council-menu"
-                  data-tooltip="模型讨论"
+                  data-tooltip="参与模型"
                 ><span aria-hidden="true">◌</span><small id="model-council-count" hidden></small></button>
                 <div id="model-council-menu" class="model-council-menu" hidden>
-                  <header><strong>召集模型讨论</strong><small>仅本轮唤起，最多 3 个</small></header>
+                  <header><strong>参与模型</strong><small>由人的消息唤醒，最多 3 个</small></header>
                   <div id="model-council-options" class="model-council-options"></div>
-                  <p id="model-council-status" role="status">默认潜水，不产生调用。</p>
+                  <p id="model-council-status" role="status">输入 @模型ID，或在这里选择模型。</p>
                 </div>
               </div>
             </div>
@@ -505,10 +518,15 @@
       </footer>
     </dialog>
 
-    <dialog id="settings-dialog" class="panel-dialog">
+    <dialog
+      id="settings-dialog"
+      class="panel-dialog"
+      aria-labelledby="settings-title"
+      aria-describedby="settings-context"
+    >
       <header class="dialog-header">
         <div>
-          <h2>设置</h2>
+          <h2 id="settings-title">设置</h2>
           <p id="settings-context">本地运行边界</p>
         </div>
         <button class="icon-button" data-close="settings-dialog" type="button" aria-label="关闭">×</button>
@@ -879,11 +897,11 @@
 
       </section>
 
-      <section class="tab-panel" data-settings-panel="models" hidden>
+      <section class="tab-panel models-settings-panel" data-settings-panel="models" hidden>
         <form id="compute-form">
           <header class="settings-panel-intro">
             <h3>模型与路由</h3>
-            <p>为对话、对话整理与主动探索配置计算层级和话题规则。</p>
+            <p>为对话、整理与主动探索配置计算级别和话题规则。</p>
           </header>
           <label class="field routing-field">
             <span>路由方式</span>
@@ -920,7 +938,7 @@
             <header>
               <div>
                 <strong>话题计算规则</strong>
-                <small>明确命中时直接使用最低计算级别</small>
+                <small>命中后使用指定的最低计算级别</small>
               </div>
               <button
                 id="add-compute-policy"
@@ -936,12 +954,12 @@
           <section class="model-council-settings">
             <header>
               <div>
-                <strong>潜水模型</strong>
-                <small>只有在输入框中明确点选后参与一次讨论；主 Symbiont 仍负责工具与记忆写入</small>
+                <strong>参与模型</strong>
+                <small>使用 @ID 让模型暂时加入当前主题；主 Symbiont 继续负责工具调用和记忆写入。</small>
               </div>
-              <button id="add-model-participant" class="icon-button" type="button" aria-label="添加潜水模型">＋</button>
+              <button id="add-model-participant" class="icon-button" type="button" aria-label="添加参与模型">＋</button>
             </header>
-            <p class="settings-note">OpenAI 兼容参与者复用“外部来源”中的 Provider 连接和密钥；Infer Runtime 的模型字段填写公开 intent，可选点名 Deployment 或 Model Profile。</p>
+            <p class="settings-note">OpenAI 兼容模型复用“探索通道”中的 Provider。Infer Runtime 填写公开 intent；需要时可点名 Deployment 或 Model Profile。</p>
             <div id="model-participant-list" class="model-participant-list"></div>
           </section>
 
@@ -1300,7 +1318,7 @@
     <template id="compute-policy-template">
       <div class="compute-policy-row">
         <input data-policy-field="id" type="hidden">
-        <label class="field">
+        <label class="field compute-policy-topic">
           <span>话题</span>
           <input data-policy-field="topic" type="text" maxlength="120" placeholder="例如 OET">
         </label>
@@ -1313,7 +1331,7 @@
             placeholder="OET, 算子演化理论"
           >
         </label>
-        <label class="field">
+        <label class="field compute-policy-minimum">
           <span>最低级别</span>
           <select data-policy-field="minimumLane">
             <option value="investigate">深入</option>
@@ -1362,7 +1380,7 @@
 
     <template id="model-participant-template">
       <div class="model-participant-row" data-model-participant>
-        <div class="ambient-config-row-head"><strong class="model-participant-title">潜水模型</strong><button class="icon-button remove-model-participant" type="button" title="移除潜水模型">×</button></div>
+        <div class="ambient-config-row-head"><strong class="model-participant-title">参与模型</strong><button class="icon-button remove-model-participant" type="button" aria-label="移除参与模型" title="移除参与模型">×</button></div>
         <div class="field-grid">
           <label class="field"><span>ID</span><input data-participant-field="id" type="text" /></label>
           <label class="field"><span>显示名称</span><input data-participant-field="name" type="text" /></label>

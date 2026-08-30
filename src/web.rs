@@ -73,9 +73,9 @@ use crate::{
         MessageQuoteDraft, MessageRunMetadata,
     },
     model_council::{
-        MAX_SELECTED_PARTICIPANTS, ModelCouncilConfig, ModelCouncilContribution,
-        ModelCouncilDiscussion, ModelCouncilService, ModelCouncilSnapshot, ModelCouncilStore,
-        synthesis_packet,
+        CouncilScope, MAX_SELECTED_PARTICIPANTS, ModelCouncilActivationSnapshot,
+        ModelCouncilConfig, ModelCouncilContribution, ModelCouncilDiscussion, ModelCouncilService,
+        ModelCouncilSnapshot, ModelCouncilStore, synthesis_packet,
     },
     outreach::PROPOSE_OUTREACH_TOOL,
     pcp_index::{PcpIndex, PcpIndexSnapshot},
@@ -291,6 +291,19 @@ struct IncomingChatRequest {
     signal_id: Option<String>,
     minimum_lane: Option<crate::compute::ComputeLane>,
     council_participant_ids: Vec<String>,
+}
+
+#[derive(Default, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct ModelCouncilActivationQuery {
+    topic_id: Option<String>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct ModelCouncilDeactivationRequest {
+    participant_id: String,
+    topic_id: Option<String>,
 }
 
 #[derive(Default, Deserialize)]
@@ -587,6 +600,9 @@ enum WireEvent {
     CouncilContribution {
         contribution: ModelCouncilContribution,
     },
+    CouncilState {
+        activation: ModelCouncilActivationSnapshot,
+    },
     Reset,
     Interrupted,
     Settled {
@@ -740,6 +756,10 @@ pub fn router(state: AppState) -> Router {
         )
         .route("/api/compute", post(update_compute))
         .route("/api/model-council", post(update_model_council))
+        .route(
+            "/api/model-council/activation",
+            get(model_council_activation).delete(deactivate_model_council_activation),
+        )
         .route("/api/ambient", post(update_ambient))
         .route(
             "/api/input-roles",
@@ -1415,6 +1435,33 @@ async fn update_model_council(
         .await
         .map(Json)
         .map_err(ApiError::bad_request)
+}
+
+async fn model_council_activation(
+    State(state): State<AppState>,
+    Query(query): Query<ModelCouncilActivationQuery>,
+) -> Json<ModelCouncilActivationSnapshot> {
+    let scope = CouncilScope::from_topic(query.topic_id.as_deref());
+    Json(state.model_council.activation_snapshot(&scope).await)
+}
+
+async fn deactivate_model_council_activation(
+    State(state): State<AppState>,
+    Json(request): Json<ModelCouncilDeactivationRequest>,
+) -> Result<Json<ModelCouncilActivationSnapshot>, ApiError> {
+    let participant_id = request.participant_id.trim();
+    if participant_id.is_empty()
+        || participant_id.len() > 64
+        || !participant_id
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_'))
+    {
+        return Err(ApiError::bad_request("Invalid model participant."));
+    }
+    let scope = CouncilScope::from_topic(request.topic_id.as_deref());
+    Ok(Json(
+        state.model_council.deactivate(&scope, participant_id).await,
+    ))
 }
 
 async fn update_ambient(
@@ -2916,6 +2963,23 @@ async fn prepare_chat_request(
 ) -> Result<ChatRequest, ApiError> {
     let (message, directive_lane) = parse_leading_compute_directive(&incoming.message);
     let minimum_lane = incoming.minimum_lane.max(directive_lane);
+    let mut council_participant_ids = incoming.council_participant_ids;
+    for participant_id in state.model_council_store.mentioned_ids(&message).await {
+        if !council_participant_ids.contains(&participant_id) {
+            council_participant_ids.push(participant_id);
+        }
+    }
+    if council_participant_ids.len() > MAX_SELECTED_PARTICIPANTS {
+        return Err(ApiError::bad_request(format!(
+            "A Topic can activate at most {MAX_SELECTED_PARTICIPANTS} peer models."
+        )));
+    }
+    let council_scope = CouncilScope::from_topic(incoming.topic_id.as_deref());
+    state
+        .model_council
+        .validate_activation_request(&council_scope, &council_participant_ids)
+        .await
+        .map_err(ApiError::bad_request)?;
     if message.is_empty()
         && incoming.images.is_empty()
         && incoming.quotes.is_empty()
@@ -3011,7 +3075,7 @@ async fn prepare_chat_request(
         external_contexts,
         signal_revision_id,
         minimum_lane,
-        council_participant_ids: incoming.council_participant_ids,
+        council_participant_ids,
     })
 }
 
@@ -3182,14 +3246,27 @@ async fn run_chat(
                 council_ids.push(id.clone());
             }
         }
+        let council_scope =
+            CouncilScope::from_topic(primary_topic.as_ref().map(|topic| topic.id.as_str()));
+        let activation_before = state
+            .model_council
+            .activation_snapshot(&council_scope)
+            .await;
+        let expected_council_size = activation_before
+            .participants
+            .iter()
+            .map(|participant| participant.participant_id.as_str())
+            .chain(council_ids.iter().map(String::as_str))
+            .collect::<HashSet<_>>()
+            .len();
         let mut council_invocations = Vec::new();
         let mut council_discussion = None;
-        if !council_ids.is_empty() {
+        if expected_council_size > 0 {
             let _ = runtime_tx
                 .send(RuntimeEvent::Activity {
-                    label: format!("正在召集 {} 个潜水模型", council_ids.len()),
+                    label: format!("正在唤醒 {expected_council_size} 个参与模型"),
                     model: "model-council".to_owned(),
-                    display_name: "多模型讨论".to_owned(),
+                    display_name: "多模型参与".to_owned(),
                     effort: "parallel".to_owned(),
                     lane: "conversation".to_owned(),
                 })
@@ -3197,9 +3274,20 @@ async fn run_chat(
             let context = council_context(&state, scoped_history.as_deref()).await?;
             let council = state
                 .model_council
-                .convene(&council_ids, &user_text, &context, input_events.clone())
+                .convene(
+                    &council_scope,
+                    &council_ids,
+                    &user_text,
+                    &context,
+                    input_events.clone(),
+                )
                 .await?;
             council_invocations = council.invocations;
+            let _ = wire_tx
+                .send(WireEvent::CouncilState {
+                    activation: council.activation,
+                })
+                .await;
             if council.interrupted || state.conversation.has_pending(lease).await? {
                 state.usage.record_all(&council_invocations).await?;
                 let _ = wire_tx.send(WireEvent::Reset).await;
@@ -3213,7 +3301,9 @@ async fn run_chat(
                     })
                     .await;
             }
-            council_discussion = Some(council.discussion);
+            if !council.discussion.contributions.is_empty() {
+                council_discussion = Some(council.discussion);
+            }
         }
         let chat_text = match council_discussion.as_ref() {
             Some(discussion) => format!("{}\n\n{}", user_text, synthesis_packet(discussion)),
@@ -3543,10 +3633,32 @@ async fn council_context(
         &messages
             .into_iter()
             .map(|message| {
+                let peer_model_replies = message
+                    .metadata
+                    .as_ref()
+                    .and_then(|metadata| metadata.model_council.as_ref())
+                    .map(|discussion| {
+                        discussion
+                            .contributions
+                            .iter()
+                            .filter_map(|contribution| {
+                                contribution.content.as_ref().map(|content| {
+                                    serde_json::json!({
+                                        "participantId": contribution.participant_id,
+                                        "name": contribution.name,
+                                        "role": contribution.role,
+                                        "content": content,
+                                    })
+                                })
+                            })
+                            .collect::<Vec<_>>()
+                    })
+                    .unwrap_or_default();
                 serde_json::json!({
                     "role": message.role,
                     "at": message.at,
                     "content": message.content,
+                    "peerModelReplies": peer_model_replies,
                 })
             })
             .collect::<Vec<_>>(),
