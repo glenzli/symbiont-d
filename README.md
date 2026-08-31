@@ -72,6 +72,20 @@ cargo run
 
 请先通过 PCP 自己的安装入口启动 Runtime 与 Console，再在 Console 中批准 symbiont-d 的 enrollment。
 
+开发期修复旧 PCP Page 时，先运行只读预览；确认 `data/pcp-history-repair.json` 后再运行 apply。预览默认使用日常（Terra）计算通道完成审阅，只把来源冲突或证据不足的候选升级到关键（Sol）通道。apply 会申请独立的 `service:symbiont-pcp-repair` enrollment，必须在 PCP Console 单独批准，并且只获得读取与保留历史的 repair 权限。两个命令都是一次性维护进程，不会启动第二个 Web 服务：
+
+```sh
+SYMBIONT_RUN_PCP_HISTORY_REPAIR=preview cargo run
+SYMBIONT_RUN_PCP_HISTORY_REPAIR=apply cargo run
+```
+
+若旧 Page 的直接用户来源以中文为主、当前内容却是英文，可使用独立的语言保真迁移。它只把现有 Page 语义恢复为自然中文，不重新总结或补写事实，并保留原有来源、facets 与 Revision 历史：
+
+```sh
+SYMBIONT_RUN_PCP_LANGUAGE_REPAIR=preview cargo run
+SYMBIONT_RUN_PCP_LANGUAGE_REPAIR=apply cargo run
+```
+
 ### 项目导航
 
 - [外部输入角色与生命周期](docs/signal-input-roles.md)
@@ -146,6 +160,20 @@ Open <http://127.0.0.1:4317>. To install it as a persistent local macOS service:
 ```
 
 Start Runtime and Console through PCP's own installation path, then approve the symbiont-d enrollment in Console.
+
+To repair older PCP Pages during development, run the read-only preview first and inspect `data/pcp-history-repair.json` before apply. Preview uses the conversation (Terra) compute lane by default and escalates only source-conflicted or genuinely ambiguous candidates to the critical (Sol) lane. Apply requests a separate `service:symbiont-pcp-repair` enrollment that must be approved independently in PCP Console and grants only read plus history-preserving repair. Both commands are one-shot maintenance processes and do not start a second web service:
+
+```sh
+SYMBIONT_RUN_PCP_HISTORY_REPAIR=preview cargo run
+SYMBIONT_RUN_PCP_HISTORY_REPAIR=apply cargo run
+```
+
+For older Pages whose direct user sources are predominantly Chinese but whose current content is English, use the separate language-fidelity migration. It translates the existing Page semantics into natural Chinese without resummarizing or adding facts, while preserving sources, facets, and Revision history:
+
+```sh
+SYMBIONT_RUN_PCP_LANGUAGE_REPAIR=preview cargo run
+SYMBIONT_RUN_PCP_LANGUAGE_REPAIR=apply cargo run
+```
 
 ### Project navigation
 

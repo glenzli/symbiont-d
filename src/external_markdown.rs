@@ -12,6 +12,7 @@ const MAX_SOURCE_URLS: usize = 8;
 
 pub(crate) fn normalize_external_markdown(value: &str) -> String {
     let value = unescape_systematically_escaped_markdown(value);
+    let value = repair_mixed_digest_escapes(&value);
     // Heal the one malformed wrapper produced by the earliest local migration
     // before normalized links became aware of angle-bracket autolinks.
     let value = value.replace("<[查看来源](<", "[查看来源](<");
@@ -31,6 +32,142 @@ pub(crate) fn normalize_external_markdown(value: &str) -> String {
         output.push(normalize_inline_urls(line));
     }
     output.join("\n")
+}
+
+/// Repairs the narrower mixed state produced when a digest generator escapes
+/// TeX and a few Markdown closers but leaves headings and list markers intact.
+///
+/// Do not collapse backslashes globally: `\\` is meaningful TeX. Restrict the
+/// repair to paired dollar-delimited expressions that contain clear duplicate
+/// escaping, plus the two malformed Markdown shapes observed at the digest
+/// boundary.
+fn repair_mixed_digest_escapes(value: &str) -> String {
+    let malformed_link_closer = value.contains(r"\]\]](");
+    let repaired_math = repair_dollar_delimited_math(value);
+    let repair_horizontal_rule = malformed_link_closer || repaired_math != value;
+    let value = repaired_math.replace(r"\]\]](", "]](");
+    let value = value
+        .lines()
+        .map(|line| {
+            if repair_horizontal_rule && line.trim() == r"\---" {
+                "---"
+            } else {
+                line
+            }
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+    value
+}
+
+fn repair_dollar_delimited_math(value: &str) -> String {
+    let bytes = value.as_bytes();
+    let mut output = String::with_capacity(value.len());
+    let mut cursor = 0;
+
+    while let Some(open) = find_unescaped_dollar(bytes, cursor) {
+        output.push_str(&value[cursor..open]);
+        let delimiter_width = if bytes.get(open + 1) == Some(&b'$') {
+            2
+        } else {
+            1
+        };
+        let expression_start = open + delimiter_width;
+        let Some(close) = find_matching_dollar(bytes, expression_start, delimiter_width) else {
+            output.push_str(&value[open..]);
+            return output;
+        };
+        output.push_str(&value[open..expression_start]);
+        output.push_str(&repair_math_expression(&value[expression_start..close]));
+        output.push_str(&value[close..close + delimiter_width]);
+        cursor = close + delimiter_width;
+    }
+
+    output.push_str(&value[cursor..]);
+    output
+}
+
+fn find_unescaped_dollar(bytes: &[u8], mut cursor: usize) -> Option<usize> {
+    while cursor < bytes.len() {
+        if bytes[cursor] == b'$' && !is_escaped(bytes, cursor) {
+            return Some(cursor);
+        }
+        cursor += 1;
+    }
+    None
+}
+
+fn find_matching_dollar(bytes: &[u8], mut cursor: usize, delimiter_width: usize) -> Option<usize> {
+    while cursor < bytes.len() {
+        if bytes[cursor] == b'$'
+            && !is_escaped(bytes, cursor)
+            && (delimiter_width == 1 && bytes.get(cursor + 1) != Some(&b'$')
+                || delimiter_width == 2 && bytes.get(cursor + 1) == Some(&b'$'))
+        {
+            return Some(cursor);
+        }
+        cursor += 1;
+    }
+    None
+}
+
+fn is_escaped(bytes: &[u8], index: usize) -> bool {
+    let mut preceding_backslashes = 0;
+    let mut cursor = index;
+    while cursor > 0 && bytes[cursor - 1] == b'\\' {
+        preceding_backslashes += 1;
+        cursor -= 1;
+    }
+    preceding_backslashes % 2 == 1
+}
+
+fn repair_math_expression(expression: &str) -> String {
+    let characters = expression.chars().collect::<Vec<_>>();
+    let has_duplicate_escape = characters.windows(3).any(|window| {
+        window[0] == '\\'
+            && window[1] == '\\'
+            && (window[2].is_ascii_alphabetic() || matches!(window[2], '{' | '}'))
+    });
+    let has_spaced_escaped_equal = (0..characters.len()).any(|index| {
+        characters[index] == '\\'
+            && characters.get(index + 1) == Some(&'=')
+            && (index == 0 || characters[index - 1].is_whitespace())
+            && characters
+                .get(index + 2)
+                .map_or(true, |next| next.is_whitespace())
+    });
+    if !has_duplicate_escape && !has_spaced_escaped_equal {
+        return expression.to_owned();
+    }
+
+    let mut output = String::with_capacity(expression.len());
+    let mut index = 0;
+    while index < characters.len() {
+        if characters[index] == '\\'
+            && characters.get(index + 1) == Some(&'\\')
+            && characters
+                .get(index + 2)
+                .is_some_and(|next| next.is_ascii_alphabetic() || matches!(next, '{' | '}'))
+        {
+            output.push('\\');
+            index += 2;
+            continue;
+        }
+        if characters[index] == '\\'
+            && characters.get(index + 1) == Some(&'=')
+            && (index == 0 || characters[index - 1].is_whitespace())
+            && characters
+                .get(index + 2)
+                .map_or(true, |next| next.is_whitespace())
+        {
+            output.push('=');
+            index += 2;
+            continue;
+        }
+        output.push(characters[index]);
+        index += 1;
+    }
+    output
 }
 
 fn unescape_systematically_escaped_markdown(value: &str) -> String {
@@ -270,6 +407,37 @@ mod tests {
     #[test]
     fn preserves_isolated_markdown_escapes_and_math_delimiters() {
         let value = "使用 \\* 表示字面星号，并保留公式：\\[x + y\\]。";
+        assert_eq!(normalize_external_markdown(value), value);
+    }
+
+    #[test]
+    fn repairs_mixed_digest_math_links_and_horizontal_rules() {
+        let value = r#"* **论文/研究来源**：[arXiv:2608.11665 [math.CO\]\]](https://arxiv.org/abs/2608.11665)
+* 当 $S=\\emptyset$ 时为普通 Nim，当 $S=\\{0\\}$ 时为 Misère Nim。
+* 周期禁态集合为 $S \= d\\mathbb{N}_0$，且 $d \= 2, 3, 4$。
+* 必胜态为 $\\mathcal{N}$，必败态为 $\\mathcal{P}$。
+
+\---"#;
+        assert_eq!(
+            normalize_external_markdown(value),
+            r#"* **论文/研究来源**：[arXiv:2608.11665 [math.CO]](https://arxiv.org/abs/2608.11665)
+* 当 $S=\emptyset$ 时为普通 Nim，当 $S=\{0\}$ 时为 Misère Nim。
+* 周期禁态集合为 $S = d\mathbb{N}_0$，且 $d = 2, 3, 4$。
+* 必胜态为 $\mathcal{N}$，必败态为 $\mathcal{P}$。
+
+---"#
+        );
+    }
+
+    #[test]
+    fn preserves_valid_tex_line_breaks_and_isolated_equal_accents() {
+        let value = r"保留公式 $x \\ y$、$\\ \mathbb{N}$ 与 $a \=b$。";
+        assert_eq!(normalize_external_markdown(value), value);
+    }
+
+    #[test]
+    fn preserves_an_isolated_escaped_horizontal_rule() {
+        let value = "字面分隔符：\n\n\\---";
         assert_eq!(normalize_external_markdown(value), value);
     }
 

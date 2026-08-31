@@ -16,7 +16,10 @@
 /data/drive-input-secrets.toml
 /data/input-roles.toml
 /data/pcp-enrollment-client.json
+/data/pcp-repair-enrollment-client.json
 /data/pcp-enrollments.json
+/data/pcp-history-repair.json
+/data/pcp-language-repair.json
 /data/infer-runtime.toml
 /data/infer-runtime-secrets.toml
 /data/profile.toml

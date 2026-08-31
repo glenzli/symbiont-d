@@ -249,7 +249,7 @@ impl InferenceExecutor {
             Ok(completion) => completion,
             Err(error) => return InferenceAttempt::deferred(error),
         };
-        match parse_json::<sensing_duplicate::SensingDuplicateEnvelope>(&completion.text) {
+        match sensing_duplicate::parse_envelope(&completion.text) {
             Ok(envelope) => InferenceAttempt::Completed(InferenceOutcome {
                 value: sensing_duplicate::validated_duplicate_ids(
                     candidates,

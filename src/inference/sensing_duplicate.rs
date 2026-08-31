@@ -1,8 +1,9 @@
 //! Conservative duplicate suppression before ambient value review.
 //!
 //! Exact source identities are handled deterministically. A bounded local
-//! foundational model only judges the residual semantic pairs; any malformed
-//! or unavailable model result fails open and must never block value review.
+//! foundational model only judges the residual semantic pairs. Complete JSON
+//! is salvaged from harmless wrapper defects; unavailable or truly truncated
+//! results still fail open and must never block value review.
 
 use std::collections::HashSet;
 
@@ -35,6 +36,30 @@ pub(super) struct SensingDuplicateDecision {
 pub(super) struct SensingDuplicateEnvelope {
     #[serde(default)]
     pub(super) duplicates: Vec<SensingDuplicateDecision>,
+}
+
+pub(super) fn parse_envelope(text: &str) -> Result<SensingDuplicateEnvelope> {
+    let mut payload = text.trim();
+    if let Some(fenced) = payload.strip_prefix("```json") {
+        payload = fenced.trim();
+    } else if let Some(fenced) = payload.strip_prefix("```") {
+        payload = fenced.trim();
+    }
+    if let Some(unfenced) = payload.strip_suffix("```") {
+        payload = unfenced.trim();
+    }
+    if let Ok(envelope) = serde_json::from_str(payload) {
+        return Ok(envelope);
+    }
+
+    let object_start = payload
+        .find('{')
+        .context("duplicate-classification JSON object is missing")?;
+    serde_json::Deserializer::from_str(&payload[object_start..])
+        .into_iter::<SensingDuplicateEnvelope>()
+        .next()
+        .context("duplicate-classification JSON object is missing")?
+        .context("decode duplicate-classification JSON object")
 }
 
 #[derive(Serialize)]
@@ -118,6 +143,10 @@ pub(super) fn runtime_prompt(
         r#"Identify only true repeated delivery: the same underlying paper, exact release, event,
 observation, or materially identical claim. Similar subject matter is not duplication. A later
 version, new evidence, confirmation, changed result, or accumulated reaction is not duplication.
+For a recurring leaderboard, dashboard, or digest, a new retrieval date, section ordinal, or
+rephrasing alone is still duplicate delivery. Omit it from duplicates only when rankings,
+measurements, evidence, or conclusions changed materially. A duplicate reason should identify the
+unchanged result or claim, not merely the shared topic.
 
 For a duplicate current record, point `candidate` to its C id and `same_as` either to an earlier C
 record that should survive or to an R record already delivered. Never point to a later C record.
@@ -397,7 +426,32 @@ mod tests {
         let prompt =
             runtime_prompt(&[candidate("one", "One", "https://example.test/one")], &[]).unwrap();
         assert!(prompt.contains("Similar subject matter is not duplication"));
+        assert!(prompt.contains("a new retrieval date, section ordinal"));
         assert!(!prompt.contains("deep"));
         assert!(!prompt.contains("presentation"));
+    }
+
+    #[test]
+    fn duplicate_envelope_accepts_an_unclosed_json_fence() {
+        let envelope = parse_envelope(
+            "```json\n{\"duplicates\":[{\"candidate\":\"C2\",\"same_as\":\"C1\",\"reason\":\"Same snapshot\"}]}",
+        )
+        .unwrap();
+        assert_eq!(envelope.duplicates.len(), 1);
+        assert_eq!(envelope.duplicates[0].candidate, "C2");
+    }
+
+    #[test]
+    fn duplicate_envelope_salvages_one_complete_object_from_commentary() {
+        let envelope = parse_envelope(
+            "Result:\n{\"duplicates\":[]}\nThis line should not invalidate the bounded object.",
+        )
+        .unwrap();
+        assert!(envelope.duplicates.is_empty());
+    }
+
+    #[test]
+    fn duplicate_envelope_rejects_a_truncated_object() {
+        assert!(parse_envelope("```json\n{\"duplicates\":[").is_err());
     }
 }

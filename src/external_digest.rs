@@ -56,20 +56,21 @@ impl ExternalDigest {
         sections
             .into_iter()
             .map(|section| {
+                let normalized_section = normalize_external_markdown(&section);
                 let title = if multiple_sections {
-                    compact_text(&section_title(&section), MAX_TITLE_CHARS)
+                    compact_text(&section_title(&normalized_section), MAX_TITLE_CHARS)
                 } else {
                     self.title.clone()
                 };
                 SensingCandidateDraft {
                     title,
-                    summary: compact_text(&section, MAX_SUMMARY_CHARS),
-                    proposed_input: compact_text(&section, MAX_INPUT_CHARS),
-                    received_text: Some(normalize_external_markdown(&section)),
+                    summary: compact_text(&normalized_section, MAX_SUMMARY_CHARS),
+                    proposed_input: compact_text(&normalized_section, MAX_INPUT_CHARS),
+                    received_text: Some(normalized_section.clone()),
                     event_at: self.event_at.clone(),
-                    source_class: classify_section(&section),
+                    source_class: classify_section(&normalized_section),
                     possible_connection: Some(self.provenance.possible_connection.clone()),
-                    sources: extract_sources(&section, &self.title, &self.provenance),
+                    sources: extract_sources(&normalized_section, &self.title, &self.provenance),
                 }
             })
             .collect()
@@ -303,6 +304,25 @@ mod tests {
         assert_eq!(
             candidate.sources[0].url,
             "https://bench.example/leaderboard"
+        );
+    }
+
+    #[test]
+    fn uses_the_normalized_digest_for_review_and_display_fields() {
+        let candidate = digest(
+            r#"### 数学结果
+* 模型给出 $S \= d\\mathbb{N}_0$。
+
+\---"#,
+        )
+        .into_candidates()
+        .remove(0);
+        let expected = "### 数学结果 * 模型给出 $S = d\\mathbb{N}_0$。 ---";
+        assert_eq!(candidate.summary, expected);
+        assert_eq!(candidate.proposed_input, expected);
+        assert_eq!(
+            candidate.received_text.as_deref(),
+            Some("### 数学结果\n* 模型给出 $S = d\\mathbb{N}_0$。\n\n---")
         );
     }
 }

@@ -10,7 +10,7 @@ use std::{
 };
 
 use anyhow::{Context, Result};
-use pcp_client::{ContentLibraryResult, ContentLibrarySummary, PcpTenantApi};
+use pcp_client::{ContentLibraryResult, ContentLibrarySummary, PcpApi, PcpTenantApi};
 use pcp_core::{
     AccessSession, BrowseIndexOrder, Capabilities, IngestPageRequest, IntentEffort,
     QueryContextRequest, QueryContextResponse, ReadPage, ReadPagesRequest, Scope,
@@ -59,6 +59,31 @@ pub async fn open(workspace: &Path) -> Result<Arc<dyn PcpTenantApi>> {
         EnrollmentProbe::Unavailable => anyhow::bail!(
             "no PCP Runtime is discoverable; start PCP Console and approve Symbiont enrollment"
         ),
+    }
+}
+
+/// Open the separate, least-privilege repair enrollment used only by the
+/// explicit PCP history repair workflow. Ordinary Symbiont remains on its
+/// Contribute session and never inherits this authority.
+pub async fn open_repair(workspace: &Path) -> Result<Arc<dyn PcpApi>> {
+    let manager = EnrollmentManager::open_repair(workspace)
+        .await?
+        .ok_or_else(|| {
+            anyhow::anyhow!(
+                "PCP Runtime discovery is unavailable; start PCP Console before applying repairs"
+            )
+        })?;
+    match manager.probe(None).await? {
+        EnrollmentProbe::Active(active) => Ok(Arc::new(active.client)),
+        EnrollmentProbe::Pending => {
+            anyhow::bail!("PCP Runtime repair enrollment is pending approval in PCP Console")
+        }
+        EnrollmentProbe::Rejected => {
+            anyhow::bail!("PCP Runtime repair enrollment was rejected in PCP Console")
+        }
+        EnrollmentProbe::Unavailable => {
+            anyhow::bail!("no PCP Runtime is discoverable for repair")
+        }
     }
 }
 

@@ -36,9 +36,16 @@ use crate::{
     },
     profile::{ProfileSnapshot, SetupStatus},
     signals::SignalEvent,
-    transcript::{TranscriptMessageLinks, TranscriptStore},
+    transcript::{
+        TranscriptMessageLinks, TranscriptRecall, TranscriptSearchOptions, TranscriptSearchResult,
+        TranscriptStore,
+    },
     working_context::{WORKING_CONTEXT_SCAN_MESSAGES, WorkingContext},
 };
+
+mod transcript_source;
+
+pub(crate) use transcript_source::TranscriptSourceResolution;
 
 const USER_SCOPE_LABEL: &str = "User context";
 pub const MAX_QUOTES_PER_MESSAGE: usize = 6;
@@ -920,6 +927,33 @@ impl ContinuityHost {
                 content_digest: None,
             })
             .collect())
+    }
+
+    pub(crate) async fn resolve_transcript_source(
+        &self,
+        provider_id: &str,
+        locator: &str,
+        context_before: u64,
+        context_after: u64,
+    ) -> Result<TranscriptSourceResolution> {
+        transcript_source::resolve(
+            Arc::clone(&self.transcript),
+            provider_id,
+            locator,
+            context_before,
+            context_after,
+        )
+        .await
+    }
+
+    pub(crate) async fn search_transcript(
+        &self,
+        query: &str,
+        options: TranscriptSearchOptions,
+    ) -> Result<TranscriptSearchResult> {
+        TranscriptRecall::new(Arc::clone(&self.transcript))
+            .search(query, options)
+            .await
     }
 
     pub async fn verify_context_source_ids(&self, source_ids: &[String]) -> Result<()> {

@@ -26,11 +26,14 @@ use std::os::unix::fs::{FileTypeExt, MetadataExt, PermissionsExt};
 
 pub(super) const HOST_PRINCIPAL_ID: &str = "host:symbiont-d";
 const HOST_DISPLAY_NAME: &str = "Symbiont";
+pub(super) const REPAIR_PRINCIPAL_ID: &str = "service:symbiont-pcp-repair";
+const REPAIR_DISPLAY_NAME: &str = "Symbiont PCP Repair";
 const DISCOVERY_SCHEMA: &str = "infra.discovery.registration";
 const DISCOVERY_VERSION: &str = "20260812.1";
 const UNIX_SOCKET_BINDING: &str = "infra.local.unix-socket";
 const MAX_MANIFEST_BYTES: u64 = 64 * 1024;
 const STATE_FILE_NAME: &str = "pcp-enrollment-client.json";
+const REPAIR_STATE_FILE_NAME: &str = "pcp-repair-enrollment-client.json";
 static STATE_TEMP_COUNTER: AtomicU64 = AtomicU64::new(0);
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -88,8 +91,55 @@ pub(super) enum EnrollmentProbe {
 pub(super) struct EnrollmentManager {
     runtime_root: PathBuf,
     state_path: PathBuf,
+    intent: EnrollmentIntent,
     state: Mutex<EnrollmentState>,
     operation: Mutex<()>,
+}
+
+#[derive(Clone)]
+struct EnrollmentIntent {
+    principal_id: &'static str,
+    principal_type: AccessPrincipalType,
+    display_name: &'static str,
+    mode: RequestedAccessMode,
+}
+
+impl EnrollmentIntent {
+    fn tenant() -> Self {
+        Self {
+            principal_id: HOST_PRINCIPAL_ID,
+            principal_type: AccessPrincipalType::Host,
+            display_name: HOST_DISPLAY_NAME,
+            mode: RequestedAccessMode::Contribute,
+        }
+    }
+
+    fn repair() -> Self {
+        Self {
+            principal_id: REPAIR_PRINCIPAL_ID,
+            principal_type: AccessPrincipalType::Service,
+            display_name: REPAIR_DISPLAY_NAME,
+            mode: RequestedAccessMode::Repair,
+        }
+    }
+
+    fn client_claim(&self) -> EnrollmentClientClaim {
+        EnrollmentClientClaim {
+            principal: EnrollmentPrincipalClaim {
+                principal_id: self.principal_id.to_owned(),
+                principal_type: self.principal_type.clone(),
+                display_name: Some(self.display_name.to_owned()),
+            },
+        }
+    }
+
+    fn requested_access(&self) -> RequestedAccess {
+        RequestedAccess {
+            mode: self.mode.clone(),
+            scopes: vec![PCP_NAMESPACE.to_owned()],
+            allow_cross_scope_derivation: false,
+        }
+    }
 }
 
 impl EnrollmentManager {
@@ -100,14 +150,37 @@ impl EnrollmentManager {
         let state_path = env::var_os("SYMBIONT_PCP_ENROLLMENT_STATE_PATH")
             .map(PathBuf::from)
             .unwrap_or_else(|| workspace.join("data").join(STATE_FILE_NAME));
-        Self::open_at(runtime_root, state_path).await.map(Some)
+        Self::open_at_with_intent(runtime_root, state_path, EnrollmentIntent::tenant())
+            .await
+            .map(Some)
+    }
+
+    pub async fn open_repair(workspace: &Path) -> Result<Option<Self>> {
+        let Some(runtime_root) = runtime_root()? else {
+            return Ok(None);
+        };
+        let state_path = env::var_os("SYMBIONT_PCP_REPAIR_ENROLLMENT_STATE_PATH")
+            .map(PathBuf::from)
+            .unwrap_or_else(|| workspace.join("data").join(REPAIR_STATE_FILE_NAME));
+        Self::open_at_with_intent(runtime_root, state_path, EnrollmentIntent::repair())
+            .await
+            .map(Some)
     }
 
     async fn open_at(runtime_root: PathBuf, state_path: PathBuf) -> Result<Self> {
+        Self::open_at_with_intent(runtime_root, state_path, EnrollmentIntent::tenant()).await
+    }
+
+    async fn open_at_with_intent(
+        runtime_root: PathBuf,
+        state_path: PathBuf,
+        intent: EnrollmentIntent,
+    ) -> Result<Self> {
         let state = load_state(&state_path).await?;
         Ok(Self {
             runtime_root,
             state_path,
+            intent,
             state: Mutex::new(state),
             operation: Mutex::new(()),
         })
@@ -165,7 +238,7 @@ impl EnrollmentManager {
                     let access_changed = matches!(
                         &response.result,
                         EnrollmentResult::Active { session }
-                            if !session_matches_requested_access(&selected.service, session)
+                            if !session_matches_intent(&self.intent, &selected.service, session)
                     );
                     if access_changed {
                         self.clear_registration().await?;
@@ -199,8 +272,8 @@ impl EnrollmentManager {
 
         let response = client
             .begin(BeginEnrollmentParams {
-                client: client_claim(),
-                requested_access: requested_access(),
+                client: self.intent.client_claim(),
+                requested_access: self.intent.requested_access(),
                 credential,
             })
             .await
@@ -234,11 +307,12 @@ impl EnrollmentManager {
             }
             EnrollmentResult::Active { session } => {
                 anyhow::ensure!(
-                    session_matches_requested_access(&selected.service, &session),
+                    session_matches_intent(&self.intent, &selected.service, &session),
                     "PCP enrollment session does not match the current requested access"
                 );
                 let active =
-                    validate_active_session(&self.runtime_root, &selected, &session).await?;
+                    validate_active_session(&self.runtime_root, &self.intent, &selected, &session)
+                        .await?;
                 let mut state = self.state.lock().await;
                 state.request_id = None;
                 let registration_id = session.registration_id;
@@ -332,34 +406,33 @@ impl EnrollmentManager {
 }
 
 fn client_claim() -> EnrollmentClientClaim {
-    EnrollmentClientClaim {
-        principal: EnrollmentPrincipalClaim {
-            principal_id: HOST_PRINCIPAL_ID.to_owned(),
-            principal_type: AccessPrincipalType::Host,
-            display_name: Some(HOST_DISPLAY_NAME.to_owned()),
-        },
-    }
+    EnrollmentIntent::tenant().client_claim()
 }
 
 fn requested_access() -> RequestedAccess {
-    RequestedAccess {
-        mode: RequestedAccessMode::Contribute,
-        scopes: vec![PCP_NAMESPACE.to_owned()],
-        allow_cross_scope_derivation: false,
-    }
+    EnrollmentIntent::tenant().requested_access()
 }
 
 fn session_matches_requested_access(
     service: &EnrollmentServiceIdentity,
     session: &EnrollmentSession,
 ) -> bool {
-    let requested = requested_access();
+    session_matches_intent(&EnrollmentIntent::tenant(), service, session)
+}
+
+fn session_matches_intent(
+    intent: &EnrollmentIntent,
+    service: &EnrollmentServiceIdentity,
+    session: &EnrollmentSession,
+) -> bool {
+    let requested = intent.requested_access();
     let mode = match requested.mode {
         RequestedAccessMode::Observe => AccessMode::Observe,
         RequestedAccessMode::Read => AccessMode::Read,
         RequestedAccessMode::Audit => AccessMode::Audit,
         RequestedAccessMode::Contribute => AccessMode::Contribute,
         RequestedAccessMode::Write => AccessMode::Write,
+        RequestedAccessMode::Repair => AccessMode::Repair,
         RequestedAccessMode::Admin => AccessMode::Admin,
     };
     let scopes = requested
@@ -384,6 +457,7 @@ fn session_matches_requested_access(
 
 async fn validate_active_session(
     runtime_root: &Path,
+    intent: &EnrollmentIntent,
     selected: &SelectedEnrollment,
     session: &EnrollmentSession,
 ) -> Result<ActiveEnrollment> {
@@ -397,8 +471,8 @@ async fn validate_active_session(
         session.binding
     );
     anyhow::ensure!(
-        session.access.principal.principal_id == HOST_PRINCIPAL_ID
-            && session.access.principal.principal_type == AccessPrincipalType::Host,
+        session.access.principal.principal_id == intent.principal_id
+            && session.access.principal.principal_type == intent.principal_type,
         "PCP enrollment returned an unexpected principal"
     );
     let socket_path = resolve_unix_endpoint(runtime_root, &session.endpoint)?;
@@ -864,6 +938,19 @@ mod v08_tests {
         assert_eq!(request.mode, RequestedAccessMode::Contribute);
         assert_eq!(request.scopes, vec![PCP_NAMESPACE.to_owned()]);
         assert!(!request.allow_cross_scope_derivation);
+    }
+
+    #[test]
+    fn repair_enrollment_is_distinct_and_least_privilege() {
+        let intent = EnrollmentIntent::repair();
+        let request = intent.requested_access();
+        let claim = intent.client_claim();
+        assert_eq!(request.mode, RequestedAccessMode::Repair);
+        assert_eq!(request.scopes, vec![PCP_NAMESPACE.to_owned()]);
+        assert!(!request.allow_cross_scope_derivation);
+        assert_eq!(claim.principal.principal_id, "service:symbiont-pcp-repair");
+        assert_eq!(claim.principal.principal_type, AccessPrincipalType::Service);
+        assert_ne!(claim, client_claim());
     }
 
     #[tokio::test]

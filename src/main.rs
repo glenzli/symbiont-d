@@ -35,6 +35,7 @@ mod outreach;
 mod pcp_connection;
 mod pcp_index;
 mod pcp_migration;
+mod pcp_repair;
 mod permission;
 mod profile;
 mod reconciliation;
@@ -272,6 +273,74 @@ async fn main() -> Result<()> {
         binary: env::var("CODEX_BIN").unwrap_or_else(|_| "codex".to_owned()),
         workspace: workspace.clone(),
     };
+    if let Some(repair_run) = pcp_repair::requested_run()? {
+        let ledger_path_env = match repair_run.task {
+            pcp_repair::RepairTask::ContentFidelity => "SYMBIONT_PCP_HISTORY_REPAIR_PATH",
+            pcp_repair::RepairTask::ChineseLanguageFidelity => "SYMBIONT_PCP_LANGUAGE_REPAIR_PATH",
+        };
+        let ledger_path = resolve_data_path(&workspace, ledger_path_env, repair_run.ledger_file());
+        let report = match repair_run.mode {
+            pcp_repair::RunMode::Preview => {
+                let mut codex = CodexClient::start(
+                    codex_config.clone(),
+                    Arc::clone(&continuity),
+                    Arc::clone(&profile),
+                    Arc::clone(&context),
+                    Arc::clone(&curiosity),
+                    Arc::clone(&reflection_store),
+                    Arc::clone(&compute_policies),
+                    Arc::clone(&permissions),
+                    Arc::clone(&web_fetcher),
+                    Arc::clone(&continuations),
+                    Arc::clone(&exploration_intents),
+                )
+                .await
+                .context("start Codex for PCP history repair preview")?;
+                let compute = Arc::new(
+                    ComputeStore::open(
+                        resolve_data_path(&workspace, "SYMBIONT_COMPUTE_PATH", "compute.toml"),
+                        codex.models().to_vec(),
+                    )
+                    .await?,
+                );
+                pcp_repair::run_preview(
+                    repair_run.task,
+                    ledger_path,
+                    &mut codex,
+                    Arc::clone(&transcript),
+                    Arc::clone(&continuity),
+                    compute,
+                    Arc::clone(&profile),
+                )
+                .await
+            }
+            pcp_repair::RunMode::Apply => {
+                pcp_repair::run_apply(
+                    repair_run.task,
+                    &workspace,
+                    ledger_path,
+                    Arc::clone(&transcript),
+                    Arc::clone(&continuity),
+                )
+                .await
+            }
+        }
+        .context("run audited PCP history repair")?;
+        info!(
+            mode = repair_run.mode.as_str(),
+            pcp_identity_id = report.pcp_identity_id,
+            candidates_found = report.candidates_found,
+            reviewed = report.reviewed,
+            proposed_revisions = report.proposed_revisions,
+            kept = report.kept,
+            applied = report.applied,
+            stale = report.stale,
+            unresolved_sources = report.unresolved_sources,
+            remaining = report.remaining,
+            "PCP history repair phase completed"
+        );
+        return Ok(());
+    }
     let bind: SocketAddr = env::var("SYMBIONT_BIND")
         .unwrap_or_else(|_| DEFAULT_BIND.to_owned())
         .parse()

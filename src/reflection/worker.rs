@@ -9,8 +9,8 @@ use tokio::{
 use tracing::{debug, warn};
 
 use super::{
-    HunchFeedbackTarget, ReflectionConfig, ReflectionPhase, ReflectionRuntime, ReflectionSnapshot,
-    ReflectionStore,
+    HunchFeedbackTarget, InteractionEvent, ReflectionConfig, ReflectionPhase, ReflectionRuntime,
+    ReflectionSnapshot, ReflectionStore,
 };
 use crate::{
     autonomy::AutonomyStore,
@@ -25,6 +25,7 @@ use crate::{
     pcp_index::PcpIndex,
     profile::{ProfileStore, SetupStatus},
     symbiont_context::SymbiontContextStore,
+    transcript::TranscriptSearchOptions,
     usage::UsageStore,
 };
 
@@ -383,6 +384,20 @@ async fn reflect_once(
             return Ok(ReflectState::Idle);
         }
     };
+    let recurrence_bundle = match transcript_recurrence_bundle(&batch.events, continuity).await {
+        Ok(bundle) => bundle,
+        Err(error) => {
+            warn!(%error, "could not inspect local transcript recurrence evidence");
+            None
+        }
+    };
+    let source_bundle = match recurrence_bundle {
+        Some(recurrence) => format!(
+            "{}\n\n<transcript-recurrence-evidence>\n{}\n</transcript-recurrence-evidence>",
+            batch.source_bundle, recurrence
+        ),
+        None => batch.source_bundle.clone(),
+    };
     let Some(input_events) = conversation.subscribe_background_input().await else {
         let mut current = runtime.write().await;
         current.phase = ReflectionPhase::Waiting;
@@ -433,7 +448,7 @@ async fn reflect_once(
     });
     let outcome = client
         .reflect_interaction(
-            &batch.source_bundle,
+            &source_bundle,
             &compute,
             &profile_snapshot,
             &continuity_context,
@@ -569,6 +584,50 @@ async fn reflect_once(
         "interaction Reflection completed"
     );
     Ok(ReflectState::Completed)
+}
+
+async fn transcript_recurrence_bundle(
+    events: &[InteractionEvent],
+    continuity: &ContinuityHost,
+) -> Result<Option<String>> {
+    let Some(query) = events.iter().rev().find_map(|event| {
+        if event.retracted
+            || event.role.as_deref() != Some("user")
+            || event
+                .payload
+                .get("imported")
+                .and_then(serde_json::Value::as_bool)
+                .unwrap_or(false)
+        {
+            return None;
+        }
+        event
+            .payload
+            .get("excerpt")
+            .and_then(serde_json::Value::as_str)
+            .map(str::trim)
+            .filter(|value| value.chars().count() >= 4)
+            .map(|value| value.chars().take(512).collect::<String>())
+    }) else {
+        return Ok(None);
+    };
+    let result = continuity
+        .search_transcript(
+            &query,
+            TranscriptSearchOptions {
+                max_clusters: 4,
+                max_messages: 16,
+                max_chars: 8_000,
+                context_before: 1,
+                context_after: 1,
+                episode_gap_hours: 6,
+            },
+        )
+        .await?;
+    if !result.recurrence.repeated_across_time || result.clusters.is_empty() {
+        return Ok(None);
+    }
+    Ok(Some(serde_json::to_string(&result)?))
 }
 
 #[allow(clippy::too_many_arguments)]

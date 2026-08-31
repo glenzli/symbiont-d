@@ -20,7 +20,14 @@ use tokio::{sync::Mutex, task};
 
 use crate::memory::{MemoryEntry, MemoryRole, MessagePart};
 
-const SCHEMA_VERSION: &str = "2";
+mod search;
+
+pub use search::{
+    TranscriptRecall, TranscriptSearchMessage, TranscriptSearchOptions, TranscriptSearchResult,
+    TranscriptSourceOptions, TranscriptSourceResolution, TranscriptSourceStatus,
+};
+
+const SCHEMA_VERSION: &str = "3";
 
 #[derive(Clone, Debug, Default)]
 pub struct TranscriptRestoreReport {
@@ -133,6 +140,7 @@ impl TranscriptStore {
                 );
                 ",
             )?;
+            search::initialize_index(&connection)?;
             connection.execute(
                 "INSERT OR REPLACE INTO transcript_meta(key, value) VALUES ('schema_version', ?1)",
                 [SCHEMA_VERSION],
@@ -192,6 +200,7 @@ impl TranscriptStore {
                 "INSERT INTO transcript_message_links(message_id, links_json) VALUES (?1, ?2)",
                 params![persisted_message_id, serde_json::to_string(&links)?],
             )?;
+            search::index_message(&transaction, &persisted_message_id, &stored.content)?;
             transaction.commit()?;
             Ok(())
         })
@@ -228,6 +237,35 @@ impl TranscriptStore {
         task::spawn_blocking(move || read_by_ids(&path, &ids))
             .await
             .context("join transcript selected read")?
+    }
+
+    /// Search the authoritative local transcript without copying chat into PCP.
+    ///
+    /// The result contains bounded raw-message windows plus user-only recurrence
+    /// evidence suitable for deciding whether a previously deferred subject now
+    /// deserves durable promotion.
+    pub async fn search(
+        &self,
+        query: &str,
+        options: TranscriptSearchOptions,
+    ) -> Result<TranscriptSearchResult> {
+        let path = self.path.clone();
+        let query = query.to_owned();
+        task::spawn_blocking(move || search::search_transcript(&path, &query, options))
+            .await
+            .context("join transcript search")?
+    }
+
+    pub async fn resolve_source(
+        &self,
+        message_id: &str,
+        options: TranscriptSourceOptions,
+    ) -> Result<TranscriptSourceResolution> {
+        let path = self.path.clone();
+        let message_id = message_id.to_owned();
+        task::spawn_blocking(move || search::resolve_source(&path, &message_id, options))
+            .await
+            .context("join transcript source resolution")?
     }
 
     pub async fn links(&self, message_id: &str) -> Result<TranscriptMessageLinks> {
@@ -454,6 +492,7 @@ fn restore_if_empty_blocking(destination: &Path, source: &Path) -> Result<Transc
              VALUES (?1, ?2, ?3)",
             params![source.display().to_string(), source_revision_id, imported_at],
         )?;
+        search::index_message(&transaction, &source_revision_id, &entry.content)?;
         imported += 1;
     }
     transaction.commit()?;

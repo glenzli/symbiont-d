@@ -31,7 +31,7 @@ before it can enter review.
 ambient sensing role
   -> transient candidate pool
   -> exact identity suppression
-  -> local foundational same-event classification (failure passes through)
+  -> local model-assisted same-event classification (unrecoverable failure passes through)
   -> strong value review
      -> discard | input | deep
   -> signal timeline event
@@ -74,10 +74,12 @@ natural-language proposed input, an actor snapshot, the underlying event date wh
 source support.
 
 Duplicate suppression is a separate bounded stage. Stable source identities are checked
-deterministically; one local foundational `text.deduplicate` request only classifies
-residual candidate pairs as the same paper, release, event, observation, or materially identical
-claim. Similar topics are not duplicates. If this local stage is unavailable or malformed,
-candidates pass through rather than blocking the pool or being silently lost.
+deterministically; one local `text.deduplicate` request classifies residual candidate pairs as the
+same paper, release, event, observation, recurring snapshot, or materially identical claim. Similar
+topics are not duplicates, and a dashboard update with materially changed measurements remains new.
+The parser accepts a complete bounded JSON object even when the local model omits a closing code
+fence or adds harmless wrapper text. If the local stage is unavailable or the JSON object itself is
+truncated, candidates pass through rather than blocking the pool or being silently lost.
 
 The stronger value-review stage no longer compares history or emits duplicate targets. It reviews
 bounded groups rather than one compound packet, and chooses one terminal disposition per candidate:

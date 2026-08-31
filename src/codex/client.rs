@@ -8,7 +8,7 @@ use std::{
 
 use anyhow::{Context, Result};
 use chrono::{SecondsFormat, Utc};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value, json};
 use tokio::{
     io::{AsyncBufReadExt, AsyncWriteExt, BufReader, Lines},
@@ -32,7 +32,8 @@ use super::{
     prompts::{
         additional_context_value, context_fragments, context_maintenance_prompt,
         developer_instructions, interaction_reflection_prompt, luna_sensing_developer_instructions,
-        memory_reconciliation_prompt, profile_review_prompt, summary_maintenance_prompt,
+        memory_reconciliation_prompt, pcp_history_repair_developer_instructions,
+        pcp_history_repair_prompt, profile_review_prompt, summary_maintenance_prompt,
         temporary_discussion_developer_instructions,
     },
     tool_dedup::{ToolCallPlan, TurnToolDeduplicator},
@@ -255,6 +256,34 @@ pub struct PcpTranscriptMigrationOutcome {
     pub invocations: Vec<InvocationRecord>,
 }
 
+pub struct PcpHistoryRepairRequest<'a> {
+    pub batch_bundle: &'a str,
+    pub language_fidelity: bool,
+    pub lane: ComputeLane,
+    pub allow_escalation: bool,
+    pub rejection_reason: Option<&'a str>,
+    pub compute: &'a ComputeConfig,
+    pub profile: &'a ProfileSnapshot,
+    pub input_events: watch::Receiver<u64>,
+    pub events: mpsc::Sender<RuntimeEvent>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PcpHistoryRepairProposal {
+    pub page_id: String,
+    pub expected_revision_id: String,
+    pub action: String,
+    pub reason: String,
+    pub content: String,
+    #[serde(default)]
+    pub source_message_ids: Vec<String>,
+}
+
+pub struct PcpHistoryRepairOutcome {
+    pub proposals: Vec<PcpHistoryRepairProposal>,
+}
+
 #[derive(Clone, Debug, Default)]
 struct TokenBreakdown {
     input_tokens: u64,
@@ -284,6 +313,7 @@ enum BackgroundThread {
     AutonomousReview,
     Attacker,
     Maintenance,
+    PcpHistoryRepair,
     TemporaryDiscussion,
 }
 
@@ -293,6 +323,7 @@ enum ToolSurface {
     LunaSensing,
     AutonomousScout,
     Attacker,
+    PcpHistoryRepair,
     TemporaryDiscussion,
 }
 
@@ -309,6 +340,7 @@ pub struct CodexClient {
     autonomous_review_thread_id: String,
     attacker_thread_id: String,
     maintenance_thread_id: String,
+    pcp_history_repair_thread_id: String,
     temporary_discussion_thread_id: String,
     workspace: PathBuf,
     continuity: Arc<ContinuityHost>,
@@ -449,6 +481,7 @@ impl CodexClient {
             autonomous_review_thread_id: String::new(),
             attacker_thread_id: String::new(),
             maintenance_thread_id: String::new(),
+            pcp_history_repair_thread_id: String::new(),
             temporary_discussion_thread_id: String::new(),
             workspace: config.workspace.clone(),
             continuity: Arc::clone(&dependencies.continuity),
@@ -1338,7 +1371,10 @@ impl CodexClient {
              Record stable preferences or constraints, decisions with reasons, project state or \
              boundaries, unresolved questions, consequential observations, and useful associations. \
              Do not mirror the conversation, preserve routine execution chatter, or write an item \
-             merely because a message exists. Keep uncertainty explicit. Write at most twelve \
+             merely because a message exists. Keep uncertainty explicit. Write each record in the \
+             dominant language of its user evidence; do not translate Chinese discussion into \
+             English, while preserving code, paths, identifiers, and technical names verbatim. \
+             Write at most twelve \
              self-contained records with `pcp.write_page`; cite only exact `source_message_ids` from \
              this batch. Use PCP semantic or exact read tools only to avoid a real duplicate. Do not \
              modify Symbiont state, Hunches, files, or the transcript. When the whole batch has been \
@@ -1386,12 +1422,117 @@ impl CodexClient {
         })
     }
 
+    pub async fn review_pcp_history_repair_batch(
+        &mut self,
+        request: PcpHistoryRepairRequest<'_>,
+    ) -> Result<PcpHistoryRepairOutcome> {
+        #[derive(Deserialize)]
+        #[serde(rename_all = "camelCase")]
+        struct RepairResponse {
+            proposals: Vec<PcpHistoryRepairProposal>,
+        }
+
+        anyhow::ensure!(
+            matches!(
+                request.lane,
+                ComputeLane::Conversation | ComputeLane::Critical
+            ),
+            "PCP history repair supports only conversation or critical compute lanes"
+        );
+        anyhow::ensure!(
+            request.allow_escalation || request.lane == ComputeLane::Critical,
+            "a final PCP history repair pass must use the critical compute lane"
+        );
+        let base_prompt = pcp_history_repair_prompt(
+            request.batch_bundle,
+            request.allow_escalation,
+            request.language_fidelity,
+        );
+        let original_prompt = request.rejection_reason.map_or_else(
+            || base_prompt.clone(),
+            |reason| {
+                format!(
+                    "Your previous complete response was rejected by the local migration \
+                     validator for this reason: {reason}. Return the complete batch again and \
+                     correct that violation for every proposal. Do not refer to the rejected \
+                     response.\n\n{base_prompt}"
+                )
+            },
+        );
+        if self.pcp_history_repair_thread_id.is_empty() {
+            let workspace = self.workspace.clone();
+            self.pcp_history_repair_thread_id = self
+                .start_thread(&workspace, ToolSurface::PcpHistoryRepair)
+                .await?;
+        }
+        let thread_id = self.pcp_history_repair_thread_id.clone();
+        let origin = if request.language_fidelity && request.allow_escalation {
+            "pcp_language_repair_primary"
+        } else if request.language_fidelity {
+            "pcp_language_repair_critical"
+        } else if request.allow_escalation {
+            "pcp_history_repair_primary"
+        } else {
+            "pcp_history_repair_critical"
+        };
+        let mut prompt = original_prompt.clone();
+        let mut parse_error = None;
+        for attempt in 0..2 {
+            let outcome = self
+                .run_request(
+                    thread_id.clone(),
+                    text_input_items(&prompt),
+                    request.lane,
+                    origin,
+                    request.compute,
+                    request.profile,
+                    "",
+                    None,
+                    None,
+                    false,
+                    Some(request.input_events.clone()),
+                    &request.events,
+                )
+                .await?;
+            if outcome.interrupted {
+                anyhow::bail!("PCP history repair review was interrupted");
+            }
+            match serde_json::from_str::<RepairResponse>(outcome.text.trim()) {
+                Ok(response) => {
+                    self.renew_background_thread(&thread_id, BackgroundThread::PcpHistoryRepair)
+                        .await;
+                    return Ok(PcpHistoryRepairOutcome {
+                        proposals: response.proposals,
+                    });
+                }
+                Err(error) => {
+                    parse_error = Some(error);
+                    if attempt == 0 {
+                        prompt = format!(
+                            "Your previous response was rejected because it did not match the \
+                             required JSON schema. Return the complete batch again as one JSON \
+                             object. Every proposal must include all six fields: `pageId`, \
+                             `expectedRevisionId`, `action`, `reason`, `content`, and \
+                             `sourceMessageIds`. Do not omit fields, use aliases, add Markdown, or \
+                             refer to the previous response.\n\n{original_prompt}"
+                        );
+                    }
+                }
+            }
+        }
+        self.renew_background_thread(&thread_id, BackgroundThread::PcpHistoryRepair)
+            .await;
+        Err(parse_error.context("PCP history repair reviewer returned no parse result")?)
+            .context("parse PCP history repair review JSON after one corrective retry")
+    }
+
     async fn renew_background_thread(&mut self, previous: &str, slot: BackgroundThread) {
         let workspace = self.workspace.clone();
         let tool_surface = match slot {
             BackgroundThread::LunaSensing => ToolSurface::LunaSensing,
             BackgroundThread::AutonomousScout => ToolSurface::AutonomousScout,
             BackgroundThread::Attacker => ToolSurface::Attacker,
+            BackgroundThread::PcpHistoryRepair => ToolSurface::PcpHistoryRepair,
             BackgroundThread::TemporaryDiscussion => ToolSurface::TemporaryDiscussion,
             BackgroundThread::AutonomousReview | BackgroundThread::Maintenance => ToolSurface::Full,
         };
@@ -1403,6 +1544,7 @@ impl CodexClient {
                     BackgroundThread::AutonomousReview => self.autonomous_review_thread_id = next,
                     BackgroundThread::Attacker => self.attacker_thread_id = next,
                     BackgroundThread::Maintenance => self.maintenance_thread_id = next,
+                    BackgroundThread::PcpHistoryRepair => self.pcp_history_repair_thread_id = next,
                     BackgroundThread::TemporaryDiscussion => {
                         self.temporary_discussion_thread_id = next
                     }
@@ -2120,6 +2262,7 @@ impl CodexClient {
         let instructions = match tool_surface {
             ToolSurface::LunaSensing => luna_sensing_developer_instructions().to_owned(),
             ToolSurface::TemporaryDiscussion => temporary_discussion_developer_instructions(),
+            ToolSurface::PcpHistoryRepair => pcp_history_repair_developer_instructions(),
             ToolSurface::Full | ToolSurface::AutonomousScout | ToolSurface::Attacker => {
                 developer_instructions()
             }
@@ -2129,7 +2272,9 @@ impl CodexClient {
             ToolSurface::LunaSensing => SymbiontTools::sensing_specifications(),
             ToolSurface::AutonomousScout => SymbiontTools::scout_specifications(),
             ToolSurface::Attacker => SymbiontTools::attacker_specifications(),
-            ToolSurface::TemporaryDiscussion => Value::Array(Vec::new()),
+            ToolSurface::PcpHistoryRepair | ToolSurface::TemporaryDiscussion => {
+                Value::Array(Vec::new())
+            }
         };
         let result = self
             .request(
