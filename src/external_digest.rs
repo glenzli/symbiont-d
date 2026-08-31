@@ -111,8 +111,8 @@ fn split_digest(body: &str) -> Vec<String> {
         .filter_map(|marker| body.find(marker).map(|index| (index, *marker)))
         .collect::<Vec<_>>();
     boundaries.sort_unstable_by_key(|(index, _)| *index);
-    if boundaries.len() >= 2 {
-        return boundaries
+    let sections = if boundaries.len() >= 2 {
+        boundaries
             .iter()
             .enumerate()
             .map(|(position, (start, _))| {
@@ -123,10 +123,46 @@ fn split_digest(body: &str) -> Vec<String> {
                 body[*start..end].trim().to_owned()
             })
             .filter(|section| !section.is_empty())
-            .collect();
+            .collect()
+    } else {
+        vec![body.to_owned()]
+    };
+
+    sections
+        .into_iter()
+        .flat_map(split_digest_subsections)
+        .collect()
+}
+
+fn split_digest_subsections(section: String) -> Vec<String> {
+    let mut boundaries = Vec::new();
+    let mut offset = 0;
+    for line in section.split_inclusive('\n') {
+        let heading = line.trim_start();
+        if heading
+            .strip_prefix("###")
+            .is_some_and(|rest| rest.chars().next().is_some_and(char::is_whitespace))
+        {
+            boundaries.push(offset + line.len() - heading.len());
+        }
+        offset += line.len();
+    }
+    if boundaries.len() < 2 {
+        return vec![section];
     }
 
-    vec![body.to_owned()]
+    boundaries
+        .iter()
+        .enumerate()
+        .map(|(position, start)| {
+            let end = boundaries
+                .get(position + 1)
+                .copied()
+                .unwrap_or(section.len());
+            section[*start..end].trim().to_owned()
+        })
+        .filter(|section| !section.is_empty())
+        .collect()
 }
 
 fn section_title(section: &str) -> String {
@@ -279,6 +315,25 @@ mod tests {
             SensingSourceClass::ProjectsAndEcosystems
         );
         assert_eq!(candidates[3].source_class, SensingSourceClass::Research);
+    }
+
+    #[test]
+    fn splits_multi_topic_markdown_sections_before_review() {
+        let candidates = digest(
+            "三、 前沿 AI 与榜单\n\n### 【模型发布】新的端侧模型\n* 来源：https://example.com/model\n* 结论：新增本地推理能力。\n\n### 【软件工程天梯】SWE-bench Pro 2026-08-31\n* 来源：https://benchlm.ai/benchmarks/swe-bench-pro\n* 结果：80.3%。\n\n### 【综合指数】BenchAlign\n* 来源：https://benchlm.ai/\n* 结果：83.21。",
+        )
+        .into_candidates();
+
+        assert_eq!(candidates.len(), 3);
+        assert!(candidates[0].title.contains("模型发布"));
+        assert!(candidates[1].title.contains("SWE-bench Pro"));
+        assert!(candidates[2].title.contains("BenchAlign"));
+        assert!(
+            candidates[1]
+                .received_text
+                .as_deref()
+                .is_some_and(|text| !text.contains("新增本地推理能力"))
+        );
     }
 
     #[test]

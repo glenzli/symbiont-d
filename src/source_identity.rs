@@ -4,11 +4,19 @@
 //! homepages can describe many different changes. This owner therefore only
 //! recognizes source families with a sufficiently precise delivery contract.
 
-use std::collections::HashSet;
+use std::{collections::HashSet, ops::Range};
 
 use reqwest::Url;
+use sha2::{Digest, Sha256};
 
-use crate::external_markdown::canonical_source_url;
+use crate::external_markdown::{canonical_source_url, source_urls};
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct RecurringSectionIdentity {
+    pub range: Range<usize>,
+    pub identity: String,
+    pub source_urls: Vec<String>,
+}
 
 /// Returns an identity only when the URL names a stable, delivery-level object.
 ///
@@ -77,6 +85,98 @@ pub(crate) fn stable_source_identities<'a>(
         .collect()
 }
 
+/// Finds independently repeatable Markdown sections without treating a live
+/// dashboard URL as a permanent event identity.
+///
+/// The URL and the normalized factual payload must both match. Calendar dates
+/// in headings are ignored so an unchanged daily digest does not become a new
+/// delivery merely because it was fetched again; changed scores or claims
+/// still produce a different identity.
+pub(crate) fn recurring_section_identities(value: &str) -> Vec<RecurringSectionIdentity> {
+    let boundaries = markdown_subsection_boundaries(value);
+    boundaries
+        .iter()
+        .enumerate()
+        .filter_map(|(position, start)| {
+            let end = boundaries.get(position + 1).copied().unwrap_or(value.len());
+            let section = &value[*start..end];
+            recurring_section_identity(section).map(|(identity, source_urls)| {
+                RecurringSectionIdentity {
+                    range: *start..end,
+                    identity,
+                    source_urls,
+                }
+            })
+        })
+        .collect()
+}
+
+fn markdown_subsection_boundaries(value: &str) -> Vec<usize> {
+    let mut boundaries = Vec::new();
+    let mut offset = 0;
+    for line in value.split_inclusive('\n') {
+        let heading = line.trim_start();
+        if heading
+            .strip_prefix("###")
+            .is_some_and(|rest| rest.chars().next().is_some_and(char::is_whitespace))
+        {
+            boundaries.push(offset + line.len() - heading.len());
+        }
+        offset += line.len();
+    }
+    boundaries
+}
+
+fn recurring_section_identity(section: &str) -> Option<(String, Vec<String>)> {
+    let mut urls = source_urls(section)
+        .into_iter()
+        .filter_map(|url| canonical_source_url(&url))
+        .collect::<Vec<_>>();
+    urls.sort_unstable();
+    urls.dedup();
+    if urls.is_empty() {
+        return None;
+    }
+
+    let material = strip_iso_calendar_dates(section)
+        .to_lowercase()
+        .chars()
+        .filter(|character| character.is_alphanumeric())
+        .collect::<String>();
+    if material.chars().count() < 80 {
+        return None;
+    }
+    let digest = Sha256::digest(format!("{}\n{material}", urls.join("\n")).as_bytes());
+    Some((format!("section:v1:{digest:x}"), urls))
+}
+
+fn strip_iso_calendar_dates(value: &str) -> String {
+    let characters = value.chars().collect::<Vec<_>>();
+    let mut output = String::with_capacity(value.len());
+    let mut index = 0;
+    while index < characters.len() {
+        if is_iso_calendar_date_at(&characters, index) {
+            output.push(' ');
+            index += 10;
+        } else {
+            output.push(characters[index]);
+            index += 1;
+        }
+    }
+    output
+}
+
+fn is_iso_calendar_date_at(characters: &[char], index: usize) -> bool {
+    let Some(slice) = characters.get(index..index + 10) else {
+        return false;
+    };
+    slice[0..4].iter().all(char::is_ascii_digit)
+        && matches!(slice[4], '-' | '/')
+        && slice[5..7].iter().all(char::is_ascii_digit)
+        && slice[7] == slice[4]
+        && slice[8..10].iter().all(char::is_ascii_digit)
+}
+
 fn arxiv_version(identifier: &str) -> Option<u32> {
     identifier
         .rsplit_once('v')
@@ -138,6 +238,42 @@ mod tests {
                 "https://www.google.com/url?q=https%3A%2F%2Farxiv.org%2Fabs%2F2608.22152&source=gmail"
             ),
             Some("arxiv:2608.22152:latest".to_owned())
+        );
+    }
+
+    #[test]
+    fn unchanged_dashboard_sections_share_an_identity_across_daily_dates() {
+        let first = r#"### 【软件工程天梯】SWE-bench Pro 2026-08-27
+* 来源：[BenchLM](https://benchlm.ai/benchmarks/swe-bench-pro)
+* 结果：Claude Mythos 5 为 80.3%，Claude Fable 5 为 80.0%，Claude Opus 5 为 79.2%。"#;
+        let repeated = first.replace("2026-08-27", "2026-08-31");
+
+        assert_eq!(
+            recurring_section_identities(first)[0].identity,
+            recurring_section_identities(&repeated)[0].identity
+        );
+    }
+
+    #[test]
+    fn a_changed_dashboard_result_remains_a_new_delivery() {
+        let first = r#"### 【软件工程天梯】SWE-bench Pro 2026-08-27
+* 来源：[BenchLM](https://benchlm.ai/benchmarks/swe-bench-pro)
+* 结果：Claude Mythos 5 为 80.3%，Claude Fable 5 为 80.0%，Claude Opus 5 为 79.2%。"#;
+        let changed = first.replace("80.3%", "81.4%");
+
+        assert_ne!(
+            recurring_section_identities(first)[0].identity,
+            recurring_section_identities(&changed)[0].identity
+        );
+    }
+
+    #[test]
+    fn plain_headings_without_attributed_urls_are_not_delivery_sections() {
+        assert!(
+            recurring_section_identities(
+                "### 随手记录\n这一段没有来源，只是普通讨论，不应建立可跨文档抑制的身份。"
+            )
+            .is_empty()
         );
     }
 }

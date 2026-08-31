@@ -123,11 +123,7 @@ fn is_escaped(bytes: &[u8], index: usize) -> bool {
 
 fn repair_math_expression(expression: &str) -> String {
     let characters = expression.chars().collect::<Vec<_>>();
-    let has_duplicate_escape = characters.windows(3).any(|window| {
-        window[0] == '\\'
-            && window[1] == '\\'
-            && (window[2].is_ascii_alphabetic() || matches!(window[2], '{' | '}'))
-    });
+    let has_duplicate_escape = duplicate_tex_escape_run(&characters).is_some();
     let has_spaced_escaped_equal = (0..characters.len()).any(|index| {
         characters[index] == '\\'
             && characters.get(index + 1) == Some(&'=')
@@ -143,15 +139,20 @@ fn repair_math_expression(expression: &str) -> String {
     let mut output = String::with_capacity(expression.len());
     let mut index = 0;
     while index < characters.len() {
-        if characters[index] == '\\'
-            && characters.get(index + 1) == Some(&'\\')
-            && characters
-                .get(index + 2)
-                .is_some_and(|next| next.is_ascii_alphabetic() || matches!(next, '{' | '}'))
-        {
-            output.push('\\');
-            index += 2;
-            continue;
+        if characters[index] == '\\' {
+            let mut end = index + 1;
+            while characters.get(end) == Some(&'\\') {
+                end += 1;
+            }
+            if end - index >= 2
+                && characters
+                    .get(end)
+                    .is_some_and(|next| next.is_ascii_alphabetic() || matches!(next, '{' | '}'))
+            {
+                output.push('\\');
+                index = end;
+                continue;
+            }
         }
         if characters[index] == '\\'
             && characters.get(index + 1) == Some(&'=')
@@ -168,6 +169,29 @@ fn repair_math_expression(expression: &str) -> String {
         index += 1;
     }
     output
+}
+
+fn duplicate_tex_escape_run(characters: &[char]) -> Option<usize> {
+    let mut index = 0;
+    while index < characters.len() {
+        if characters[index] != '\\' {
+            index += 1;
+            continue;
+        }
+        let mut end = index + 1;
+        while characters.get(end) == Some(&'\\') {
+            end += 1;
+        }
+        if end - index >= 2
+            && characters
+                .get(end)
+                .is_some_and(|next| next.is_ascii_alphabetic() || matches!(next, '{' | '}'))
+        {
+            return Some(index);
+        }
+        index = end;
+    }
+    None
 }
 
 fn unescape_systematically_escaped_markdown(value: &str) -> String {
@@ -433,6 +457,16 @@ mod tests {
     fn preserves_valid_tex_line_breaks_and_isolated_equal_accents() {
         let value = r"保留公式 $x \\ y$、$\\ \mathbb{N}$ 与 $a \=b$。";
         assert_eq!(normalize_external_markdown(value), value);
+    }
+
+    #[test]
+    fn collapses_every_duplicate_escape_layer_before_tex_commands() {
+        let value = r"变形函数 $\\\\mathfrak{S}C_\\\\alpha(v)$ 与 $\\\\kappa$。";
+        let odd_layer = r"变形函数 $\\\mathfrak{S}C_\\\alpha(v)$ 与 $\\\kappa$。";
+        let expected = r"变形函数 $\mathfrak{S}C_\alpha(v)$ 与 $\kappa$。";
+        assert_eq!(normalize_external_markdown(value), expected);
+        assert_eq!(normalize_external_markdown(odd_layer), expected);
+        assert_eq!(normalize_external_markdown(expected), expected);
     }
 
     #[test]

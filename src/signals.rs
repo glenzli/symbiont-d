@@ -11,12 +11,14 @@ use tokio::{
     sync::{RwLock, watch},
 };
 
-use crate::external_markdown::{normalize_external_markdown, source_urls};
+use crate::external_markdown::{canonical_source_url, normalize_external_markdown, source_urls};
 use crate::sensing::{
     InputRoleSnapshot, SensingCandidate, SensingDeduplicationReference, SensingPresentation,
     SensingSource, SensingSourceClass,
 };
-use crate::source_identity::stable_source_identities;
+use crate::source_identity::{
+    RecurringSectionIdentity, recurring_section_identities, stable_source_identities,
+};
 
 const RETENTION_DAYS: i64 = 30;
 const MAX_EVENT_AGE_DAYS: i64 = 45;
@@ -217,6 +219,17 @@ impl SignalStore {
         let mut document = self.document.write().await;
         let candidate_fingerprint = signal_fingerprint(&candidate.title, &candidate.summary);
         let candidate_source_identities = candidate_delivery_identities(candidate);
+        let candidate_section_identities = recurring_section_identities(&candidate.received_text)
+            .into_iter()
+            .map(|section| section.identity)
+            .collect::<HashSet<_>>();
+        let delivered_section_identities = document
+            .signals
+            .iter()
+            .filter(|signal| signal.kind == SignalKind::ExternalInput)
+            .flat_map(signal_recurring_sections)
+            .map(|section| section.identity)
+            .collect::<HashSet<_>>();
         if document
             .signals
             .iter()
@@ -230,6 +243,10 @@ impl SignalStore {
                             .any(|identity| candidate_source_identities.contains(identity))
             })
             .is_some()
+            || !candidate_section_identities.is_empty()
+                && candidate_section_identities
+                    .iter()
+                    .all(|identity| delivered_section_identities.contains(identity))
         {
             return Ok(SignalPublishOutcome::Existing);
         }
@@ -704,10 +721,12 @@ fn normalize_and_prune(document: &mut SignalDocument, now: DateTime<Utc>) -> boo
             signal.hidden = false;
             changed = true;
         }
-        let fingerprint = signal_fingerprint(&signal.title, &signal.summary);
-        if signal.fingerprint != fingerprint {
-            signal.fingerprint = fingerprint;
-            changed = true;
+        if signal.kind == SignalKind::ExternalInput {
+            let fingerprint = signal_fingerprint(&signal.title, &signal.summary);
+            if signal.fingerprint != fingerprint {
+                signal.fingerprint = fingerprint;
+                changed = true;
+            }
         }
         if signal.received_text.trim().is_empty() {
             signal.received_text = if signal.summary.trim().is_empty() {
@@ -756,17 +775,177 @@ fn mark_duplicate_deliveries(signals: &mut [SignalEvent]) -> bool {
     let mut changed = false;
     let mut fingerprints = HashMap::<String, String>::new();
     let mut sources = HashMap::<String, String>::new();
-    for signal in signals {
+    let mut sections = HashMap::<String, String>::new();
+    let mut external_representatives = HashMap::<String, String>::new();
+    let mut repeated_section_routes = HashMap::<String, Vec<(HashSet<String>, String)>>::new();
+    for signal in signals.iter_mut() {
         if signal.kind != SignalKind::ExternalInput {
             continue;
         }
         let source_identities = signal_delivery_identities(signal);
-        let duplicate_of = fingerprints.get(&signal.fingerprint).cloned().or_else(|| {
-            source_identities
-                .iter()
-                .find_map(|identity| sources.get(identity).cloned())
-        });
+        let recurring_sections = signal_recurring_sections(signal);
+        let repeated_sections = recurring_sections
+            .iter()
+            .filter_map(|section| {
+                sections
+                    .get(&section.identity)
+                    .cloned()
+                    .map(|representative| (section, representative))
+            })
+            .collect::<Vec<_>>();
+        let new_sections = recurring_sections
+            .iter()
+            .filter(|section| !sections.contains_key(&section.identity))
+            .collect::<Vec<_>>();
+        let duplicate_of = fingerprints
+            .get(&signal.fingerprint)
+            .cloned()
+            .or_else(|| {
+                source_identities
+                    .iter()
+                    .find_map(|identity| sources.get(identity).cloned())
+            })
+            .or_else(|| {
+                (!recurring_sections.is_empty() && new_sections.is_empty())
+                    .then(|| {
+                        repeated_sections
+                            .first()
+                            .map(|(_, representative)| representative)
+                    })
+                    .flatten()
+                    .cloned()
+            });
         if let Some(representative) = duplicate_of {
+            if signal.duplicate_of_signal_id.as_deref() != Some(&representative) {
+                signal.duplicate_of_signal_id = Some(representative.clone());
+                changed = true;
+            }
+            if !signal.hidden {
+                signal.hidden = true;
+                changed = true;
+            }
+            external_representatives.insert(signal.id.clone(), representative);
+            continue;
+        }
+        external_representatives.insert(signal.id.clone(), signal.id.clone());
+        if signal.duplicate_of_signal_id.take().is_some() {
+            changed = true;
+        }
+        if signal.hidden && !signal.dismissed && signal.promoted_revision_id.is_none() {
+            signal.hidden = false;
+            changed = true;
+        }
+        if signal.presentation == SensingPresentation::Original
+            && signal.content.trim() == signal.received_text.trim()
+            && !repeated_sections.is_empty()
+            && !new_sections.is_empty()
+        {
+            let repeated_ranges = repeated_sections
+                .iter()
+                .map(|(section, _)| section.range.clone())
+                .collect::<Vec<_>>();
+            let filtered = remove_ranges(&signal.received_text, &repeated_ranges);
+            if !filtered.is_empty() && filtered != signal.content {
+                signal.content = filtered;
+                signal.presentation = SensingPresentation::Condensed;
+                changed = true;
+            }
+        }
+        if !repeated_sections.is_empty() {
+            repeated_section_routes.insert(
+                signal.id.clone(),
+                repeated_sections
+                    .iter()
+                    .map(|(section, representative)| {
+                        (
+                            section.source_urls.iter().cloned().collect(),
+                            representative.clone(),
+                        )
+                    })
+                    .collect(),
+            );
+        }
+        fingerprints.insert(signal.fingerprint.clone(), signal.id.clone());
+        for identity in source_identities {
+            sources.entry(identity).or_insert_with(|| signal.id.clone());
+        }
+        for section in new_sections {
+            sections
+                .entry(section.identity.clone())
+                .or_insert_with(|| signal.id.clone());
+        }
+    }
+    changed |=
+        mark_duplicate_challenges(signals, &external_representatives, &repeated_section_routes);
+    changed
+}
+
+fn signal_recurring_sections(signal: &SignalEvent) -> Vec<RecurringSectionIdentity> {
+    recurring_section_identities(if signal.received_text.trim().is_empty() {
+        &signal.content
+    } else {
+        &signal.received_text
+    })
+}
+
+fn remove_ranges(value: &str, ranges: &[std::ops::Range<usize>]) -> String {
+    let mut output = String::with_capacity(value.len());
+    let mut cursor = 0;
+    for range in ranges {
+        if range.start < cursor || range.end > value.len() {
+            continue;
+        }
+        output.push_str(&value[cursor..range.start]);
+        cursor = range.end;
+    }
+    output.push_str(&value[cursor..]);
+    output.trim().to_owned()
+}
+
+fn mark_duplicate_challenges(
+    signals: &mut [SignalEvent],
+    external_representatives: &HashMap<String, String>,
+    repeated_section_routes: &HashMap<String, Vec<(HashSet<String>, String)>>,
+) -> bool {
+    let mut changed = false;
+    let mut challenges = HashMap::<Vec<String>, String>::new();
+    for signal in signals {
+        if signal.kind != SignalKind::AttackerChallenge {
+            continue;
+        }
+        let challenge_sources = signal
+            .sources
+            .iter()
+            .filter_map(|source| canonical_source_url(&source.url))
+            .collect::<HashSet<_>>();
+        let mut rerouted = false;
+        let mut related = signal
+            .related_signal_ids
+            .iter()
+            .map(|id| {
+                let mut representative = external_representatives
+                    .get(id)
+                    .cloned()
+                    .unwrap_or_else(|| id.clone());
+                if representative != *id {
+                    rerouted = true;
+                } else if let Some(routes) = repeated_section_routes.get(id)
+                    && let Some((_, section_representative)) = routes
+                        .iter()
+                        .find(|(urls, _)| !challenge_sources.is_disjoint(urls))
+                {
+                    representative = section_representative.clone();
+                    rerouted = true;
+                }
+                representative
+            })
+            .collect::<Vec<_>>();
+        related.sort_unstable();
+        related.dedup();
+        if related.is_empty() {
+            continue;
+        }
+        if rerouted && let Some(representative) = challenges.get(&related).cloned() {
             if signal.duplicate_of_signal_id.as_deref() != Some(&representative) {
                 signal.duplicate_of_signal_id = Some(representative);
                 changed = true;
@@ -777,12 +956,15 @@ fn mark_duplicate_deliveries(signals: &mut [SignalEvent]) -> bool {
             }
             continue;
         }
+        challenges
+            .entry(related)
+            .or_insert_with(|| signal.id.clone());
         if signal.duplicate_of_signal_id.take().is_some() {
             changed = true;
         }
-        fingerprints.insert(signal.fingerprint.clone(), signal.id.clone());
-        for identity in source_identities {
-            sources.entry(identity).or_insert_with(|| signal.id.clone());
+        if signal.hidden && !signal.dismissed {
+            signal.hidden = false;
+            changed = true;
         }
     }
     changed
@@ -887,8 +1069,8 @@ mod tests {
     use std::time::{SystemTime, UNIX_EPOCH};
 
     use super::{
-        BriefingTopicAssignment, BriefingTopicStatus, SignalDocument, SignalPublishOutcome,
-        SignalStore, timestamp,
+        BriefingTopicAssignment, BriefingTopicStatus, SignalDocument, SignalKind,
+        SignalPublishOutcome, SignalStore, timestamp,
     };
     use crate::sensing::{
         InputRoleSnapshot, SensingCandidate, SensingPresentation, SensingSource, SensingSourceClass,
@@ -996,6 +1178,196 @@ mod tests {
             .unwrap();
         assert!(duplicate.hidden);
         assert!(duplicate.duplicate_of_signal_id.is_some());
+        let _ = tokio::fs::remove_file(path).await;
+    }
+
+    #[tokio::test]
+    async fn recurring_dashboard_sections_deduplicate_across_digest_dates() {
+        let nonce = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let path = std::env::temp_dir().join(format!("symbiont-signals-dashboard-{nonce}.json"));
+        let store = SignalStore::open(path.clone()).await.unwrap();
+        let section = r#"### 【软件工程天梯】SWE-bench Pro 2026-08-27
+* 来源：[BenchLM](https://benchlm.ai/benchmarks/swe-bench-pro)
+* 结果：Claude Mythos 5 为 80.3%，Claude Fable 5 为 80.0%，Claude Opus 5 为 79.2%。"#;
+        let mut first = candidate("dashboard_first");
+        first.title = "三、权威基准天梯".to_owned();
+        first.summary = section.to_owned();
+        first.proposed_input = section.to_owned();
+        first.received_text = section.to_owned();
+        first.sources[0].url = "https://drive.google.com/open?id=digest-one".to_owned();
+        assert!(matches!(
+            store
+                .publish_with_content(&first, section.to_owned(), "credible".to_owned())
+                .await
+                .unwrap(),
+            SignalPublishOutcome::Published
+        ));
+
+        let repeated_section = section.replace("2026-08-27", "2026-08-31");
+        let mut repeated = candidate("dashboard_repeated");
+        repeated.title = "四、权威基准天梯".to_owned();
+        repeated.summary = repeated_section.clone();
+        repeated.proposed_input = repeated_section.clone();
+        repeated.received_text = repeated_section.clone();
+        repeated.sources[0].url = "https://drive.google.com/open?id=digest-two".to_owned();
+        assert!(matches!(
+            store
+                .publish_with_content(&repeated, repeated_section, "credible again".to_owned())
+                .await
+                .unwrap(),
+            SignalPublishOutcome::Existing
+        ));
+
+        let changed_section = section.replace("80.3%", "81.4%");
+        let mut changed = candidate("dashboard_changed");
+        changed.title = "五、权威基准天梯".to_owned();
+        changed.summary = changed_section.clone();
+        changed.proposed_input = changed_section.clone();
+        changed.received_text = changed_section.clone();
+        changed.sources[0].url = "https://drive.google.com/open?id=digest-three".to_owned();
+        assert!(matches!(
+            store
+                .publish_with_content(&changed, changed_section, "new result".to_owned())
+                .await
+                .unwrap(),
+            SignalPublishOutcome::Published
+        ));
+        assert_eq!(store.visible(10).await.unwrap().len(), 2);
+        let _ = tokio::fs::remove_file(path).await;
+    }
+
+    #[tokio::test]
+    async fn reopening_hides_repeated_sections_and_their_repeated_challenges() {
+        let nonce = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let path =
+            std::env::temp_dir().join(format!("symbiont-signals-section-migration-{nonce}.json"));
+        let store = SignalStore::open(path.clone()).await.unwrap();
+        let dashboard = r#"三、权威基准天梯
+
+### 【软件工程天梯】SWE-bench Pro 2026-08-27
+* 来源：[BenchLM](https://benchlm.ai/benchmarks/swe-bench-pro)
+* 结果：Claude Mythos 5 为 80.3%，Claude Fable 5 为 80.0%，Claude Opus 5 为 79.2%。"#;
+        let mut first = candidate("legacy_dashboard_first");
+        first.title = "三、权威基准天梯".to_owned();
+        first.summary = dashboard.to_owned();
+        first.proposed_input = dashboard.to_owned();
+        first.received_text = dashboard.to_owned();
+        first.sources[0].url = "https://drive.google.com/open?id=digest-one".to_owned();
+        store
+            .publish_with_content(&first, dashboard.to_owned(), "credible".to_owned())
+            .await
+            .unwrap();
+        let first_signal = store.visible(10).await.unwrap().remove(0);
+        store
+            .publish_attacker_challenge(
+                InputRoleSnapshot::ambient("attacker", "symbiont-d · 异议", "gpt-test", "codex"),
+                "benchmark-overclaim",
+                "SWE-bench Pro 的榜单不能直接解释成统一模型排名。".to_owned(),
+                "Settings differ".to_owned(),
+                vec![first_signal.id.clone()],
+                vec![SensingSource {
+                    url: "https://benchlm.ai/benchmarks/swe-bench-pro".to_owned(),
+                    detail: "Dashboard".to_owned(),
+                }],
+            )
+            .await
+            .unwrap();
+        drop(store);
+
+        let mut document: SignalDocument =
+            serde_json::from_str(&tokio::fs::read_to_string(&path).await.unwrap()).unwrap();
+        let first_challenge = document
+            .signals
+            .iter()
+            .find(|signal| signal.kind == SignalKind::AttackerChallenge)
+            .cloned()
+            .unwrap();
+        let mut repeated = first_signal.clone();
+        repeated.id = "legacy-dashboard-repeated".to_owned();
+        repeated.candidate_id = "legacy_dashboard_second".to_owned();
+        repeated.title = "四、权威基准天梯".to_owned();
+        repeated.summary = dashboard.replace("2026-08-27", "2026-08-31");
+        repeated.content = repeated.summary.clone();
+        repeated.received_text = repeated.summary.clone();
+        repeated.sources[0].url = "https://drive.google.com/open?id=digest-two".to_owned();
+        repeated.fingerprint = "v2|legacy-different-digest".to_owned();
+        document.signals.push(repeated.clone());
+
+        let mut repeated_challenge = first_challenge.clone();
+        repeated_challenge.id = "legacy-dashboard-repeated-challenge".to_owned();
+        repeated_challenge.candidate_id = "attacker_repeated".to_owned();
+        repeated_challenge.fingerprint = "v3|legacy-paraphrased-challenge".to_owned();
+        repeated_challenge.related_signal_ids = vec![repeated.id.clone()];
+        repeated_challenge.content = "这组 SWE-bench Pro 数字仍不能直接作为统一排名。".to_owned();
+        repeated_challenge.summary = repeated_challenge.content.clone();
+        repeated_challenge.received_text = repeated_challenge.content.clone();
+        document.signals.push(repeated_challenge);
+
+        let novel = r#"三、前沿 AI 与榜单
+
+### 【端侧模型】新的本地运行能力
+* 来源：[厂商发布](https://example.com/model-release)
+* 结果：新的端侧模型在 24GB 显存内支持更长上下文与本地工具调用，这是此前记录没有的新事实。
+
+### 【软件工程天梯】SWE-bench Pro 2026-08-31
+* 来源：[BenchLM](https://benchlm.ai/benchmarks/swe-bench-pro)
+* 结果：Claude Mythos 5 为 80.3%，Claude Fable 5 为 80.0%，Claude Opus 5 为 79.2%。"#;
+        let mut mixed = first_signal.clone();
+        mixed.id = "legacy-dashboard-mixed".to_owned();
+        mixed.candidate_id = "legacy_dashboard_mixed".to_owned();
+        mixed.title = "三、前沿 AI 与榜单".to_owned();
+        mixed.summary = novel.to_owned();
+        mixed.content = novel.to_owned();
+        mixed.received_text = novel.to_owned();
+        mixed.sources[0].url = "https://drive.google.com/open?id=digest-three".to_owned();
+        mixed.fingerprint = "v2|legacy-mixed-digest".to_owned();
+        document.signals.push(mixed.clone());
+
+        let mut mixed_challenge = first_challenge;
+        mixed_challenge.id = "legacy-dashboard-mixed-challenge".to_owned();
+        mixed_challenge.candidate_id = "attacker_mixed".to_owned();
+        mixed_challenge.fingerprint = "v3|legacy-mixed-challenge".to_owned();
+        mixed_challenge.related_signal_ids = vec![mixed.id.clone()];
+        document.signals.push(mixed_challenge);
+        tokio::fs::write(&path, serde_json::to_vec_pretty(&document).unwrap())
+            .await
+            .unwrap();
+
+        let reopened = SignalStore::open(path.clone()).await.unwrap();
+        let duplicate = reopened.get(&repeated.id).await.unwrap().unwrap();
+        assert!(duplicate.hidden);
+        assert_eq!(
+            duplicate.duplicate_of_signal_id.as_deref(),
+            Some(first_signal.id.as_str())
+        );
+        assert!(
+            reopened
+                .get("legacy-dashboard-repeated-challenge")
+                .await
+                .unwrap()
+                .unwrap()
+                .hidden
+        );
+        let mixed = reopened.get(&mixed.id).await.unwrap().unwrap();
+        assert!(!mixed.hidden);
+        assert_eq!(mixed.presentation, SensingPresentation::Condensed);
+        assert!(mixed.content.contains("新的端侧模型"));
+        assert!(!mixed.content.contains("SWE-bench Pro"));
+        assert!(mixed.received_text.contains("SWE-bench Pro"));
+        assert!(
+            reopened
+                .get("legacy-dashboard-mixed-challenge")
+                .await
+                .unwrap()
+                .unwrap()
+                .hidden
+        );
         let _ = tokio::fs::remove_file(path).await;
     }
 
