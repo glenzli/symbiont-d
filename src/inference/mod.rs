@@ -9,6 +9,7 @@ mod briefing_topics;
 mod pcp_maintenance;
 mod sensing_duplicate;
 mod sensing_review;
+mod sensing_similarity;
 
 use std::{collections::BTreeMap, sync::Arc, time::Duration};
 
@@ -105,11 +106,15 @@ impl<T> InferenceAttempt<T> {
 
 pub(crate) struct InferenceExecutor {
     runtime: Arc<InferRuntimeAccess>,
+    sensing_similarity: sensing_similarity::SensingSimilarity,
 }
 
 impl InferenceExecutor {
     pub(crate) fn new(runtime: Arc<InferRuntimeAccess>) -> Self {
-        Self { runtime }
+        Self {
+            runtime,
+            sensing_similarity: Default::default(),
+        }
     }
 
     pub(crate) async fn review_sensing(
@@ -212,7 +217,7 @@ impl InferenceExecutor {
         }
     }
 
-    /// Finds residual semantic duplicates with one local foundational pass.
+    /// Finds residual duplicates using candidate-specific historical retrieval.
     /// Failure is reported to the caller but is deliberately non-blocking: the
     /// value reviewer can safely continue with the unsuppressed candidates.
     pub(crate) async fn classify_sensing_duplicates(
@@ -221,53 +226,94 @@ impl InferenceExecutor {
         recent_signals: &[SensingDeduplicationReference],
         input_events: watch::Receiver<u64>,
     ) -> InferenceAttempt<Vec<String>> {
-        let interrupted = input_events.has_changed().unwrap_or(true);
-        if candidates.is_empty()
-            || (candidates.len() < 2 && recent_signals.is_empty())
-            || interrupted
-        {
+        if candidates.is_empty() || input_events.has_changed().unwrap_or(true) {
             return InferenceAttempt::Completed(InferenceOutcome {
                 value: Vec::new(),
                 invocations: Vec::new(),
-                interrupted,
+                interrupted: input_events.has_changed().unwrap_or(true),
             });
         }
-        let prompt = match sensing_duplicate::runtime_prompt(candidates, recent_signals) {
-            Ok(prompt) => prompt,
-            Err(error) => return InferenceAttempt::deferred(error.to_string()),
-        };
-        let completion = match self
-            .execute_text(
-                SENSING_DUPLICATE_WORKLOAD,
-                sensing_duplicate::RUNTIME_INSTRUCTIONS,
-                &prompt,
-                "ambient_dedup",
-                "sense",
+        let references = self
+            .sensing_similarity
+            .retrieve(
+                &self.runtime,
+                candidates,
+                recent_signals,
+                input_events.clone(),
             )
-            .await
-        {
-            Ok(completion) => completion,
-            Err(error) => return InferenceAttempt::deferred(error),
-        };
-        match sensing_duplicate::parse_envelope(&completion.text) {
-            Ok(envelope) => InferenceAttempt::Completed(InferenceOutcome {
-                value: sensing_duplicate::validated_duplicate_ids(
-                    candidates,
-                    recent_signals,
-                    envelope.duplicates,
-                ),
-                invocations: vec![completion.invocation],
-                interrupted: input_events.has_changed().unwrap_or(true),
-            }),
-            Err(error) => {
-                let mut invocation = completion.invocation;
-                invocation.status = "invalid_output".to_owned();
-                InferenceAttempt::Deferred {
-                    reason: format!("invalid local duplicate-classification output: {error}"),
-                    invocations: vec![invocation],
+            .await;
+        let mut duplicates = Vec::new();
+        let mut invocations = Vec::new();
+        let mut successes = 0;
+        let mut attempted = 0;
+        for (candidate, mut recent) in candidates.iter().zip(references) {
+            if input_events.has_changed().unwrap_or(true) {
+                break;
+            }
+            // A previously suppressed current candidate cannot be the sole
+            // representative of another suppression chain.
+            recent.retain(|r| {
+                !duplicates
+                    .iter()
+                    .any(|id| r.reference_id == format!("candidate:{id}"))
+            });
+            if recent.is_empty() {
+                continue;
+            }
+            attempted += 1;
+            let batch = std::slice::from_ref(candidate);
+            let prompt = match sensing_duplicate::runtime_prompt(batch, &recent) {
+                Ok(prompt) => prompt,
+                Err(error) => {
+                    tracing::warn!(%error, "encode duplicate pair");
+                    continue;
+                }
+            };
+            let completion = match self
+                .execute_text(
+                    SENSING_DUPLICATE_WORKLOAD,
+                    sensing_duplicate::RUNTIME_INSTRUCTIONS,
+                    &prompt,
+                    "ambient_dedup",
+                    "sense",
+                )
+                .await
+            {
+                Ok(completion) => completion,
+                Err(error) => {
+                    tracing::warn!(%error, "duplicate review unavailable; preserving candidate");
+                    continue;
+                }
+            };
+            let mut invocation = completion.invocation;
+            match sensing_duplicate::parse_envelope(&completion.text) {
+                Ok(envelope) => {
+                    duplicates.extend(sensing_duplicate::validated_duplicate_ids(
+                        batch,
+                        &recent,
+                        envelope.duplicates,
+                    ));
+                    successes += 1;
+                }
+                Err(error) => {
+                    invocation.status = "invalid_output".to_owned();
+                    tracing::warn!(%error, "invalid duplicate verdict; preserving candidate");
                 }
             }
+            invocations.push(invocation);
         }
+        let interrupted = input_events.has_changed().unwrap_or(true);
+        if successes == 0 && attempted > 0 && !interrupted {
+            return InferenceAttempt::Deferred {
+                reason: "local duplicate review unavailable; candidates preserved".into(),
+                invocations,
+            };
+        }
+        InferenceAttempt::Completed(InferenceOutcome {
+            value: duplicates,
+            invocations,
+            interrupted,
+        })
     }
 
     /// Creates low-stakes labels for the today's newly admitted inputs. This

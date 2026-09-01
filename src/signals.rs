@@ -3,6 +3,8 @@ use std::{
     path::PathBuf,
 };
 
+mod dedup;
+
 use anyhow::{Context, Result};
 use chrono::{DateTime, Duration, Local, NaiveDate, SecondsFormat, Utc};
 use serde::{Deserialize, Serialize};
@@ -23,8 +25,6 @@ use crate::source_identity::{
 const RETENTION_DAYS: i64 = 30;
 const MAX_EVENT_AGE_DAYS: i64 = 45;
 const MAX_RETAINED_SIGNALS: usize = 100;
-const MAX_DEDUPLICATION_REFERENCES: usize = 24;
-const MAX_DEDUPLICATION_EXCERPT_CHARS: usize = 480;
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub struct SignalExpirySummary {
@@ -72,6 +72,10 @@ pub struct SignalEvent {
     pub source_class: SensingSourceClass,
     #[serde(default, alias = "event_at")]
     pub event_at: Option<String>,
+    /// Date of the source document. Backfill remains a new delivery at
+    /// `observed_at`; neither clock is silently substituted for event time.
+    #[serde(default, alias = "source_document_at")]
+    pub source_document_at: Option<String>,
     #[serde(alias = "observed_at")]
     pub observed_at: String,
     #[serde(alias = "review_reason")]
@@ -139,6 +143,8 @@ pub(crate) struct BriefingTopicAssignment {
 struct SignalDocument {
     #[serde(default)]
     signals: Vec<SignalEvent>,
+    #[serde(default)]
+    delivery_history: Vec<SensingDeduplicationReference>,
 }
 
 pub struct SignalStore {
@@ -268,6 +274,7 @@ impl SignalStore {
             sources: candidate.sources.clone(),
             source_class: candidate.source_class,
             event_at: candidate.event_at.clone(),
+            source_document_at: candidate.source_document_at.clone(),
             observed_at: timestamp(now),
             review_reason: review_reason.trim().to_owned(),
             related_signal_ids: Vec::new(),
@@ -342,6 +349,7 @@ impl SignalStore {
             sources,
             source_class: SensingSourceClass::OpenDiscovery,
             event_at: None,
+            source_document_at: None,
             observed_at: timestamp(now),
             review_reason: reason.trim().to_owned(),
             related_signal_ids: related,
@@ -365,19 +373,33 @@ impl SignalStore {
         let now = Utc::now();
         let mut document = self.document.write().await;
         let changed = normalize_and_prune(&mut document, now);
+        let source_ids = document
+            .signals
+            .iter()
+            .rev()
+            .filter(|signal| !signal.hidden && signal.kind == SignalKind::ExternalInput)
+            .take(limit)
+            .map(|signal| signal.id.as_str())
+            .collect::<HashSet<_>>();
         let signals = document
             .signals
             .iter()
             .filter(|signal| !signal.hidden)
-            .rev()
-            .take(limit)
+            .filter(|signal| {
+                source_ids.contains(signal.id.as_str())
+                    || (signal.kind == SignalKind::AttackerChallenge
+                        && signal
+                            .related_signal_ids
+                            .iter()
+                            .any(|id| source_ids.contains(id.as_str())))
+            })
             .cloned()
             .collect::<Vec<_>>();
         drop(document);
         if changed {
             self.persist().await?;
         }
-        Ok(signals.into_iter().rev().collect())
+        Ok(signals)
     }
 
     /// Returns today's still-visible external inputs for the ephemeral briefing
@@ -603,32 +625,13 @@ impl SignalStore {
     }
 
     pub async fn deduplication_references(&self) -> Vec<SensingDeduplicationReference> {
-        let document = self.document.read().await;
-        document
-            .signals
+        self.document
+            .read()
+            .await
+            .delivery_history
             .iter()
             .rev()
-            .filter(|signal| signal.kind == SignalKind::ExternalInput)
-            .filter(|signal| signal.duplicate_of_signal_id.is_none())
-            .take(MAX_DEDUPLICATION_REFERENCES)
-            .map(|signal| SensingDeduplicationReference {
-                reference_id: signal.id.clone(),
-                fingerprint: signal.fingerprint.clone(),
-                actor_name: signal.actor.name.clone(),
-                title: signal.title.clone(),
-                excerpt: bounded_deduplication_excerpt(if signal.summary.trim().is_empty() {
-                    &signal.content
-                } else {
-                    &signal.summary
-                }),
-                source_urls: signal
-                    .sources
-                    .iter()
-                    .map(|source| source.url.clone())
-                    .collect(),
-                event_at: signal.event_at.clone(),
-                observed_at: signal.observed_at.clone(),
-            })
+            .cloned()
             .collect()
     }
 
@@ -710,6 +713,10 @@ impl SignalStore {
 fn normalize_and_prune(document: &mut SignalDocument, now: DateTime<Utc>) -> bool {
     let mut changed = false;
     for signal in &mut document.signals {
+        if signal.source_document_at.is_none() {
+            signal.source_document_at = crate::external_digest::source_document_at(&signal.sources);
+            changed |= signal.source_document_at.is_some();
+        }
         // Before source cards became the visible provenance anchor, promotion
         // reused `hidden` to remove them from the chat stream. Recover those
         // legacy records, but never override an explicit user dismissal.
@@ -757,16 +764,27 @@ fn normalize_and_prune(document: &mut SignalDocument, now: DateTime<Utc>) -> boo
     }
     let before = document.signals.len();
     let oldest = now - Duration::days(RETENTION_DAYS);
+    changed |= dedup::remember(document, now);
     document.signals.retain(|signal| {
         DateTime::parse_from_rfc3339(&signal.observed_at)
             .map(|observed_at| observed_at.with_timezone(&Utc) >= oldest)
             .unwrap_or(false)
             && !event_is_too_old(signal.event_at.as_deref(), now)
     });
-    if document.signals.len() > MAX_RETAINED_SIGNALS {
-        let drop_count = document.signals.len() - MAX_RETAINED_SIGNALS;
-        document.signals.drain(0..drop_count);
-    }
+    let source_ids = document
+        .signals
+        .iter()
+        .rev()
+        .filter(|signal| signal.kind == SignalKind::ExternalInput)
+        .take(MAX_RETAINED_SIGNALS)
+        .map(|signal| signal.id.clone())
+        .collect::<HashSet<_>>();
+    document.signals.retain(|signal| {
+        source_ids.contains(&signal.id)
+            // An orphaned historical annotation has no visible anchor, but a
+            // presentation change must not erase its original evidence.
+            || signal.kind == SignalKind::AttackerChallenge
+    });
     changed |= mark_duplicate_deliveries(&mut document.signals);
     changed || before != document.signals.len()
 }
@@ -835,19 +853,21 @@ fn mark_duplicate_deliveries(signals: &mut [SignalEvent]) -> bool {
             signal.hidden = false;
             changed = true;
         }
-        if signal.presentation == SensingPresentation::Original
-            && signal.content.trim() == signal.received_text.trim()
-            && !repeated_sections.is_empty()
-            && !new_sections.is_empty()
-        {
+        if !repeated_sections.is_empty() && !new_sections.is_empty() {
             let repeated_ranges = repeated_sections
                 .iter()
                 .map(|(section, _)| section.range.clone())
                 .collect::<Vec<_>>();
             let filtered = remove_ranges(&signal.received_text, &repeated_ranges);
-            if !filtered.is_empty() && filtered != signal.content {
+            // Recover the same exact excerpt for legacy model-condensed cards
+            // too. The UI can restore research details without reviving sections
+            // already delivered on another card. Original evidence stays intact.
+            if !filtered.is_empty()
+                && (filtered != signal.content
+                    || signal.presentation != SensingPresentation::Excerpted)
+            {
                 signal.content = filtered;
-                signal.presentation = SensingPresentation::Condensed;
+                signal.presentation = SensingPresentation::Excerpted;
                 changed = true;
             }
         }
@@ -1039,18 +1059,6 @@ fn signal_fingerprint(title: &str, summary: &str) -> String {
     format!("v3|{}|{}", normalize(title), normalize(summary),)
 }
 
-fn bounded_deduplication_excerpt(value: &str) -> String {
-    let mut excerpt = value
-        .trim()
-        .chars()
-        .take(MAX_DEDUPLICATION_EXCERPT_CHARS)
-        .collect::<String>();
-    if value.trim().chars().count() > MAX_DEDUPLICATION_EXCERPT_CHARS {
-        excerpt.push('…');
-    }
-    excerpt
-}
-
 fn normalize(value: &str) -> String {
     value
         .trim()
@@ -1087,6 +1095,7 @@ mod tests {
             received_text: "A model input.".to_owned(),
             event_at: None,
             source_class: SensingSourceClass::OpenDiscovery,
+            source_document_at: None,
             possible_connection: None,
             sources: vec![SensingSource {
                 url: "https://example.test/signal".to_owned(),
@@ -1356,7 +1365,7 @@ mod tests {
         );
         let mixed = reopened.get(&mixed.id).await.unwrap().unwrap();
         assert!(!mixed.hidden);
-        assert_eq!(mixed.presentation, SensingPresentation::Condensed);
+        assert_eq!(mixed.presentation, SensingPresentation::Excerpted);
         assert!(mixed.content.contains("新的端侧模型"));
         assert!(!mixed.content.contains("SWE-bench Pro"));
         assert!(mixed.received_text.contains("SWE-bench Pro"));
@@ -1368,6 +1377,27 @@ mod tests {
                 .unwrap()
                 .hidden
         );
+        // A legacy generated summary may include an already-delivered section.
+        // Reopening must recover only the novel verbatim part, not that duplicate.
+        let mut legacy: SignalDocument =
+            serde_json::from_str(&tokio::fs::read_to_string(&path).await.unwrap()).unwrap();
+        let legacy_mixed = legacy
+            .signals
+            .iter_mut()
+            .find(|s| s.id == mixed.id)
+            .unwrap();
+        legacy_mixed.presentation = SensingPresentation::Condensed;
+        legacy_mixed.content = "摘要：新的端侧模型与 SWE-bench Pro 排名。".to_owned();
+        tokio::fs::write(&path, serde_json::to_vec_pretty(&legacy).unwrap())
+            .await
+            .unwrap();
+        let recovered = SignalStore::open(path.clone()).await.unwrap();
+        let recovered_mixed = recovered.get(&mixed.id).await.unwrap().unwrap();
+        assert_eq!(recovered_mixed.presentation, SensingPresentation::Excerpted);
+        assert_eq!(recovered_mixed.content, mixed.content);
+        assert_eq!(recovered_mixed.received_text, mixed.received_text);
+        assert!(recovered_mixed.received_text.contains("SWE-bench Pro"));
+        assert!(!recovered_mixed.content.contains("SWE-bench Pro"));
         let _ = tokio::fs::remove_file(path).await;
     }
 
@@ -1697,7 +1727,7 @@ mod tests {
         let path = std::env::temp_dir().join(format!("symbiont-signals-dedup-{nonce}.json"));
         let store = SignalStore::open(path.clone()).await.unwrap();
         let mut original = candidate("sense_reference");
-        original.summary = "x".repeat(600);
+        original.received_text = "x".repeat(2400);
 
         store
             .publish_with_content(
@@ -1718,8 +1748,7 @@ mod tests {
             references[0].source_urls,
             vec!["https://example.test/signal"]
         );
-        assert_eq!(references[0].excerpt.chars().count(), 481);
-        assert!(references[0].excerpt.ends_with('…'));
+        assert_eq!(references[0].excerpt.chars().count(), 1800);
         let _ = tokio::fs::remove_file(path).await;
     }
 
@@ -1759,13 +1788,27 @@ mod tests {
             .unwrap();
 
         assert!(matches!(outcome, SignalPublishOutcome::Published));
-        let visible = store.visible(10).await.unwrap();
+        // A single-source window includes its annotations without consuming
+        // that source's slot.
+        let visible = store.visible(1).await.unwrap();
         let challenge = visible.last().unwrap();
         assert_eq!(challenge.kind, super::SignalKind::AttackerChallenge);
         assert_eq!(challenge.related_signal_ids, vec![source.id]);
         let references = store.deduplication_references().await;
         assert_eq!(references.len(), 1);
         assert_eq!(references[0].reference_id, visible[0].id);
+        {
+            let mut document = store.document.write().await;
+            document
+                .signals
+                .retain(|signal| signal.kind == SignalKind::AttackerChallenge);
+            super::normalize_and_prune(&mut document, Utc::now());
+            assert_eq!(
+                document.signals.len(),
+                1,
+                "missing source only hides an annotation, not its evidence"
+            );
+        }
         let _ = tokio::fs::remove_file(path).await;
     }
 

@@ -29,7 +29,7 @@ test("briefing lists only roles that actually delivered external input", () => {
   );
 });
 
-test("briefing keeps a dissent beside only its related input role", () => {
+test("briefing excludes standalone dissent records", () => {
   const signals = [
     input("a", "luna"),
     input("b", "mail"),
@@ -37,7 +37,7 @@ test("briefing keeps a dissent beside only its related input role", () => {
   ];
   assert.deepEqual(
     briefingEntries(signals, "luna").map((signal) => signal.id),
-    ["a", "d"],
+    ["a"],
   );
   assert.deepEqual(
     briefingEntries(signals, "mail").map((signal) => signal.id),
@@ -58,7 +58,7 @@ test("briefing roles and entries are scoped to the selected local date", () => {
   );
   assert.deepEqual(
     briefingEntries(signals, "luna", selectedDate).map((signal) => signal.id),
-    ["today", "dissent"],
+    ["today"],
   );
 });
 
@@ -74,7 +74,7 @@ test("briefing orders a role's selected-day inputs by observed time", () => {
   );
 });
 
-test("topic axis groups local-day input and keeps related dissent with its source", () => {
+test("topic axis counts only source inputs, not annotations", () => {
   const signals = [
     { ...input("ai", "luna"), briefingTopic: "本地模型", observedAt: "2026-08-14T01:00:00Z" },
     { ...input("paper", "mail"), observedAt: "2026-08-14T02:00:00Z" },
@@ -87,7 +87,7 @@ test("topic axis groups local-day input and keeps related dissent with its sourc
   );
   assert.deepEqual(
     briefingTopicEntries(signals, "本地模型", selectedDate).map((signal) => signal.id),
-    ["ai", "dissent"],
+    ["ai"],
   );
 });
 

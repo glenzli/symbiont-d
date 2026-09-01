@@ -1,3 +1,6 @@
+import { annotationsBySource, attachAnnotations } from "./input-signal-relations.js";
+import { signalContent, appendSignalDetails } from "./input-signal-content.js";
+
 function observedTime(signal) {
   const value = signal.observedAt || signal.observed_at || new Date().toISOString();
   const date = new Date(value);
@@ -112,24 +115,7 @@ export function briefingTopicProjection(signals, dateKey = null) {
 }
 
 function briefingEntriesForSources(signals, sources) {
-  const sourceIds = new Set(sources.map((signal) => signal.id));
-  const relatedDissent = signals.filter(
-    (signal) =>
-      signal.kind === "attacker_challenge" &&
-      relatedIds(signal).some((id) => sourceIds.has(id)),
-  );
-  const remainingDissent = new Set(relatedDissent);
-  const entries = [];
-  for (const source of chronologicalSignals(sources)) {
-    entries.push(source);
-    for (const dissent of chronologicalSignals(relatedDissent)) {
-      if (remainingDissent.has(dissent) && relatedIds(dissent).includes(source.id)) {
-        entries.push(dissent);
-        remainingDissent.delete(dissent);
-      }
-    }
-  }
-  return entries;
+  return chronologicalSignals(sources);
 }
 
 export function briefingEntries(signals, roleId, dateKey = null) {
@@ -227,7 +213,7 @@ export function initInputBriefingUi({ state, renderMessageContent, applyAvatar, 
     meta.append(author, stamp);
     const body = document.createElement("div");
     body.className = "input-briefing-card-body";
-    const text = signal.content || signal.receivedText || signal.received_text || signal.summary || signal.title || "";
+    const text = signalContent(signal).text;
     renderMessageContent(body, { content: text, parts: [{ type: "markdown", text }] });
     main.append(meta, body);
     if (signal.kind === "attacker_challenge" && relatedIds(signal).length) {
@@ -236,36 +222,7 @@ export function initInputBriefingUi({ state, renderMessageContent, applyAvatar, 
       relation.textContent = `↳ 回应 ${relatedIds(signal).length} 条该角色输入`;
       main.append(relation);
     }
-    const received = signal.receivedText || signal.received_text;
-    if (signal.presentation === "condensed" && received && received.trim() !== text.trim()) {
-      const original = document.createElement("details");
-      original.className = "input-briefing-original";
-      const summary = document.createElement("summary");
-      summary.textContent = "展开收到的原文";
-      const originalBody = document.createElement("div");
-      renderMessageContent(originalBody, { content: received, parts: [{ type: "markdown", text: received }] });
-      original.append(summary, originalBody);
-      main.append(original);
-    }
-    if (signal.sources?.length) {
-      const sources = document.createElement("details");
-      sources.className = "input-briefing-sources";
-      const summary = document.createElement("summary");
-      summary.textContent = `${signal.sources.length} 个来源`;
-      const list = document.createElement("ul");
-      for (const source of signal.sources) {
-        const item = document.createElement("li");
-        const link = document.createElement("a");
-        link.href = source.url;
-        link.target = "_blank";
-        link.rel = "noreferrer";
-        link.textContent = source.detail || source.url;
-        item.append(link);
-        list.append(item);
-      }
-      sources.append(summary, list);
-      main.append(sources);
-    }
+    appendSignalDetails(main, signal, renderMessageContent);
     const actions = document.createElement("footer");
     const reply = document.createElement("button");
     reply.type = "button";
@@ -275,6 +232,7 @@ export function initInputBriefingUi({ state, renderMessageContent, applyAvatar, 
     actions.append(reply);
     main.append(actions);
     card.append(avatar, main);
+    attachAnnotations(card, annotationsBySource(state.signals || []).get(signal.id) || [], renderMessageContent, { body, foot: actions });
     return card;
   }
 
@@ -381,9 +339,9 @@ export function initInputBriefingUi({ state, renderMessageContent, applyAvatar, 
         : topicStatus.unavailable
           ? ` · ${topicStatus.unavailable} 条本地整理暂不可用，留在未归类`
           : "";
-      summary.textContent = `${selected.count} 条外部输入 · 主题仅用于浏览，关联异议会显示在对应位置${statusNotice}`;
+      summary.textContent = `${selected.count} 条外部输入 · 主题仅用于浏览，审阅提示附着在原文上${statusNotice}`;
     } else {
-      summary.textContent = `${selected.count} 条外部输入 · 按发生时间排列 · 关联异议会显示在对应位置`;
+      summary.textContent = `${selected.count} 条外部输入 · 按采集时间排列 · 审阅提示附着在原文上`;
     }
     feedHeader.append(heading, summary);
     const entries = selectedView === "topics"

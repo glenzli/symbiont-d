@@ -112,6 +112,8 @@ const INPUT_ROLES_JS: &str = include_str!("../web/input-roles.js");
 const INPUT_BRIEFING_UI_JS: &str = include_str!("../web/input-briefing-ui.js");
 const INPUT_SIGNAL_GROUPS_JS: &str = include_str!("../web/input-signal-groups.js");
 const INPUT_SIGNAL_RELATIONS_JS: &str = include_str!("../web/input-signal-relations.js");
+const INPUT_SIGNAL_CONTENT_JS: &str = include_str!("../web/input-signal-content.js");
+const INPUT_SIGNAL_POPOVERS_JS: &str = include_str!("../web/input-signal-popovers.js");
 const CONVERSATION_FOCUS_UI_JS: &str = include_str!("../web/conversation-focus-ui.js");
 const SETTINGS_JS: &str = include_str!("../web/settings.js");
 const USAGE_UI_JS: &str = include_str!("../web/usage-ui.js");
@@ -660,6 +662,8 @@ pub fn router(state: AppState) -> Router {
         .route("/input-briefing-ui.js", get(input_briefing_ui_js))
         .route("/input-signal-groups.js", get(input_signal_groups_js))
         .route("/input-signal-relations.js", get(input_signal_relations_js))
+        .route("/input-signal-content.js", get(input_signal_content_js))
+        .route("/input-signal-popovers.js", get(input_signal_popovers_js))
         .route("/conversation-focus-ui.js", get(conversation_focus_ui_js))
         .route("/settings.js", get(settings_js))
         .route("/usage-ui.js", get(usage_ui_js))
@@ -962,6 +966,20 @@ async fn input_signal_relations_js() -> impl IntoResponse {
     (
         [(header::CONTENT_TYPE, "text/javascript; charset=utf-8")],
         INPUT_SIGNAL_RELATIONS_JS,
+    )
+}
+
+async fn input_signal_content_js() -> impl IntoResponse {
+    (
+        [(header::CONTENT_TYPE, "text/javascript; charset=utf-8")],
+        INPUT_SIGNAL_CONTENT_JS,
+    )
+}
+
+async fn input_signal_popovers_js() -> impl IntoResponse {
+    (
+        [(header::CONTENT_TYPE, "text/javascript; charset=utf-8")],
+        INPUT_SIGNAL_POPOVERS_JS,
     )
 }
 

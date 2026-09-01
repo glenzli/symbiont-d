@@ -181,6 +181,7 @@ mod tests {
             sources: vec![],
             source_class: SensingSourceClass::OpenDiscovery,
             event_at: None,
+            source_document_at: None,
             observed_at: "2026-08-14T00:00:00Z".to_owned(),
             review_reason: "test".to_owned(),
             related_signal_ids: vec![],

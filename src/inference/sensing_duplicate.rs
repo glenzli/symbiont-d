@@ -68,6 +68,7 @@ struct CandidateRecord<'a> {
     title: &'a str,
     summary: &'a str,
     event_at: Option<&'a str>,
+    source_document_at: Option<&'a str>,
     source_urls: Vec<&'a str>,
 }
 
@@ -77,6 +78,7 @@ struct RecentRecord<'a> {
     title: &'a str,
     excerpt: &'a str,
     event_at: Option<&'a str>,
+    source_document_at: Option<&'a str>,
     source_urls: &'a [String],
 }
 
@@ -117,6 +119,7 @@ pub(super) fn runtime_prompt(
             title: &candidate.title,
             summary: &candidate.summary,
             event_at: candidate.event_at.as_deref(),
+            source_document_at: candidate.source_document_at.as_deref(),
             source_urls: candidate
                 .sources
                 .iter()
@@ -132,6 +135,7 @@ pub(super) fn runtime_prompt(
             title: &signal.title,
             excerpt: &signal.excerpt,
             event_at: signal.event_at.as_deref(),
+            source_document_at: signal.source_document_at.as_deref(),
             source_urls: &signal.source_urls,
         })
         .collect::<Vec<_>>();
@@ -147,6 +151,9 @@ For a recurring leaderboard, dashboard, or digest, a new retrieval date, section
 rephrasing alone is still duplicate delivery. Omit it from duplicates only when rankings,
 measurements, evidence, or conclusions changed materially. A duplicate reason should identify the
 unchanged result or claim, not merely the shared topic.
+Source-document dates describe the document, not event time. Older documents can be newly
+delivered history; age alone is never a duplicate reason. Different wording or source URLs do not
+make an unchanged fact new. Use the substantive claim and evidence, not just title overlap.
 
 For a duplicate current record, point `candidate` to its C id and `same_as` either to an earlier C
 record that should survive or to an R record already delivered. Never point to a later C record.
@@ -274,6 +281,7 @@ mod tests {
             proposed_input: title.to_owned(),
             received_text: title.to_owned(),
             event_at: None,
+            source_document_at: None,
             source_class: SensingSourceClass::Research,
             possible_connection: None,
             sources: vec![SensingSource {
@@ -296,6 +304,7 @@ mod tests {
             excerpt: "Earlier delivery".to_owned(),
             source_urls: vec![url.to_owned()],
             event_at: None,
+            source_document_at: None,
             observed_at: "2026-08-12T00:00:00Z".to_owned(),
         }
     }

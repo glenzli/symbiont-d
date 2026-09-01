@@ -6,6 +6,7 @@
 
 use crate::external_markdown::{normalize_external_markdown, source_urls};
 use crate::sensing::{SensingCandidateDraft, SensingSource, SensingSourceClass};
+use chrono::{Local, NaiveDateTime, SecondsFormat, TimeZone, Utc};
 
 const MAX_DOCUMENT_CHARS: usize = 24_000;
 const MAX_TITLE_CHARS: usize = 240;
@@ -27,6 +28,7 @@ pub struct ExternalDigest {
     title: String,
     body: String,
     event_at: Option<String>,
+    document_at: Option<String>,
     provenance: DigestProvenance,
 }
 
@@ -39,6 +41,7 @@ impl ExternalDigest {
     ) -> Option<Self> {
         let body = bounded_document(body);
         (!body.is_empty()).then_some(Self {
+            document_at: digest_document_at(&title),
             title: compact_text(&title, MAX_TITLE_CHARS),
             body,
             event_at,
@@ -48,6 +51,14 @@ impl ExternalDigest {
 
     pub fn body(&self) -> &str {
         &self.body
+    }
+
+    pub fn with_document_at(mut self, at: Option<String>) -> Self {
+        // A digest's own date is more useful than the time a copy was uploaded.
+        if self.document_at.is_none() {
+            self.document_at = at;
+        }
+        self
     }
 
     pub fn into_candidates(self) -> Vec<SensingCandidateDraft> {
@@ -68,6 +79,7 @@ impl ExternalDigest {
                     proposed_input: compact_text(&normalized_section, MAX_INPUT_CHARS),
                     received_text: Some(normalized_section.clone()),
                     event_at: self.event_at.clone(),
+                    source_document_at: self.document_at.clone(),
                     source_class: classify_section(&normalized_section),
                     possible_connection: Some(self.provenance.possible_connection.clone()),
                     sources: extract_sources(&normalized_section, &self.title, &self.provenance),
@@ -79,6 +91,24 @@ impl ExternalDigest {
     pub fn candidate_count(&self) -> usize {
         split_digest(&self.body).len()
     }
+}
+
+/// Recognizes the configured Digest filename convention, including legacy
+/// provenance descriptions. This is a document date, never an event date.
+pub(crate) fn digest_document_at(value: &str) -> Option<String> {
+    let start = value.find("Digest_")? + "Digest_".len();
+    let stamp = value.get(start..start + 13)?;
+    let naive = NaiveDateTime::parse_from_str(stamp, "%Y%m%d_%H%M").ok()?;
+    Local.from_local_datetime(&naive).single().map(|at| {
+        at.with_timezone(&Utc)
+            .to_rfc3339_opts(SecondsFormat::Millis, true)
+    })
+}
+
+pub(crate) fn source_document_at(sources: &[SensingSource]) -> Option<String> {
+    sources
+        .iter()
+        .find_map(|source| digest_document_at(&source.detail))
 }
 
 fn bounded_document(value: &str) -> String {

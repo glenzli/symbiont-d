@@ -25,6 +25,7 @@ export function initMessageSync({
   let refreshQueued = false;
   let seenTimer = null;
   let reportedConnection = null;
+  let readCheckFrame = null;
 
   const observer = new IntersectionObserver(
     (entries) => {
@@ -48,6 +49,10 @@ export function initMessageSync({
 
   function trackSignal(element, signal, options = {}) {
     if (!signal?.id) return;
+    if (signal.kind === "attacker_challenge") {
+      remove([`signal:${signal.id}`]);
+      return;
+    }
     trackIncoming(
       element,
       `signal:${signal.id}`,
@@ -59,15 +64,17 @@ export function initMessageSync({
   }
 
   function trackIncoming(element, readId, at, unreadEligible, recordsSeen, options) {
+    const alreadyKnown = knownRevisionIds.has(readId);
+    if (options.previousElement) observer.unobserve(options.previousElement);
     knownRevisionIds.add(readId);
     element.dataset.readId = readId;
     if (recordsSeen) assistantRevisionIds.add(readId);
     observer.observe(element);
-    const arrivedAfterLastVisit = persisted && at && (!observedAt || at > observedAt);
+    const arrivedAfterLastVisit = persisted && at && (!persisted.observedAt || at > persisted.observedAt);
     if (
       unreadEligible &&
       !options.interactive &&
-      (unreadRevisionIds.has(readId) || options.incoming || arrivedAfterLastVisit)
+      (unreadRevisionIds.has(readId) || (!alreadyKnown && (options.incoming || arrivedAfterLastVisit)))
     ) {
       markUnread(element, readId);
     }
@@ -255,10 +262,11 @@ export function initMessageSync({
     if (!canRead()) return;
     const root = conversation.getBoundingClientRect();
     for (const [revisionId, element] of unreadElements) {
+      if (!element.isConnected || element.getClientRects().length === 0) continue;
       const bounds = element.getBoundingClientRect();
       const visible =
         Math.min(bounds.bottom, root.bottom) - Math.max(bounds.top, root.top);
-      if (visible >= Math.min(bounds.height * 0.55, root.height)) {
+      if (bounds.height > 0 && root.height > 0 && visible >= Math.min(bounds.height, root.height) * 0.55) {
         markRead(revisionId);
       }
     }
@@ -326,7 +334,11 @@ export function initMessageSync({
   }
 
   function scheduleReadCheck() {
-    requestAnimationFrame(() => requestAnimationFrame(scanVisibleUnread));
+    if (readCheckFrame !== null) return;
+    readCheckFrame = requestAnimationFrame(() => requestAnimationFrame(() => {
+      readCheckFrame = null;
+      scanVisibleUnread();
+    }));
   }
 
   unreadIndicator.addEventListener("click", () => {
@@ -336,6 +348,10 @@ export function initMessageSync({
   });
   window.addEventListener("focus", scheduleReadCheck);
   document.addEventListener("visibilitychange", scheduleReadCheck);
+  conversation.addEventListener("scroll", scheduleReadCheck, { passive: true });
+  conversation.addEventListener("load", scheduleReadCheck, true);
+  conversation.addEventListener("click", scheduleReadCheck);
+  window.addEventListener("resize", scheduleReadCheck);
 
   renderUnread();
   return {

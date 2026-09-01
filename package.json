@@ -12,9 +12,11 @@
     "dompurify": "^3.2.6",
     "katex": "^0.16.22",
     "lucide": "^1.28.0",
-    "marked": "^15.0.12"
+    "markdown-it": "^15.0.1",
+    "@mdit/plugin-tex": "^1.1.0"
   },
   "devDependencies": {
-    "esbuild": "^0.25.5"
+    "esbuild": "^0.25.5",
+    "jsdom": "^26.1.0"
   }
 }

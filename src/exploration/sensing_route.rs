@@ -161,18 +161,12 @@ pub(super) fn plan_sensing_routes(
         match decision.disposition {
             SensingReviewDisposition::Input => {
                 plan.terminal_ids.push(candidate.id.clone());
-                let presentation = decision.presentation.unwrap_or_default();
-                let content = match presentation {
-                    SensingPresentation::Original => candidate.received_text.clone(),
-                    SensingPresentation::Condensed => decision
-                        .display_text
-                        .filter(|text| !text.trim().is_empty())
-                        .unwrap_or_else(|| candidate.proposed_input.clone()),
-                };
                 plan.inputs.push(RoutedInput {
                     candidate: (*candidate).clone(),
-                    content,
-                    presentation,
+                    // Admission is not authorship. Even legacy review responses
+                    // cannot replace source details with a generated overview.
+                    content: candidate.received_text.clone(),
+                    presentation: SensingPresentation::Original,
                     qualification_note: decision.qualification_note,
                     reason: decision.reason,
                 });
@@ -216,6 +210,7 @@ mod tests {
             proposed_input: proposed_input.to_owned(),
             received_text: proposed_input.to_owned(),
             event_at: None,
+            source_document_at: None,
             source_class: SensingSourceClass::OpenDiscovery,
             possible_connection: None,
             sources: vec![SensingSource {
@@ -236,6 +231,7 @@ mod tests {
             proposed_input: "Input".to_owned(),
             received_text: None,
             event_at: None,
+            source_document_at: None,
             source_class: SensingSourceClass::OpenDiscovery,
             possible_connection: None,
             sources: vec![SensingSource {
@@ -282,7 +278,7 @@ mod tests {
     }
 
     #[test]
-    fn qualified_input_replaces_overconfident_source_wording_without_changing_actor() {
+    fn qualified_input_preserves_source_wording_and_keeps_caveats_separate() {
         let candidates = vec![candidate("one", "This definitely happened")];
         let plan = plan_sensing_routes(
             &candidates,
@@ -297,7 +293,9 @@ mod tests {
         );
 
         assert_eq!(plan.inputs[0].candidate.actor.id, "mail_inbox");
-        assert!(plan.inputs[0].content.contains("digest reports"));
+        assert_eq!(plan.inputs[0].content, "This definitely happened");
+        assert_eq!(plan.inputs[0].presentation, SensingPresentation::Original);
+        assert!(plan.inputs[0].qualification_note.is_some());
     }
 
     #[test]

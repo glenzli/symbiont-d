@@ -39,7 +39,6 @@ const DRIVE_FILES_URL: &str = "https://www.googleapis.com/drive/v3/files";
 const DEFAULT_NAME: &str = "Google Drive Inbox";
 const LEGACY_DEFAULT_NAME: &str = "Gemini Daily Digests";
 const GOOGLE_DOCUMENT_MIME: &str = "application/vnd.google-apps.document";
-const MAX_SEEN_FILE_IDS: usize = 2_000;
 const MAX_LISTED_FILES: usize = 1_000;
 const MAX_POLL_FILES: usize = 24;
 const MAX_FILE_BYTES: usize = 1_048_576;
@@ -433,7 +432,7 @@ impl DriveInputStore {
         self.update_runtime(|runtime| {
             for file_id in file_ids {
                 if !runtime.seen_file_ids.iter().any(|seen| seen == &file_id) {
-                    remember_with_limit(&mut runtime.seen_file_ids, file_id, MAX_SEEN_FILE_IDS);
+                    runtime.seen_file_ids.push_back(file_id);
                 }
             }
             runtime.last_received_at = Some(timestamp(Utc::now()));
@@ -456,6 +455,8 @@ impl DriveInputStore {
 struct DriveFileList {
     #[serde(default)]
     files: Vec<DriveFile>,
+    #[serde(default, rename = "nextPageToken")]
+    next_page_token: Option<String>,
 }
 
 #[derive(Clone, Debug, Deserialize)]
@@ -466,6 +467,8 @@ struct DriveFile {
     mime_type: String,
     #[serde(default)]
     web_view_link: Option<String>,
+    #[serde(default)]
+    created_time: Option<String>,
 }
 
 struct DriveRead {
@@ -491,36 +494,48 @@ async fn read_drive(
         config.folder_id.trim()
     );
     let page_size = MAX_LISTED_FILES.to_string();
-    let response = client
-        .get(DRIVE_FILES_URL)
-        .bearer_auth(access_token)
-        .query(&[
-            ("q", query.as_str()),
-            ("orderBy", "createdTime desc"),
-            ("pageSize", page_size.as_str()),
-            ("supportsAllDrives", "true"),
-            ("includeItemsFromAllDrives", "true"),
-            ("fields", "files(id,name,mimeType,webViewLink)"),
-        ])
-        .send()
-        .await
-        .context("list files in Google Drive Inbox folder")?;
-    let files: DriveFileList = response_json(response, "list Google Drive Inbox files").await?;
-    let listed_file_count = files.files.len();
+    let mut files = Vec::new();
+    let mut page_token = String::new();
+    let mut tokens = HashSet::new();
+    loop {
+        let response = client
+            .get(DRIVE_FILES_URL)
+            .bearer_auth(access_token)
+            .query(&[
+                ("q", query.as_str()),
+                ("orderBy", "createdTime asc"),
+                ("pageSize", page_size.as_str()),
+                ("supportsAllDrives", "true"),
+                ("includeItemsFromAllDrives", "true"),
+                (
+                    "fields",
+                    "nextPageToken,files(id,name,mimeType,webViewLink,createdTime)",
+                ),
+                ("pageToken", page_token.as_str()),
+            ])
+            .send()
+            .await
+            .context("list files in Google Drive Inbox folder")?;
+        let page: DriveFileList = response_json(response, "list Google Drive Inbox files").await?;
+        files.extend(page.files);
+        let Some(next) = page.next_page_token.filter(|token| !token.is_empty()) else {
+            break;
+        };
+        anyhow::ensure!(
+            tokens.insert(next.clone()),
+            "Drive repeated a pagination token"
+        );
+        page_token = next;
+    }
+    let listed_file_count = files.len();
     let matching_files = files
-        .files
         .into_iter()
         .filter(supported_drive_file)
         .filter(|file| file_selected(config, &file.name))
         .collect::<Vec<_>>();
     let matching_file_count = matching_files.len();
-    let mut selected_files = matching_files
-        .into_iter()
-        .filter(|file| !seen_file_ids.contains(&file.id))
-        .take(maximum_files.min(MAX_POLL_FILES))
-        .collect::<Vec<_>>();
+    let selected_files = select_unseen_files(matching_files, seen_file_ids, maximum_files);
     let selected_file_count = selected_files.len();
-    selected_files.reverse();
     let mut batches = Vec::with_capacity(selected_files.len());
     for file in selected_files {
         let body = download_drive_file(&client, access_token, &file).await?;
@@ -546,7 +561,7 @@ async fn read_drive(
                 possible_connection: "User-configured private Google Drive Inbox; standalone interest is allowed and no project connection is claimed".to_owned(),
             },
         )
-        .map(ExternalDigest::into_candidates)
+        .map(|digest| digest.with_document_at(file.created_time.clone()).into_candidates())
         .unwrap_or_default();
         batches.push(DriveFileBatch {
             file_id: file.id,
@@ -748,11 +763,27 @@ fn empty_outcome() -> DriveInputOutcome {
     }
 }
 
-fn remember_with_limit(seen: &mut VecDeque<String>, id: String, limit: usize) {
-    seen.push_back(id);
-    while seen.len() > limit {
-        seen.pop_front();
-    }
+fn select_unseen_files(
+    files: Vec<DriveFile>,
+    seen: &HashSet<String>,
+    limit: usize,
+) -> Vec<DriveFile> {
+    let mut selected = files
+        .into_iter()
+        .filter(|file| !seen.contains(&file.id))
+        .collect::<Vec<_>>();
+    selected.sort_by_cached_key(|file| {
+        (
+            crate::external_digest::digest_document_at(&file.name)
+                .or_else(|| file.created_time.clone())
+                .unwrap_or_default(),
+            file.name.clone(),
+            file.id.clone(),
+        )
+    });
+    selected.dedup_by(|left, right| left.id == right.id);
+    selected.truncate(limit.min(MAX_POLL_FILES));
+    selected
 }
 
 fn compact_error(value: &str) -> String {
@@ -824,6 +855,7 @@ mod tests {
             name: name.to_owned(),
             mime_type: mime_type.to_owned(),
             web_view_link: None,
+            created_time: None,
         }
     }
 
@@ -879,13 +911,19 @@ mod tests {
     }
 
     #[test]
-    fn acknowledgement_is_idempotent_and_bounded() {
-        let mut seen = VecDeque::new();
-        for index in 0..MAX_SEEN_FILE_IDS + 2 {
-            remember_with_limit(&mut seen, format!("file-{index}"), MAX_SEEN_FILE_IDS);
-        }
-        assert_eq!(seen.len(), MAX_SEEN_FILE_IDS);
-        assert_eq!(seen.front().map(String::as_str), Some("file-2"));
+    fn history_is_selected_oldest_first_before_applying_each_batch_limit() {
+        let files = vec![
+            file("Digest_20260902_1200.md", "text/markdown"),
+            file("Digest_20260819_1200.md", "text/markdown"),
+            file("Digest_20260820_1200.md", "text/markdown"),
+        ];
+        let selected = select_unseen_files(files.clone(), &HashSet::new(), 1);
+        assert_eq!(selected[0].name, "Digest_20260819_1200.md");
+        let seen = HashSet::from([selected[0].id.clone()]);
+        assert_eq!(
+            select_unseen_files(files, &seen, 1)[0].name,
+            "Digest_20260820_1200.md"
+        );
     }
 
     #[test]

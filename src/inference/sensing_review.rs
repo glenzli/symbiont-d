@@ -51,14 +51,15 @@ and never pretend that you opened or verified its links:
 message with a source trail and a reply affordance, not a symbiont-d endorsement or durable claim.
 Its admission bar is therefore lower than the bar for an assistant-authored note or intervention.
 Weak or secondary sourcing alone is not a reason to discard a plausible, interesting input and is
-never by itself a reason to choose `deep`. Preserve the received text by default: choose
-`presentation: original` and omit `display_text`. Choose `presentation: condensed` only when the
-received text is repetitive, excessively long, poorly structured, or contains substantial low-value
-framing. In that case provide a self-contained `display_text` and state the concrete compression
-reason in `reason`; never condense merely to make the prose sound more polished. If the packet needs
-a sourcing or confidence caveat, put that short caveat in `qualification_note` rather than replacing
-the received message. This is qualification, not verification: do not add facts or say you checked a
-link. Any generated `display_text` and `qualification_note` must use the same language as that
+never by itself a reason to choose `deep`. Keep the received text intact: choose
+`presentation: original` and omit `display_text`. Length, multiple papers, formulas, detailed
+conditions, or awkward framing are not permission to replace the body with a summary or topic list.
+Do not reduce a research digest to "this digest covers four papers" or erase its actual results,
+assumptions, mechanisms, numbers, formulas, and links. Deterministic removal of already-delivered
+sections is handled separately; you do not own source editing.
+If the packet needs a sourcing or confidence caveat, put that short caveat in `qualification_note`
+rather than replacing the received message. This is qualification, not verification: do not add
+facts or say you checked a link. Any generated `qualification_note` must use the same language as that
 candidate's `received_text`; never switch an input role's language during review. The internal
 `reason` may be concise English.
 Reserve `deep` for value, not for ordinary source cleanup. Do not infer that the user is unaware of
@@ -69,8 +70,7 @@ may be worthwhile without a current-project connection or immediate decision. Re
 current project is not an admission requirement. A recent or still-developing discussion can be
 timely even when the original event was not today, provided the supplied packet names the accumulated
 evidence or reaction that makes it live now. Judge atomic candidates separately; weakness in a
-neighboring digest item must not poison another candidate. `display_text`, when used, must remain in
-the external input role rather than symbiont-d's voice. The candidate pool is not memory
+neighboring digest item must not poison another candidate. The candidate pool is not memory
 and this review must not write PCP, Hunches, profile, or other state.
 
 Return exactly one JSON object and no Markdown or commentary. Its only top-level field is
@@ -90,7 +90,7 @@ pub(super) struct ValidatedDecisions {
     pub(super) missing_count: usize,
 }
 
-/// Keeps valid decisions independently so one malformed ID or presentation
+/// Keeps valid decisions independently so one malformed ID or missing reason
 /// only defers that candidate instead of rolling back the entire batch.
 pub(super) fn validated_decisions(
     candidates: &[SensingCandidate],
@@ -103,16 +103,15 @@ pub(super) fn validated_decisions(
     let mut decided = HashSet::new();
     let mut valid = Vec::new();
     let mut rejected_count = 0;
-    for decision in decisions {
+    for mut decision in decisions {
         let valid_decision = candidate_ids.contains(decision.candidate_id.as_str())
             && !decided.contains(decision.candidate_id.as_str())
-            && !decision.reason.trim().is_empty()
-            && (decision.presentation != Some(SensingPresentation::Condensed)
-                || decision
-                    .display_text
-                    .as_deref()
-                    .is_some_and(|value| !value.trim().is_empty()));
+            && !decision.reason.trim().is_empty();
         if valid_decision {
+            // Older models may still return display rewrites. They cannot change
+            // the admitted source, nor defer an otherwise valid input.
+            decision.presentation = Some(SensingPresentation::Original);
+            decision.display_text = None;
             decided.insert(decision.candidate_id.clone());
             valid.push(decision);
         } else {
@@ -139,6 +138,7 @@ mod tests {
             proposed_input: "input".to_owned(),
             received_text: "input".to_owned(),
             event_at: None,
+            source_document_at: None,
             source_class: SensingSourceClass::OpenDiscovery,
             sources: vec![SensingSource {
                 url: "https://example.com".to_owned(),
@@ -205,7 +205,7 @@ mod tests {
     }
 
     #[test]
-    fn malformed_condensed_presentation_defers_only_that_candidate() {
+    fn legacy_condensed_presentation_cannot_replace_or_block_the_source() {
         let candidates = vec![candidate("one"), candidate("two")];
         let decisions = vec![SensingReviewDecision {
             candidate_id: "one".to_owned(),
@@ -216,8 +216,21 @@ mod tests {
             qualification_note: None,
         }];
         let validation = validated_decisions(&candidates, decisions);
-        assert!(validation.decisions.is_empty());
-        assert_eq!(validation.rejected_count, 1);
-        assert_eq!(validation.missing_count, 2);
+        assert_eq!(validation.decisions.len(), 1);
+        assert_eq!(
+            validation.decisions[0].presentation,
+            Some(SensingPresentation::Original)
+        );
+        assert!(validation.decisions[0].display_text.is_none());
+        assert_eq!(validation.rejected_count, 0);
+        assert_eq!(validation.missing_count, 1);
+    }
+
+    #[test]
+    fn review_prompt_does_not_summarize_away_research_details() {
+        let prompt = runtime_prompt(&[candidate("one")]).unwrap();
+        assert!(prompt.contains("Keep the received text intact"));
+        assert!(prompt.contains("assumptions, mechanisms, numbers, formulas, and links"));
+        assert!(!prompt.contains("Choose `presentation: condensed`"));
     }
 }

@@ -1,293 +1,112 @@
-const SVG_NAMESPACE = "http://www.w3.org/2000/svg";
-const DEFAULT_MAX_CONNECTOR_PX = 1200;
+// Dissent is an annotation of its source, not another timeline/unread item.
+// Project existing records as well as new ones; never rewrite or delete evidence.
+const ISSUE_LABELS = [
+  ["来源冲突", /(?:来源|数据|数值|口径)[^。！？；\n]{0,12}(?:冲突|互相矛盾|不一致)/u],
+  ["范围外推", /(?:范围|结论)[^。！？；\n]{0,12}(?:扩大|扩张|外推)|外推成|泛化成|类比性外推/u],
+  ["过度表述", /过强|强于(?:证据|论文|实际)|明显强于|夸大|过度(?:表述|陈述|概括|推断)|证据强度过头|把推测写成了事实/u],
+  ["证据不足", /证据不足|缺乏证据|证据[^。！？；\n]{0,12}(?:未能|并未|没有)(?:证明|建立|支持)|不足以证明/u],
+];
 
-export function localRelationGeometry(
-  sourceAvatar,
-  dissentAvatar,
-  viewport,
-  maxConnectorPx = DEFAULT_MAX_CONNECTOR_PX,
-) {
-  if (!sourceAvatar || !dissentAvatar || !viewport) return null;
-  const sourceHeight = sourceAvatar.height ?? sourceAvatar.bottom - sourceAvatar.top;
-  const dissentHeight = dissentAvatar.height ?? dissentAvatar.bottom - dissentAvatar.top;
-  const startX = sourceAvatar.left - viewport.left - 1;
-  const startY = sourceAvatar.top + sourceHeight / 2 - viewport.top;
-  const endX = dissentAvatar.left - viewport.left - 1;
-  const endY = dissentAvatar.top + dissentHeight / 2 - viewport.top;
-  const length = endY - startY;
-  const visible =
-    sourceAvatar.bottom > viewport.top &&
-    sourceAvatar.top < viewport.bottom &&
-    dissentAvatar.bottom > viewport.top &&
-    dissentAvatar.top < viewport.bottom;
-  if (!visible || length < 12 || length > maxConnectorPx) return null;
-  const gutterX = Math.max(
-    12,
-    Math.min(sourceAvatar.left, dissentAvatar.left) - viewport.left - 4,
-  );
-  const horizontalSpan = Math.min(startX - gutterX, endX - gutterX);
-  if (horizontalSpan < 2) return null;
-  const radius = Math.min(6, horizontalSpan / 2, length / 4);
-  return {
-    startX,
-    startY,
-    endX,
-    endY,
-    gutterX,
-    path: [
-      `M ${startX} ${startY}`,
-      `H ${gutterX + radius}`,
-      `Q ${gutterX} ${startY} ${gutterX} ${startY + radius}`,
-      `V ${endY - radius}`,
-      `Q ${gutterX} ${endY} ${gutterX + radius} ${endY}`,
-      `H ${endX}`,
-    ].join(" "),
-  };
+// A display hint from the reviewer's own wording, never a verdict or a filter.
+// Ignore quoted claims and explicit denials; ambiguous reviews stay generic.
+export function annotationLabel(annotation) {
+  const text = [annotation.content, annotation.reviewReason || annotation.review_reason]
+    .filter(Boolean).join("\n")
+    .replace(/“[^”]*”|「[^」]*」|"[^"\n]*"|`[^`]*`/gu, "")
+    .replace(/(?:并非|不是|不属于|不存在)[^，,。！？；\n]*(?:，|,)?/gu, "");
+  return ISSUE_LABELS.find(([, pattern]) => pattern.test(text))?.[0] || "有异议";
 }
 
-function isVisibleInViewport(rect, viewport) {
-  return Boolean(
-    rect &&
-      rect.bottom > viewport.top &&
-      rect.top < viewport.bottom &&
-      rect.right > viewport.left &&
-      rect.left < viewport.right,
-  );
+function annotationLabels(annotations) {
+  const labels = [...new Set(annotations.map(annotationLabel))];
+  // Keep the card compact; each expanded entry still carries its own label.
+  return labels.slice(0, 2).join(" · ") + (labels.length > 2 ? " 等" : "");
 }
 
-export function relationAnchorGeometry(messageRect, groupRect, avatarRect, viewport) {
-  if (!messageRect || !viewport) return null;
-  if (isVisibleInViewport(avatarRect, viewport)) return avatarRect;
-
-  // A grouped run has one shared avatar in its header. Once that header has
-  // scrolled away, retain the same visual lane beside the still-visible card
-  // instead of letting the connector lose its endpoint.
-  const groupInset = groupRect ? Math.min(28, Math.max(16, groupRect.width * 0.06)) : 0;
-  const left = groupRect
-    ? groupRect.left + groupInset
-    : Math.max(viewport.left + 24, messageRect.left - 24);
-  const height = Math.min(40, Math.max(28, messageRect.height));
-  const top = Math.max(messageRect.top, viewport.top);
-  return {
-    left,
-    top,
-    right: left + 1,
-    bottom: top + height,
-    width: 1,
-    height,
-  };
-}
-
-export function dissentPreview(message, maxLength = 86) {
-  const text = `${message?.querySelector?.(".message-body")?.textContent || ""}`
-    .replace(/\s+/g, " ")
-    .trim();
-  if (!text) return "查看这条异议";
-  return text.length > maxLength ? `${text.slice(0, maxLength).trimEnd()}…` : text;
-}
-
-export function openRelationMarkerIds(markers) {
-  return new Set(
-    [...markers]
-      .filter((marker) => marker.open && marker.dataset.sourceSignalId)
-      .map((marker) => marker.dataset.sourceSignalId),
-  );
-}
-
-export function initInputSignalRelations(conversation) {
-  const frame = conversation?.closest(".conversation-frame");
-  if (!conversation || !frame) {
-    return {
-      refresh() {},
-      focusSources() {},
-    };
-  }
-
-  const overlay = document.createElementNS(SVG_NAMESPACE, "svg");
-  overlay.classList.add("input-signal-relation-lines");
-  overlay.setAttribute("aria-hidden", "true");
-  frame.append(overlay);
-  let emphasizedIds = new Set();
-  let openMarkerIds = new Set();
-  let updateFrame = null;
-  const layoutObserver = new ResizeObserver(scheduleLines);
-
-  function revealGrouped(message) {
-    const group = message.closest(".input-signal-group");
-    if (!group?.classList.contains("is-collapsed")) return;
-    group.classList.remove("is-collapsed");
-    const toggle = group.querySelector(".input-signal-group-toggle");
-    if (toggle) {
-      toggle.setAttribute("aria-expanded", "true");
-      toggle.textContent = "收起";
-    }
-  }
-
-  function highlight(message) {
-    message.classList.remove("quote-source-highlight");
-    window.requestAnimationFrame(() => message.classList.add("quote-source-highlight"));
-    window.setTimeout(() => message.classList.remove("quote-source-highlight"), 1600);
-  }
-
-  function relatedIds(dissent) {
-    try {
-      const ids = JSON.parse(dissent.dataset.relatedSignalIds || "[]");
-      return Array.isArray(ids) ? ids : [];
-    } catch {
-      return [];
-    }
-  }
-
-  function sourceMessage(id) {
-    return conversation.querySelector(
-      `.input-signal[data-signal-id="${CSS.escape(id)}"]`,
-    );
-  }
-
-  function relationAvatar(message) {
-    const groupAvatar = message
-      ?.closest(".input-signal-group")
-      ?.querySelector(".input-signal-group-avatar");
-    return groupAvatar || message?.querySelector(".message-avatar");
-  }
-
-  function relationAnchor(message, viewport) {
-    const messageRect = message?.getBoundingClientRect();
-    if (!messageRect || !isVisibleInViewport(messageRect, viewport)) return null;
-    const groupRect = message.closest(".input-signal-group")?.getBoundingClientRect();
-    return relationAnchorGeometry(
-      messageRect,
-      groupRect,
-      relationAvatar(message)?.getBoundingClientRect(),
-      viewport,
-    );
-  }
-
-  function scheduleLines() {
-    if (updateFrame !== null) return;
-    updateFrame = window.requestAnimationFrame(() => {
-      updateFrame = null;
-      renderLines();
-    });
-  }
-
-  function renderLines() {
-    overlay.replaceChildren();
-    const viewport = frame.getBoundingClientRect();
-    overlay.setAttribute("viewBox", `0 0 ${viewport.width} ${viewport.height}`);
-    for (const dissent of conversation.querySelectorAll(
-      '.input-signal.attacker-challenge[data-related-signal-ids]',
-    )) {
-      if (dissent.getClientRects().length === 0) continue;
-      const dissentAnchor = relationAnchor(dissent, viewport);
-      if (!dissentAnchor) continue;
-      for (const id of relatedIds(dissent)) {
-        const source = sourceMessage(id);
-        if (!source || source.getClientRects().length === 0) continue;
-        const sourceAnchor = relationAnchor(source, viewport);
-        const geometry = localRelationGeometry(sourceAnchor, dissentAnchor, viewport);
-        if (!geometry) continue;
-        const path = document.createElementNS(SVG_NAMESPACE, "path");
-        path.classList.add("input-signal-relation-line");
-        if (emphasizedIds.has(id)) path.classList.add("is-emphasized");
-        path.setAttribute("d", geometry.path);
-        overlay.append(path);
+export function annotationsBySource(signals) {
+  const sources = new Set(signals.filter(s => s.kind !== "attacker_challenge" && !s.hidden).map(s => s.id));
+  const result = new Map();
+  for (const signal of signals) {
+    if (signal.kind !== "attacker_challenge" || signal.hidden) continue;
+    const content = signal.content || signal.receivedText || signal.received_text || "";
+    if (!content.trim()) continue;
+    for (const id of new Set(signal.relatedSignalIds || signal.related_signal_ids || [])) {
+      if (!sources.has(id)) continue;
+      const entries = result.get(id) || [];
+      if (!entries.some(s => s.id === signal.id || s.content === content)) {
+        entries.push({ ...signal, content });
+        result.set(id, entries);
       }
     }
   }
+  return result;
+}
 
-  function emphasize(ids) {
-    emphasizedIds = new Set(ids);
-    scheduleLines();
-    window.setTimeout(() => {
-      emphasizedIds = new Set();
-      scheduleLines();
-    }, 1600);
+export function attachAnnotations(card, annotations, renderContent, {
+  body = card.querySelector(".message-body"),
+  foot = card.querySelector(".message-actions"),
+} = {}) {
+  const previous = card.querySelector(".input-signal-dissent-marker");
+  const open = previous?.open || false;
+  previous?.remove();
+  card.querySelector(".input-signal-review-badge")?.remove();
+  card.classList.toggle("has-dissent-response", annotations.length > 0);
+  if (!annotations.length || !body || !foot) return;
+  const doc = card.ownerDocument;
+  const label = annotationLabels(annotations);
+  const badge = doc.createElement("span");
+  badge.className = "input-signal-review-badge";
+  badge.textContent = `△ ${label}`;
+  badge.title = "原文保留；部分主张受到质疑，不代表整条消息已被判错";
+  body.append(badge);
+
+  const marker = doc.createElement("details");
+  marker.className = "input-signal-dissent-marker";
+  marker.dataset.signalPopover = "";
+  marker.open = open;
+  const summary = doc.createElement("summary");
+  summary.textContent = annotations.length > 1 ? `${label} · ${annotations.length}` : label;
+  summary.setAttribute("aria-label", `展开${label}的具体依据`);
+  const panel = doc.createElement("div");
+  panel.className = "input-signal-dissent-panel signal-popover-panel";
+  for (const annotation of annotations) {
+    const item = doc.createElement("section");
+    item.className = "input-signal-review";
+    const header = doc.createElement("small");
+    const at = annotation.observedAt || annotation.observed_at;
+    header.textContent = [annotationLabel(annotation), annotation.actor?.name, at ? new Date(at).toLocaleString() : ""].filter(Boolean).join(" · ");
+    const content = doc.createElement("div");
+    content.className = "rich-text";
+    renderContent(content, { content: annotation.content });
+    item.append(header, content);
+    for (const source of annotation.sources || []) {
+      let url;
+      try { url = new URL(source.url); } catch { continue; }
+      if (!["https:", "http:"].includes(url.protocol)) continue;
+      const link = doc.createElement("a");
+      link.href = url.href;
+      link.textContent = source.detail || url.hostname;
+      link.target = "_blank";
+      link.rel = "noopener noreferrer";
+      item.append(link);
+    }
+    panel.append(item);
   }
+  marker.append(summary, panel);
+  foot.prepend(marker);
+}
 
-  function focusSources(ids, dissent = null) {
-    const sources = ids.map(sourceMessage).filter(Boolean);
-    if (!sources.length) return;
-    for (const source of sources) revealGrouped(source);
-    sources[0].scrollIntoView({ behavior: "smooth", block: "center" });
-    for (const source of sources) highlight(source);
-    if (dissent) highlight(dissent);
-    emphasize(ids);
-    scheduleLines();
-  }
-
+export function initInputSignalRelations(conversation, { getSignals, renderContent }) {
+  const signatures = new WeakMap();
   function refresh() {
-    layoutObserver.disconnect();
-    layoutObserver.observe(conversation);
-    for (const message of conversation.querySelectorAll(".input-signal.has-dissent-response")) {
-      message.classList.remove("has-dissent-response");
+    const annotations = annotationsBySource(getSignals());
+    for (const card of conversation.querySelectorAll(".input-signal[data-signal-id]")) {
+      const entries = annotations.get(card.dataset.signalId) || [];
+      const signature = JSON.stringify(entries);
+      if (signatures.get(card) === signature) continue;
+      attachAnnotations(card, entries, renderContent);
+      signatures.set(card, signature);
     }
-    openMarkerIds = openRelationMarkerIds(
-      conversation.querySelectorAll(".input-signal-dissent-marker"),
-    );
-    for (const marker of conversation.querySelectorAll(".input-signal-dissent-marker")) {
-      marker.remove();
-    }
-    const dissentBySourceId = new Map();
-    for (const dissent of conversation.querySelectorAll(
-      '.input-signal.attacker-challenge[data-related-signal-ids]',
-    )) {
-      layoutObserver.observe(dissent);
-      for (const id of relatedIds(dissent)) {
-        const source = sourceMessage(id);
-        if (!source || source === dissent) continue;
-        source.classList.add("has-dissent-response");
-        layoutObserver.observe(source);
-        const related = dissentBySourceId.get(id) || [];
-        related.push(dissent);
-        dissentBySourceId.set(id, related);
-      }
-    }
-
-    for (const [id, dissents] of dissentBySourceId) {
-      const source = sourceMessage(id);
-      const runtime = source?.querySelector(".message-runtime");
-      if (!source || !runtime || runtime.querySelector(".input-signal-dissent-marker")) continue;
-      const marker = document.createElement("details");
-      marker.className = "input-signal-dissent-marker";
-      marker.dataset.sourceSignalId = id;
-      marker.open = openMarkerIds.has(id);
-      const summary = document.createElement("summary");
-      summary.textContent = `↗ ${dissents.length > 1 ? `${dissents.length} 条异议` : "有异议"}`;
-      summary.title = "展开关联异议";
-      const panel = document.createElement("div");
-      panel.className = "input-signal-dissent-panel";
-      for (const dissent of dissents) {
-        const jump = document.createElement("button");
-        jump.type = "button";
-        jump.className = "input-signal-dissent-link";
-        jump.textContent = dissentPreview(dissent);
-        jump.title = "定位到这条异议";
-        jump.addEventListener("click", () => {
-          revealGrouped(dissent);
-          dissent.scrollIntoView({ behavior: "smooth", block: "center" });
-          highlight(source);
-          highlight(dissent);
-          emphasize([id]);
-          scheduleLines();
-        });
-        panel.append(jump);
-      }
-      marker.append(summary, panel);
-      marker.addEventListener("toggle", () => {
-        if (marker.open) openMarkerIds.add(id);
-        else openMarkerIds.delete(id);
-      });
-      runtime.append(" ", marker);
-    }
-    scheduleLines();
   }
-
-  conversation.addEventListener("scroll", scheduleLines, { passive: true });
-  conversation.addEventListener("click", () => window.requestAnimationFrame(scheduleLines));
-  conversation.addEventListener("load", scheduleLines, true);
-  window.addEventListener("resize", scheduleLines);
-  document.addEventListener("visibilitychange", scheduleLines);
-
-  return { refresh, focusSources, scheduleLines };
+  return { refresh };
 }

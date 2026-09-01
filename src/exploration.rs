@@ -68,7 +68,6 @@ const EXPLORATION_EDGE_EXCERPT_CHARS: usize = 900;
 const SENSING_CHAT_TAIL: usize = 2;
 const SENSING_MESSAGE_EXCERPT_CHARS: usize = 320;
 const SENSING_SOURCE_CHAT_TAIL: usize = 64;
-const MAX_SENSING_DEDUPLICATION_REFERENCES: usize = 32;
 const MAX_SENSING_LEDGER_REFERENCES: usize = 12;
 const SENSING_REFERENCE_EXCERPT_CHARS: usize = 480;
 const RETRY_DELAY: Duration = Duration::from_secs(2);
@@ -1921,6 +1920,7 @@ fn sensing_deduplication_references(
                     ),
                     source_urls,
                     event_at: None,
+                    source_document_at: None,
                     observed_at: entry.at.clone(),
                 })
             }),
@@ -1930,7 +1930,6 @@ fn sensing_deduplication_references(
         let right = DateTime::parse_from_rfc3339(&right.observed_at).ok();
         right.cmp(&left)
     });
-    references.truncate(MAX_SENSING_DEDUPLICATION_REFERENCES);
     references
 }
 

@@ -419,7 +419,7 @@ async fn run_once(
     if let Some(assessment) = outcome.assessment
         && assessment.disposition == AttackerDisposition::Challenge
         && !store.issue_was_published(&assessment.issue_key).await
-        && assessment.message.trim().chars().count() >= 40
+        && assessment.message.trim().chars().count() >= 15
         && !assessment.sources.is_empty()
     {
         let related = assessment
@@ -503,7 +503,7 @@ pub fn attacker_prompt(packet: &str, completion_marker: &str) -> String {
 
 Use live web search freely when verification would help. Search primary or authoritative sources where possible. Do not publish generic skepticism, style criticism, a summary, a second feed item, or an objection based only on taste. A challenge must state what claim is too strong or misleading, what contrary evidence or boundary matters, and why that changes how the input should be read. The input can be interesting and still deserve correction.
 
-Analyze often but speak sparingly. If no crisp, consequential and defensible rebuttal exists, submit `silent`. If one exists, submit exactly one `challenge` in concise natural Simplified Chinese. Include only signal IDs from the packet and concrete source URLs used for the challenge. Use a stable semantic `issue_key` so the Host can suppress repetition of the same dispute. Call `symbiont.submit_attacker_assessment` exactly once. This is a transient chat intervention: do not access or write PCP, infer user preferences, or pretend to be symbiont-d's ordinary conversational voice. After the tool call return exactly `{completion_marker}`.
+Analyze often but speak sparingly. If no crisp, consequential and defensible rebuttal exists, submit `silent`. If one exists, submit exactly one `challenge` in concise natural Simplified Chinese. It will be attached as a review annotation to the original card, NOT posted as a separate reply. Prefer one or two precise sentences: identify the disputed claim and the actual boundary or counterevidence. Do not repeat the whole input, add an introduction or conclusion, or pad a wording-only concern into an essay. Mere 'wording too strong' without a consequential, sourced correction should be silent. Include only signal IDs from the packet and concrete source URLs used for the challenge. Use a stable semantic `issue_key` so the Host can suppress repetition of the same dispute. Call `symbiont.submit_attacker_assessment` exactly once. This is a transient source annotation: do not access or write PCP, infer user preferences, or pretend to be symbiont-d's ordinary conversational voice. After the tool call return exactly `{completion_marker}`.
 
 <external-input-packet>
 {packet}
@@ -611,6 +611,7 @@ mod tests {
             sources: vec![],
             source_class: crate::sensing::SensingSourceClass::OpenDiscovery,
             event_at: Some(timestamp(now - chrono::Duration::days(12))),
+            source_document_at: None,
             observed_at: timestamp(now - chrono::Duration::minutes(10)),
             review_reason: "visible in the chat".to_owned(),
             related_signal_ids: vec![],
@@ -665,6 +666,7 @@ mod tests {
             sources: vec![],
             source_class: crate::sensing::SensingSourceClass::OpenDiscovery,
             event_at: None,
+            source_document_at: None,
             observed_at: timestamp(Utc::now()),
             review_reason: "already visible".to_owned(),
             related_signal_ids: vec![],
@@ -709,6 +711,7 @@ mod tests {
             }],
             source_class: crate::sensing::SensingSourceClass::Research,
             event_at: None,
+            source_document_at: None,
             observed_at: timestamp(Utc::now()),
             review_reason: "credible".to_owned(),
             related_signal_ids: vec![],

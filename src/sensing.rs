@@ -112,7 +112,10 @@ impl SensingSourceClass {
 pub enum SensingPresentation {
     #[default]
     Original,
+    /// Legacy model-authored summary, not a lossless view of the source.
     Condensed,
+    /// Verbatim source with already-delivered sections removed deterministically.
+    Excerpted,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -127,6 +130,8 @@ pub struct SensingCandidateDraft {
     pub received_text: Option<String>,
     #[serde(default)]
     pub event_at: Option<String>,
+    #[serde(default)]
+    pub source_document_at: Option<String>,
     #[serde(default)]
     pub source_class: SensingSourceClass,
     #[serde(default, alias = "relevance")]
@@ -202,6 +207,8 @@ pub struct SensingCandidate {
     #[serde(default)]
     pub event_at: Option<String>,
     #[serde(default)]
+    pub source_document_at: Option<String>,
+    #[serde(default)]
     pub source_class: SensingSourceClass,
     #[serde(default, alias = "relevance")]
     pub possible_connection: Option<String>,
@@ -217,7 +224,7 @@ pub struct SensingCandidate {
 /// The sensing pipeline owns this generic shape so transcript history and the
 /// transient signal store can contribute equivalent redelivery evidence
 /// without depending on one another's persistence types.
-#[derive(Clone, Debug, Serialize)]
+#[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SensingDeduplicationReference {
     pub reference_id: String,
@@ -227,6 +234,8 @@ pub struct SensingDeduplicationReference {
     pub excerpt: String,
     pub source_urls: Vec<String>,
     pub event_at: Option<String>,
+    #[serde(default)]
+    pub source_document_at: Option<String>,
     pub observed_at: String,
 }
 
@@ -580,13 +589,21 @@ pub fn format_candidate_pool(candidates: &[SensingCandidate]) -> String {
 }
 
 fn prune_expired(pool: &mut CandidatePool, now: DateTime<Utc>) -> bool {
+    let mut changed = false;
+    for candidate in &mut pool.candidates {
+        if candidate.source_document_at.is_none() {
+            candidate.source_document_at =
+                crate::external_digest::source_document_at(&candidate.sources);
+            changed |= candidate.source_document_at.is_some();
+        }
+    }
     let before = pool.candidates.len();
     pool.candidates.retain(|candidate| {
         DateTime::parse_from_rfc3339(&candidate.expires_at)
             .map(|expires_at| expires_at.with_timezone(&Utc) > now)
             .unwrap_or(false)
     });
-    before != pool.candidates.len()
+    changed || before != pool.candidates.len()
 }
 
 fn candidate_fingerprint(draft: &SensingCandidateDraft) -> String {
@@ -624,6 +641,9 @@ fn build_candidate(
             .event_at
             .map(|event_at| event_at.trim().to_owned())
             .filter(|event_at| !event_at.is_empty()),
+        source_document_at: draft
+            .source_document_at
+            .or_else(|| crate::external_digest::source_document_at(&draft.sources)),
         source_class: draft.source_class,
         possible_connection: draft
             .possible_connection
@@ -667,6 +687,7 @@ mod tests {
             proposed_input: "A short model input.".to_owned(),
             received_text: None,
             event_at: None,
+            source_document_at: None,
             source_class: SensingSourceClass::Research,
             possible_connection: None,
             sources: vec![SensingSource {
