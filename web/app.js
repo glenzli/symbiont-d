@@ -1,6 +1,5 @@
 import { initProfileUi } from "/profile-ui.js";
 import { initReflectionUi } from "/reflection-ui.js";
-import { initReconciliationUi } from "/reconciliation-ui.js";
 import { formatDuration, formatMemorySize, formatTokens } from "/presentation.js";
 import { renderMessageContent, renderRichText } from "/rich-text.js";
 import { initExplorationUi } from "/exploration-ui.js";
@@ -54,8 +53,6 @@ const appState = {
   exploration: null,
   attacker: null,
   reflection: null,
-  reconciliation: null,
-  memoryIndex: null,
   conversation: null,
   bridge: {
     codexTaskAccess: false,
@@ -163,7 +160,6 @@ const composerContextUi = initComposerContextUi({
   openSettings: settingsUi.open,
 });
 const reflectionUi = initReflectionUi(appState);
-const reconciliationUi = initReconciliationUi(appState);
 const profileUi = initProfileUi(appState, sendMessage);
 initTraceUi();
 const messageSync = initMessageSync({
@@ -869,10 +865,6 @@ function applyRuntime(payload) {
   const explorationChanged = runtimeValueChanged("exploration", payload.exploration);
   const attackerChanged = runtimeValueChanged("attacker", payload.attacker);
   const reflectionChanged = runtimeValueChanged("reflection", payload.reflection);
-  const reconciliationChanged = runtimeValueChanged(
-    "reconciliation",
-    payload.reconciliation,
-  );
   const conversationChanged = runtimeValueChanged("conversation", payload.conversation);
   const permissionsChanged = runtimeValueChanged("permissions", payload.permissions);
   const bridgeChanged = runtimeValueChanged("bridge", payload.bridge);
@@ -897,12 +889,6 @@ function applyRuntime(payload) {
       ? { ...appState.reflection, runtime: payload.reflection }
       : payload.reflection;
   }
-  if (payload.reconciliation) {
-    appState.reconciliation = appState.reconciliation?.recentRuns
-      ? { ...appState.reconciliation, runtime: payload.reconciliation }
-      : payload.reconciliation;
-  }
-  appState.memoryIndex = payload.memoryIndex || appState.memoryIndex;
   appState.conversation = payload.conversation || appState.conversation;
   appState.computePolicies =
     payload.computePolicies || appState.computePolicies;
@@ -937,7 +923,6 @@ function applyRuntime(payload) {
   if (identityChanged) identityUi.render();
   if (inputRolesChanged) inputRoleUi.render();
   if (reflectionChanged) reflectionUi.renderRuntime();
-  if (reconciliationChanged) reconciliationUi.runtimeUpdated();
   if (explorationChanged) explorationUi.runtimeUpdated();
   if (bridgeChanged) composerContextUi.configUpdated();
   if (permissionsChanged) permissionUi.render();
@@ -997,7 +982,6 @@ async function bootstrap() {
     composerContextUi.configUpdated();
     composerContextUi.warm();
     reflectionUi.render();
-    reconciliationUi.render();
     profileUi.render();
     permissionUi.render();
     messageSync.start();

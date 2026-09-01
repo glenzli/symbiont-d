@@ -13,7 +13,6 @@ use super::{
     },
     prompts::{
         context_fragments, developer_instructions, interaction_reflection_prompt,
-        memory_reconciliation_prompt, summary_maintenance_prompt,
         temporary_discussion_developer_instructions,
     },
     tools::SymbiontTools,
@@ -27,7 +26,6 @@ use crate::{
     exploration::{ExplorationIntentQueue, ExplorationIntentReceiver},
     memory::MemoryRole,
     profile::{CalibrationMode, ProfileSnapshot, ProfileStore, SetupStatus},
-    reconciliation::ReconciliationMode,
     reflection::ReflectionStore,
     symbiont_context::SymbiontContextStore,
     usage::{InvocationRecord, ToolTraceStep},
@@ -39,6 +37,34 @@ use serde_json::json;
 fn terminal_reconnecting_errors_are_connection_failures() {
     let error = anyhow::anyhow!("Reconnecting... 5/5");
     assert!(should_restart_app_server(&error));
+}
+
+#[test]
+fn pcp_feedback_exposes_optional_correction_evidence() {
+    let specs = SymbiontTools::specifications();
+    let pcp = specs
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|spec| spec["name"] == "pcp")
+        .unwrap();
+    let feedback = pcp["tools"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|tool| tool["name"] == "submit_feedback")
+        .unwrap();
+    let schema = &feedback["inputSchema"];
+    assert_eq!(
+        schema["properties"]["evidence_revision_ids"]["type"],
+        "array"
+    );
+    assert!(
+        !schema["required"]
+            .as_array()
+            .unwrap()
+            .contains(&json!("evidence_revision_ids"))
+    );
 }
 
 #[test]
@@ -111,7 +137,7 @@ fn dynamic_tools_expose_host_and_pcp_namespaces() {
             .any(|tool| tool["name"] == "propose_proactive_message")
     );
     assert!(
-        specs[0]["tools"]
+        !specs[0]["tools"]
             .as_array()
             .unwrap()
             .iter()
@@ -141,9 +167,124 @@ fn dynamic_tools_expose_host_and_pcp_namespaces() {
     assert!(!specs[1]["tools"].as_array().unwrap().iter().any(|tool| {
         matches!(
             tool["name"].as_str(),
-            Some("assess_validity" | "write_summary" | "revise_page" | "relate_pages")
+            Some(
+                "assess_validity"
+                    | "write_summary"
+                    | "revise_page"
+                    | "relate_pages"
+                    | "consolidate_pages"
+            )
         )
     }));
+}
+
+#[test]
+fn all_dynamic_tool_surfaces_use_consistent_canonical_types() {
+    // App-server rejects an entire thread/start when even one function omits
+    // its type and mixes the legacy shape into a canonical namespace.
+    for specs in [
+        SymbiontTools::specifications(),
+        SymbiontTools::conversation_specifications(),
+        SymbiontTools::sensing_specifications(),
+        SymbiontTools::scout_specifications(),
+        SymbiontTools::attacker_specifications(),
+    ] {
+        for namespace in specs.as_array().unwrap() {
+            assert_eq!(namespace["type"], "namespace", "{namespace}");
+            for tool in namespace["tools"].as_array().unwrap() {
+                assert_eq!(tool["type"], "function", "{tool}");
+                assert_eq!(tool["inputSchema"]["type"], "object", "{tool}");
+            }
+        }
+    }
+}
+
+#[test]
+fn foreground_tools_keep_autonomous_memory_but_not_background_bookkeeping() {
+    let specs = SymbiontTools::conversation_specifications();
+    let names = specs[0]["tools"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|tool| tool["name"].as_str().unwrap())
+        .collect::<Vec<_>>();
+    assert!(names.contains(&"search_transcript"));
+    assert!(names.contains(&"read_background_context"));
+    for background in [
+        "upsert_episode",
+        "upsert_interaction_hypothesis",
+        "complete_reflection",
+        "update_current_map",
+        "submit_sensing_candidates",
+    ] {
+        assert!(!names.contains(&background));
+    }
+    assert!(
+        specs[1]["tools"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|tool| tool["name"] == "write_page")
+    );
+    assert!(
+        specs[1]["tools"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|tool| tool["name"] == "semantic_search")
+    );
+}
+
+#[test]
+fn context_provenance_matches_sent_fragments_and_deduplicates_the_bridge() {
+    let mut bundle = crate::context_assembly::ContextBundle::single(
+        "symbiont.recall_status",
+        "host",
+        "status",
+        "available".into(),
+    );
+    bundle.include(
+        "symbiont.transcript.msg_1",
+        "local",
+        "match",
+        "duplicate text".into(),
+    );
+    bundle.defer_background();
+    let profile = ProfileSnapshot {
+        status: SetupStatus::Ready,
+        mode: None,
+        orientation: "known preference".into(),
+        updated_at: None,
+    };
+    let bridge = crate::working_context::WorkingContext {
+        cursor_before: None,
+        current_revision_id: Some("msg_1".into()),
+        reply_to_revision_id: None,
+        reason: crate::working_context::WorkingContextReason::ThreadStart,
+        truncated: false,
+        messages: Vec::new(),
+    };
+    let fragments = context_fragments(
+        ComputeLane::Conversation,
+        false,
+        &profile,
+        &bundle,
+        Some(&bridge),
+        None,
+    );
+    assert!(
+        !fragments
+            .iter()
+            .any(|part| part.source == "symbiont.transcript.msg_1")
+    );
+    assert!(!fragments.iter().any(
+        |part| part.source == "symbiont.pcp" || part.source.starts_with("symbiont.background.")
+    ));
+    let audit = crate::context_assembly::audit_fragments(&fragments, &bundle.selection);
+    let sent = super::prompts::additional_context_value(&fragments);
+    for row in audit {
+        assert_eq!(row.included, sent.get(&row.source).is_some());
+    }
 }
 
 #[test]
@@ -202,7 +343,12 @@ fn ambient_sensing_does_not_receive_the_user_orientation() {
         ComputeLane::Sense,
         false,
         &profile,
-        "rotating intake context",
+        &crate::context_assembly::ContextBundle::single(
+            "symbiont.intake",
+            "intake",
+            "sensing",
+            "rotating intake context".into(),
+        ),
         None,
         None,
     );
@@ -210,7 +356,12 @@ fn ambient_sensing_does_not_receive_the_user_orientation() {
         ComputeLane::Observe,
         false,
         &profile,
-        "bounded exploration context",
+        &crate::context_assembly::ContextBundle::single(
+            "symbiont.exploration",
+            "exploration",
+            "scout",
+            "bounded exploration context".into(),
+        ),
         None,
         None,
     );
@@ -227,48 +378,13 @@ fn ambient_sensing_does_not_receive_the_user_orientation() {
 }
 
 #[test]
-fn summary_maintenance_keeps_the_model_on_one_exact_page() {
-    let prompt = summary_maintenance_prompt("rev_target", "<done/>");
-    assert!(prompt.contains("exactly `rev_target`"));
-    assert!(prompt.contains("Read that Page's content"));
-    assert!(prompt.contains("do not write one"));
-    assert!(prompt.contains("return exactly `<done/>`"));
-}
-
-#[test]
-fn reconciliation_preview_is_concise_and_explicitly_read_only() {
-    let prompt = memory_reconciliation_prompt(
-        ReconciliationMode::Preview,
-        "rec_test",
-        r#"{"durablePages":[],"topicEpisodes":[]}"#,
-        &[],
-        "<done/>",
-    );
-    assert!(prompt.contains("read-only preview"));
-    assert!(prompt.contains("reject every Page, Summary, Relation, and validity mutation"));
-    assert!(prompt.contains("Prefer no-op over cosmetic organization"));
-    assert!(prompt.contains("consolidate two or more current Pages"));
-    assert!(prompt.contains("complete_reconciliation"));
-}
-
-#[test]
-fn reconciliation_apply_distinguishes_consolidation_from_aggregation() {
-    let prompt = memory_reconciliation_prompt(
-        ReconciliationMode::Apply,
-        "rec_apply",
-        r#"{"durablePages":[],"topicEpisodes":[]}"#,
-        &[],
-        "<done/>",
-    );
-    assert!(prompt.contains("pcp.consolidate_pages"));
-    assert!(prompt.contains("inputs should remain independently current"));
-    assert!(prompt.contains("`derived_from` Relations"));
-}
-
-#[test]
 fn persistent_instructions_define_a_short_unambiguous_pcp_boundary() {
     let instructions = developer_instructions();
-    assert!(instructions.contains("center for information worth retaining"));
+    assert!(instructions.contains("PCP is a compound context system"));
+    assert!(instructions.contains("Host-local source plane owns raw user and assistant"));
+    assert!(instructions.contains("PCP Runtime owns retained cross-Host Pages"));
+    assert!(instructions.contains("plausible future value"));
+    assert!(instructions.contains("It need not be verified, exceptional, or polished"));
     assert!(instructions.contains("before asking the user to repeat known history"));
     assert!(instructions.contains("Autonomously call `pcp.write_page`"));
     assert!(instructions.contains("Do not mirror every turn"));
@@ -276,7 +392,7 @@ fn persistent_instructions_define_a_short_unambiguous_pcp_boundary() {
     assert!(instructions.contains("Rarely use `symbiont.reserve_continuation`"));
     assert!(instructions.contains("PCP memory operations remain available"));
     assert!(!instructions.contains("do not modify files or attempt side effects"));
-    assert!(instructions.chars().count() < 3_500);
+    assert!(instructions.chars().count() < 4_500);
 }
 
 #[test]
@@ -647,6 +763,21 @@ async fn pcp_tools_write_search_and_read_through_the_dynamic_bridge() {
         exploration_intents,
     );
 
+    for section in ["map", "curiosity", "reflection", "compute_policies"] {
+        let read = tools.execute_for_model(&json!({
+            "namespace": "symbiont", "tool": "read_background_context", "arguments": {"section": section}
+        }), Some("test-model"), "interactive").await;
+        assert!(read.succeeded, "{}", read.response);
+        assert_eq!(
+            tool_content_json(&read.response)["source"],
+            "host-local-background"
+        );
+    }
+    let rejected = tools.execute_for_model(&json!({
+        "namespace": "symbiont", "tool": "read_background_context", "arguments": {"section": "reflection"}
+    }), Some("test-model"), "luna_sense").await;
+    assert!(!rejected.succeeded);
+
     let described = tools
         .execute(&json!({
             "namespace": "pcp",
@@ -832,10 +963,83 @@ async fn pcp_tools_write_search_and_read_through_the_dynamic_bridge() {
     assert_eq!(feedback.response["success"], true, "{}", feedback.response);
     let feedback_json = tool_content_json(&feedback.response);
     assert_eq!(feedback_json["challengedRevisionIds"][0], revision_id);
+    assert_eq!(feedback_json["evidenceRevisionIds"], json!([]));
     assert!(
         feedback_json["feedbackRevisionId"]
             .as_str()
             .is_some_and(|revision| revision.starts_with("rev_"))
+    );
+
+    // New correction evidence must remain distinct from what the old answer used.
+    let evidence = tools
+        .execute(&json!({
+            "namespace": "pcp",
+            "tool": "write_page",
+            "arguments": {
+                "kind": "project_fact",
+                "content": "The user confirms that the observatory telescope is bronze.",
+                "source_message_ids": [correction_message.page.revision_id]
+            }
+        }))
+        .await;
+    assert_eq!(evidence.response["success"], true, "{}", evidence.response);
+    let evidence_json = tool_content_json(&evidence.response);
+    let evidence_revision_id = evidence_json["revisionId"].as_str().unwrap();
+    let correction_with_evidence = json!({
+        "namespace": "pcp",
+        "tool": "submit_feedback",
+        "arguments": {
+            "kind": "correction",
+            "authority": "subject_owner",
+            "content": "The user clarifies that the telescope is bronze, not brass.",
+            "source_message_ids": [correction_message.page.revision_id],
+            "challenged_revision_ids": [revision_id],
+            "used_revision_ids": [revision_id, derived_revision_id],
+            "evidence_revision_ids": [evidence_revision_id]
+        }
+    });
+    let supported_feedback = tools
+        .execute_for_model(&correction_with_evidence, Some("test-model"), "interactive")
+        .await;
+    assert_eq!(
+        supported_feedback.response["success"], true,
+        "{}",
+        supported_feedback.response
+    );
+    let supported_json = tool_content_json(&supported_feedback.response);
+    assert_eq!(supported_json["created"], true);
+    assert_ne!(
+        supported_json["feedbackPageId"],
+        feedback_json["feedbackPageId"]
+    );
+    assert_eq!(
+        supported_json["usedRevisionIds"],
+        feedback_json["usedRevisionIds"]
+    );
+    assert_eq!(
+        supported_json["evidenceRevisionIds"],
+        json!([evidence_revision_id])
+    );
+    assert!(
+        !supported_json["usedRevisionIds"]
+            .as_array()
+            .unwrap()
+            .contains(&json!(evidence_revision_id))
+    );
+
+    let repeated_feedback = tools
+        .execute_for_model(&correction_with_evidence, Some("test-model"), "interactive")
+        .await;
+    assert_eq!(repeated_feedback.response["success"], true);
+    let repeated_json = tool_content_json(&repeated_feedback.response);
+    assert_eq!(repeated_json["created"], false);
+    assert_eq!(
+        repeated_json["feedbackPageId"],
+        supported_json["feedbackPageId"]
+    );
+    assert_eq!(
+        repeated_json["evidenceRevisionIds"],
+        json!([evidence_revision_id])
     );
 
     let _ = tokio::fs::remove_dir_all(root).await;

@@ -4,7 +4,6 @@ use crate::{
     compute::ComputeLane,
     diagnostics::ContextFragment,
     profile::{CalibrationMode, ProfileSnapshot, SetupStatus},
-    reconciliation::{ReconciliationMode, ReconciliationProposal},
     rollover::RolloverDecision,
     working_context::WorkingContext,
 };
@@ -13,7 +12,7 @@ pub(super) fn context_fragments(
     lane: ComputeLane,
     allow_escalation: bool,
     profile: &ProfileSnapshot,
-    continuity_context: &str,
+    continuity_context: &crate::context_assembly::ContextBundle,
     working_context: Option<&WorkingContext>,
     rollover: Option<&RolloverDecision>,
 ) -> Vec<ContextFragment> {
@@ -36,11 +35,24 @@ pub(super) fn context_fragments(
             value: profile_context(profile),
         });
     }
-    fragments.push(ContextFragment {
-        source: "symbiont.pcp".to_owned(),
-        kind: "application".to_owned(),
-        value: continuity_context.to_owned(),
-    });
+    fragments.extend(
+        continuity_context
+            .fragments
+            .iter()
+            .filter(|fragment| {
+                let Some(id) = fragment.source.strip_prefix("symbiont.transcript.") else {
+                    return true;
+                };
+                !working_context.is_some_and(|context| {
+                    context.current_revision_id.as_deref() == Some(id)
+                        || context
+                            .messages
+                            .iter()
+                            .any(|message| message.revision_id == id)
+                })
+            })
+            .cloned(),
+    );
     if let Some(value) = working_context.and_then(WorkingContext::prompt) {
         fragments.push(ContextFragment {
             source: "symbiont.working_context".to_owned(),
@@ -105,6 +117,16 @@ Use `symbiont.escalate` only when deeper reasoning can materially change the res
 The workspace is read-only by default; discussion and PCP memory operations remain available. Request narrow extra access through Codex; otherwise report the actual failure.
 "#
     .to_owned()
+}
+
+pub(super) fn conversation_developer_instructions() -> String {
+    let mut instructions = developer_instructions()
+        .split("\n\n")
+        .filter(|paragraph| !paragraph.starts_with("Curiosity Map contains"))
+        .collect::<Vec<_>>()
+        .join("\n\n");
+    instructions.push_str("\n\nBackground maps, queues, interaction hypotheses and read receipts are not conversation context. Use symbiont.read_background_context only when the current question needs them; these local records are tentative data, not PCP Revisions. Local transcript IDs and ctxrev IDs must not be passed to pcp.read_pages. An unavailable PCP search is not evidence of missing memory. Preserve scope boundaries; never derive a write across Scopes.");
+    instructions
 }
 
 pub(super) fn temporary_discussion_developer_instructions() -> String {
@@ -255,76 +277,6 @@ pub(super) fn profile_review_prompt(source_bundle: &str, completion_marker: &str
          `symbiont.revise_orientation` or alter Hunches in this background run. After the tool call, return exactly \
          `{completion_marker}`.\n\n\
          <source-bundle>\n{source_bundle}\n</source-bundle>"
-    )
-}
-
-pub(super) fn summary_maintenance_prompt(
-    target_revision_id: &str,
-    completion_marker: &str,
-) -> String {
-    format!(
-        "Maintain the sparse PCP Summary index for exactly `{target_revision_id}`. Read that \
-         Page's content. Decide whether its length and semantic density justify a reusable routing \
-         Summary. If yes, call `pcp.write_summary` with `target_page_id` set to that exact Page and a \
-         120-600 character routing abstract that preserves discriminating concepts, decisions, \
-         uncertainty, names, and searchable aliases. It must help a later model decide whether to \
-         read Detail; it is not evidence, a retelling, or a shorter copy of the payload. If the \
-         content cannot be compressed meaningfully, do not write one. Do not \
-         search the web, create aggregate Pages, modify user profile, or address the user. After \
-         the decision, return exactly `{completion_marker}`."
-    )
-}
-
-pub(super) fn memory_reconciliation_prompt(
-    mode: ReconciliationMode,
-    run_id: &str,
-    inventory_bundle: &str,
-    proposals: &[ReconciliationProposal],
-    completion_marker: &str,
-) -> String {
-    let mode_instructions = match mode {
-        ReconciliationMode::Preview => {
-            "This is a read-only preview. You may selectively search and read PCP, but the Host \
-             will reject every Page, Summary, Relation, and validity mutation. Submit no more than \
-             six proposals. Prefer no-op over cosmetic organization."
-                .to_owned()
-        }
-        ReconciliationMode::Apply => format!(
-            "Apply only the approved preview proposals below. Re-read every exact current Revision \
-             before mutation and skip stale or unjustified proposals. Make at most six PCP \
-             mutations. Never delete or tombstone. For an approved `consolidate`, call \
-             `pcp.consolidate_pages` once with one current Revision as the canonical Page, every \
-             current Revision it replaces, and a self-contained replacement payload. For an \
-             approved `synthesize`, create an aggregate Page only when its inputs should remain \
-             independently current; use kind `memory_synthesis`, exact source provenance, and \
-             `derived_from` Relations. A classification revision must preserve payload, sources, \
-             provenance, and lifecycle.\n\n\
-             <approved-proposals>\n{}\n</approved-proposals>",
-            serde_json::to_string_pretty(proposals).unwrap_or_else(|_| "[]".to_owned())
-        ),
-    };
-    format!(
-        "Reconcile symbiont-d's durable memory structure for run `{run_id}`. This is bounded \
-         background memory work, not conversation and not web research. The inventory contains \
-         current durable Page heads plus existing Topic Episodes; raw conversation events and \
-         obsolete operational projections were deliberately excluded. Summaries route to Detail \
-         and are not evidence. Use semantic judgment, not numeric scoring or fixed thresholds.\n\n\
-         {mode_instructions}\n\n\
-         Propose or apply only consequential maintenance: classify an otherwise durable Page when \
-         its kind is clear; consolidate two or more current Pages only when they redundantly \
-         represent one durable subject and one self-contained Page can replace all of them; \
-         synthesize a recurring, future-useful subject only when its inputs should remain \
-         independently retrievable; \
-         add a Relation that materially improves navigation; assess validity only from contrary or \
-         superseding evidence; replace a poor routing Summary only when it impairs retrieval. Do not \
-         reorganize content merely because it exists, and do not modify profile, Current Map, Open \
-         Loops, Hunches, Episodes, or raw messages. Use exact Revision IDs. If a candidate tool \
-         returns `status: skipped`, treat only that candidate as rejected: do not repeat it in this \
-         run, continue reviewing the remaining window, and still complete the reconciliation.\n\n\
-         Finish by calling `symbiont.complete_reconciliation` exactly once with a concise visible \
-         summary in the user's language and the proposals that remain relevant. Then return exactly \
-         `{completion_marker}`.\n\n\
-         <memory-inventory>\n{inventory_bundle}\n</memory-inventory>"
     )
 }
 

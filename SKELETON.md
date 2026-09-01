@@ -1,6 +1,23 @@
 # Source ownership
 
-This is a routing map for the external-input path, not a product roadmap.
+This is a routing map for maintained source boundaries, not a product roadmap.
+
+## Model context and inspection
+
+- `src/context_assembly.rs`: typed context fragments, provenance/omission audit and final optional-recall budget. Audit metadata is not sent to models.
+- `src/web.rs`: foreground composition uses identity/boundary, selected route and federated recall; background maps, hypotheses and queues are deferred. `src/reflection/worker.rs`, `src/context_maintenance.rs` and `src/exploration.rs` select their own task-specific background inputs.
+- `src/continuity/compound.rs`: compact PCP and local-source evidence with exact identities, source resolution and unavailable-versus-miss semantics; no rewriting of stored content.
+- `src/codex/client.rs` and `src/codex/prompts.rs`: submit the selected fragments and capture the actual thread configuration and turn request. Native/provider final prompts are not exposed. Conversation tool registration is separate from maintenance tools.
+- `web/context-inspector.js`: source-attributed input inspection, exact client-request export and explicit historical-record limitations; embedded through `src/web.rs`.
+
+## Memory ownership and retirement
+
+- `src/reflection/worker.rs`: conversation-driven topic/hypothesis review, recurrence evidence and autonomous retention decisions. `src/context_maintenance.rs` maintains local working context; neither owns PCP library maintenance.
+- `src/continuity.rs` and `src/codex/tools.rs`: tenant recall, source resolution, autonomous ingest and exact-Revision feedback. Runtime owns PCP semantic projections and governance.
+- `src/retired_memory.rs`: state-free HTTP 410 responses for retired reconciliation actions. The old UI, worker, Summary loop and episode-index sync are removed. Existing `reconciliation.json` and usage/trace records are not migrated, rewritten or deleted.
+- `src/bin/symbiont-pcp-worker.rs`: legacy command compatibility only; returns protocol `defer` locally without network/model calls. Operators should configure maintenance in PCP Runtime.
+
+## External inputs
 
 - `src/drive_input.rs`: read-only Drive listing, oldest-first file selection, persistent acknowledgement IDs. Document time is separate from intake time and event time.
 - `src/external_digest.rs` and `src/external_markdown.rs`: shared document sectioning, provenance and transport normalization.

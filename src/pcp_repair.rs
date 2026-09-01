@@ -618,6 +618,7 @@ async fn inventory_candidates(
                 INVENTORY_PAGE_SIZE,
                 cursor,
                 32_000,
+                pcp_client::ContentLibraryFilter::default(),
             )
             .await?;
         for hit in page.hits {

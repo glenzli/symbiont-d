@@ -9,6 +9,7 @@ mod bridge;
 mod codex;
 mod compute;
 mod compute_policy;
+mod context_assembly;
 mod context_maintenance;
 mod continuation;
 mod continuity;
@@ -28,18 +29,16 @@ mod inference;
 mod input_roles;
 mod luna_input;
 mod mail_input;
-mod maintenance;
 mod memory;
 mod model_council;
 mod outreach;
 mod pcp_connection;
-mod pcp_index;
 mod pcp_migration;
 mod pcp_repair;
 mod permission;
 mod profile;
-mod reconciliation;
 mod reflection;
+mod retired_memory;
 mod rollover;
 mod runtime_log;
 mod secrets;
@@ -90,10 +89,8 @@ use input_roles::InputRoleStore;
 use luna_input::LunaInput;
 use mail_input::MailInputStore;
 use model_council::{ModelCouncilService, ModelCouncilStore};
-use pcp_index::PcpIndex;
 use permission::PermissionBroker;
 use profile::ProfileStore;
-use reconciliation::{ReconciliationDependencies, ReconciliationHandle, ReconciliationStore};
 use reflection::{ReflectionHandle, ReflectionStore};
 use sensing::SensingStore;
 use signal_retention::{SignalRetentionStore, start_cleanup as start_signal_cleanup};
@@ -246,11 +243,6 @@ async fn main() -> Result<()> {
         .backfill_messages(&continuity.recent_messages(100).await?)
         .await
         .context("backfill recent conversation into Reflection")?;
-    let pcp_index = Arc::new(PcpIndex::new(
-        Arc::clone(&continuity),
-        Arc::clone(&reflection_store),
-    ));
-    info!("PCP tenant semantic index is disabled; no historical projection will be rebuilt");
     let compute_policies = Arc::new(
         ComputePolicyStore::open(resolve_data_path(
             &workspace,
@@ -513,14 +505,6 @@ async fn main() -> Result<()> {
         ))
         .await?,
     );
-    let reconciliation_store = Arc::new(
-        ReconciliationStore::open(resolve_data_path(
-            &workspace,
-            "SYMBIONT_RECONCILIATION_PATH",
-            "reconciliation.json",
-        ))
-        .await?,
-    );
     if env::var_os("SYMBIONT_RUN_PCP_TRANSCRIPT_MIGRATION").is_some() {
         let report = pcp_migration::migrate_transcript(
             &mut codex,
@@ -606,7 +590,6 @@ async fn main() -> Result<()> {
     .await?;
     let reflection = ReflectionHandle::start(
         Arc::clone(&reflection_store),
-        Arc::clone(&pcp_index),
         Arc::clone(&autonomy),
         Arc::clone(&profile),
         Arc::clone(&codex),
@@ -617,29 +600,6 @@ async fn main() -> Result<()> {
         Arc::clone(&usage),
         conversation.clone(),
         exploration.clone(),
-    );
-    let reconciliation = ReconciliationHandle::start(
-        reconciliation_store,
-        ReconciliationDependencies {
-            autonomy: Arc::clone(&autonomy),
-            profile: Arc::clone(&profile),
-            codex: Arc::clone(&codex),
-            inference: Arc::clone(&inference),
-            compute: Arc::clone(&compute),
-            continuity: Arc::clone(&continuity),
-            reflection: Arc::clone(&reflection_store),
-            usage: Arc::clone(&usage),
-            conversation: conversation.clone(),
-        },
-    );
-    maintenance::start(
-        Arc::clone(&autonomy),
-        Arc::clone(&profile),
-        Arc::clone(&codex),
-        Arc::clone(&compute),
-        Arc::clone(&continuity),
-        Arc::clone(&usage),
-        conversation.clone(),
     );
     context_maintenance::start(
         Arc::clone(&autonomy),
@@ -694,8 +654,6 @@ async fn main() -> Result<()> {
         signal_retention,
         input_roles,
         reflection,
-        reconciliation,
-        pcp_index,
         conversation,
         bridge,
         ephemeral_chat,

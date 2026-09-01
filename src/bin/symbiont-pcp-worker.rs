@@ -1,54 +1,52 @@
-use std::{
-    env,
-    io::{Read, Write},
-    time::Duration,
-};
+//! Retired compatibility shim for old operator configurations. Respond without
+//! contacting Symbiont or starting a model; policy belongs to PCP Runtime.
+use std::io::{Read, Write};
 
 use anyhow::{Context, Result};
 use pcp_runtime::{MaintenanceWorkerRequest, MaintenanceWorkerResponse};
 
-const DEFAULT_ENDPOINT: &str = "http://127.0.0.1:4317/api/internal/pcp-maintenance/evaluate";
 const MAX_REQUEST_BYTES: usize = 2 * 1024 * 1024;
 
-#[tokio::main]
-async fn main() -> Result<()> {
+fn main() -> Result<()> {
     let mut input = Vec::new();
     std::io::stdin()
         .take((MAX_REQUEST_BYTES + 1) as u64)
         .read_to_end(&mut input)
-        .context("read PCP maintenance request")?;
+        .context("read legacy PCP maintenance request")?;
+    let response = defer_request(&input)?;
+    eprintln!("Symbiont PCP maintenance worker is retired; configure a PCP Runtime-owned worker.");
+    let mut stdout = std::io::stdout().lock();
+    serde_json::to_writer(&mut stdout, &response).context("write PCP defer response")?;
+    stdout.flush().context("flush PCP defer response")
+}
+
+fn defer_request(input: &[u8]) -> Result<MaintenanceWorkerResponse> {
     anyhow::ensure!(
         input.len() <= MAX_REQUEST_BYTES,
         "PCP maintenance request exceeds {MAX_REQUEST_BYTES} bytes"
     );
-    serde_json::from_slice::<MaintenanceWorkerRequest>(&input)
-        .context("validate PCP maintenance request")?;
+    serde_json::from_slice::<MaintenanceWorkerRequest>(input)
+        .context("validate legacy PCP maintenance request")?;
+    Ok(MaintenanceWorkerResponse::Defer)
+}
 
-    let endpoint =
-        env::var("SYMBIONT_PCP_WORKER_URL").unwrap_or_else(|_| DEFAULT_ENDPOINT.to_owned());
-    let client = reqwest::Client::builder()
-        .connect_timeout(Duration::from_secs(5))
-        .timeout(Duration::from_secs(410))
-        .build()
-        .context("build symbiont semantic worker client")?;
-    let response = client
-        .post(&endpoint)
-        .header(reqwest::header::CONTENT_TYPE, "application/json")
-        .body(input)
-        .send()
-        .await
-        .with_context(|| format!("contact symbiont semantic worker at {endpoint}"))?
-        .error_for_status()
-        .context("symbiont semantic worker rejected the request")?;
-    let body = response
-        .bytes()
-        .await
-        .context("read symbiont semantic worker response")?;
-    serde_json::from_slice::<MaintenanceWorkerResponse>(&body)
-        .context("validate symbiont semantic worker response")?;
-    let mut stdout = std::io::stdout();
-    stdout
-        .write_all(&body)
-        .context("write PCP maintenance response")?;
-    stdout.flush().context("flush PCP maintenance response")
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn legacy_worker_defers_without_a_running_symbiont() {
+        let request = MaintenanceWorkerRequest::SelectPacking {
+            pages: Vec::new(),
+            excluded_candidate_sets: Vec::new(),
+        };
+        let result = defer_request(&serde_json::to_vec(&request).unwrap()).unwrap();
+        assert!(matches!(result, MaintenanceWorkerResponse::Defer));
+    }
+
+    #[test]
+    fn invalid_or_oversized_requests_are_rejected() {
+        assert!(defer_request(b"not-json").is_err());
+        assert!(defer_request(&vec![b' '; MAX_REQUEST_BYTES + 1]).is_err());
+    }
 }

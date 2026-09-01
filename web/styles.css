@@ -3653,174 +3653,6 @@ html[data-native-shell="macos"] .topbar {
   width: min(820px, calc(100vw - 32px));
 }
 
-.reconciliation-dialog {
-  width: min(820px, calc(100vw - 32px));
-  height: min(680px, calc(100dvh - 48px));
-  max-height: min(680px, calc(100dvh - 48px));
-}
-
-.reconciliation-dialog[open] {
-  display: flex;
-  flex-direction: column;
-  overflow: hidden;
-}
-
-.reconciliation-dialog > .dialog-header,
-.reconciliation-dialog > .reconciliation-toolbar {
-  flex: 0 0 auto;
-}
-
-.reconciliation-budget-dialog {
-  width: min(430px, calc(100vw - 32px));
-}
-
-.reconciliation-toolbar {
-  padding: 12px 14px;
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 16px;
-  border-bottom: 1px solid var(--border);
-}
-
-.reconciliation-toolbar dl {
-  margin: 0;
-  display: flex;
-  gap: 24px;
-}
-
-.reconciliation-toolbar dt {
-  color: var(--text-faint);
-  font-size: 9px;
-}
-
-.reconciliation-toolbar dd {
-  margin: 2px 0 0;
-  font-size: 11px;
-  font-weight: 620;
-}
-
-.reconciliation-toolbar button {
-  display: inline-flex;
-  align-items: center;
-  gap: 6px;
-}
-
-.reconciliation-toolbar button svg {
-  width: 14px;
-  height: 14px;
-}
-
-.reconciliation-content {
-  min-height: 0;
-  flex: 1 1 auto;
-  overflow-y: auto;
-  overscroll-behavior: contain;
-  padding: 18px 14px 24px;
-  display: grid;
-  gap: 28px;
-}
-
-.reconciliation-toolbar button[data-busy="true"]:disabled {
-  cursor: wait;
-  opacity: 1;
-  border-color: var(--border-strong);
-  color: var(--text);
-  background: var(--surface-subtle);
-}
-
-.reconciliation-action-progress {
-  width: 11px;
-  height: 11px;
-  flex: 0 0 auto;
-  border: 1.5px solid currentColor;
-  border-right-color: transparent;
-  border-radius: 50%;
-  animation: reconciliation-action-spin 700ms linear infinite;
-}
-
-@keyframes reconciliation-action-spin {
-  to {
-    transform: rotate(360deg);
-  }
-}
-
-.reconciliation-section > h3 {
-  margin: 0 0 8px;
-  color: var(--text-soft);
-  font-size: 10px;
-  font-weight: 650;
-}
-
-.reconciliation-summary {
-  margin: 0;
-  padding: 10px 0 13px;
-  color: var(--text-soft);
-  font-size: 11px;
-  line-height: 1.55;
-}
-
-.reconciliation-proposal,
-.reconciliation-run {
-  padding: 12px 0;
-  border-top: 1px solid var(--border);
-}
-
-.reconciliation-proposal header {
-  display: flex;
-  align-items: baseline;
-  gap: 10px;
-}
-
-.reconciliation-proposal header small {
-  min-width: 62px;
-  color: var(--text-faint);
-  font-size: 9px;
-}
-
-.reconciliation-proposal strong,
-.reconciliation-run strong {
-  font-size: 11px;
-  font-weight: 620;
-}
-
-.reconciliation-proposal p,
-.reconciliation-run p {
-  margin: 7px 0;
-  color: var(--text-soft);
-  font-size: 10px;
-  line-height: 1.55;
-}
-
-.reconciliation-proposal > small,
-.reconciliation-run > small,
-.reconciliation-applied {
-  color: var(--text-faint);
-  font-size: 9px;
-}
-
-.reconciliation-run header {
-  display: grid;
-  grid-template-columns: minmax(0, 1fr) auto auto;
-  align-items: start;
-  gap: 8px 12px;
-}
-
-.reconciliation-run header > small {
-  color: var(--text-soft);
-  font-size: 9px;
-}
-
-.reconciliation-run .trace-button {
-  min-width: auto;
-  font-size: 9px;
-}
-
-.reconciliation-applied {
-  display: block;
-  margin-top: 10px;
-}
-
 .exploration-budget-dialog {
   width: min(430px, calc(100vw - 32px));
 }
@@ -5558,6 +5390,17 @@ button:disabled {
   border-top: 1px solid var(--border);
 }
 
+.context-source { min-width: 0; padding: 8px 0; border-top: 1px solid var(--border); }
+.trace-context > summary, .trace-context .trace-raw > summary { font-size: 12px; }
+.trace-context .trace-context-notice { font-size: 12px; line-height: 1.6; }
+.context-source > code, .context-source > p { display: block; margin: 4px 0; font-size: 11px; color: var(--text-soft); overflow-wrap: anywhere; }
+.context-source > .trace-raw { margin: 0; }
+.context-deferred li { margin: 8px 0; overflow-wrap: anywhere; }
+.context-export-actions { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; margin: 12px 0; }
+.context-export-actions button { padding: 7px 10px; border: 1px solid var(--border); border-radius: 6px; background: var(--surface-raised); color: var(--text); cursor: pointer; }
+.context-export-actions span { font-size: 12px; color: var(--text-soft); }
+.trace-context-body .trace-raw pre { max-width: 100%; max-height: 65vh; overflow: auto; white-space: pre-wrap; overflow-wrap: anywhere; }
+
 .trace-context-notice {
   margin: 0;
   padding: 8px 0;
@@ -6259,39 +6102,6 @@ button:disabled {
   .panel-dialog {
     width: calc(100vw - 16px);
     max-height: calc(100dvh - 16px);
-  }
-
-  .reconciliation-toolbar {
-    align-items: stretch;
-    flex-direction: column;
-    gap: 10px;
-  }
-
-  .reconciliation-toolbar dl {
-    justify-content: space-between;
-  }
-
-  .reconciliation-toolbar .inline-actions {
-    justify-content: flex-end;
-  }
-
-  .reconciliation-run header {
-    grid-template-columns: minmax(0, 1fr) auto;
-  }
-
-  .reconciliation-run header > strong {
-    grid-column: 1;
-    grid-row: 1;
-  }
-
-  .reconciliation-run header > small {
-    grid-column: 1 / -1;
-    grid-row: 2;
-  }
-
-  .reconciliation-run .trace-button {
-    grid-column: 2;
-    grid-row: 1;
   }
 
   .setting-grid {

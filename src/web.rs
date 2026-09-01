@@ -78,10 +78,8 @@ use crate::{
         ModelCouncilSnapshot, ModelCouncilStore, synthesis_packet,
     },
     outreach::PROPOSE_OUTREACH_TOOL,
-    pcp_index::{PcpIndex, PcpIndexSnapshot},
     permission::{PermissionBroker, PermissionDecision, PermissionRequestView},
     profile::{CalibrationMode, ProfileSnapshot, ProfileStore, SetupStatus},
-    reconciliation::{ReconciliationHandle, ReconciliationRuntime, ReconciliationSnapshot},
     reflection::{
         HunchFeedbackTarget, ReflectionConfig, ReflectionHandle, ReflectionRuntime,
         ReflectionSnapshot, TurnDisposition,
@@ -122,7 +120,6 @@ const VOICE_INPUT_JS: &str = include_str!("../web/voice-input.js");
 const EXPLORATION_UI_JS: &str = include_str!("../web/exploration-ui.js");
 const EXPLORATION_RECEIPT_JS: &str = include_str!("../web/exploration-receipt.js");
 const REFLECTION_UI_JS: &str = include_str!("../web/reflection-ui.js");
-const RECONCILIATION_UI_JS: &str = include_str!("../web/reconciliation-ui.js");
 const TOPIC_UI_JS: &str = include_str!("../web/topic-ui.js");
 const TOPIC_CHAT_JS: &str = include_str!("../web/topic-chat.js");
 const TOPIC_EXPANSION_JS: &str = include_str!("../web/topic-expansion.js");
@@ -133,6 +130,7 @@ const TURN_DISPOSITION_UI_JS: &str = include_str!("../web/turn-disposition-ui.js
 const QUOTE_UI_JS: &str = include_str!("../web/quote-ui.js");
 const PERMISSION_UI_JS: &str = include_str!("../web/permission-ui.js");
 const TRACE_UI_JS: &str = include_str!("../web/trace-ui.js");
+const CONTEXT_INSPECTOR_JS: &str = include_str!("../web/context-inspector.js");
 const TOPBAR_UI_JS: &str = include_str!("../web/topbar-ui.js");
 const STYLES_CSS: &str = include_str!("../web/styles.css");
 const DEFAULT_AVATAR_PNG: &[u8] = include_bytes!("../web/assets/symbiont-avatar-display.png");
@@ -186,8 +184,6 @@ pub struct AppState {
     signal_retention: Arc<SignalRetentionStore>,
     input_roles: Arc<InputRoleStore>,
     reflection: ReflectionHandle,
-    reconciliation: ReconciliationHandle,
-    pcp_index: Arc<PcpIndex>,
     topics: Arc<TopicService>,
     conversation: ConversationCoordinator,
     bridge: Arc<CodexBridge>,
@@ -223,8 +219,6 @@ impl AppState {
         signal_retention: Arc<SignalRetentionStore>,
         input_roles: Arc<InputRoleStore>,
         reflection: ReflectionHandle,
-        reconciliation: ReconciliationHandle,
-        pcp_index: Arc<PcpIndex>,
         conversation: ConversationCoordinator,
         bridge: Arc<CodexBridge>,
         ephemeral_chat: Arc<EphemeralChatService>,
@@ -261,8 +255,6 @@ impl AppState {
             signal_retention,
             input_roles,
             reflection,
-            reconciliation,
-            pcp_index,
             topics,
             conversation,
             bridge,
@@ -344,8 +336,6 @@ struct BootstrapResponse {
     exploration: ExplorationSnapshot,
     attacker: AttackerSnapshot,
     reflection: ReflectionSnapshot,
-    reconciliation: ReconciliationSnapshot,
-    memory_index: PcpIndexSnapshot,
     conversation: ConversationSnapshot,
     bridge: BridgeSnapshot,
     permissions: Vec<PermissionRequestView>,
@@ -371,8 +361,6 @@ struct RuntimeResponse {
     exploration: ExplorationSnapshot,
     attacker: AttackerSnapshot,
     reflection: ReflectionRuntime,
-    reconciliation: ReconciliationRuntime,
-    memory_index: PcpIndexSnapshot,
     conversation: ConversationSnapshot,
     compute_policies: Vec<ComputeTopicPolicy>,
     messages: Vec<MemoryEntry>,
@@ -459,22 +447,6 @@ impl From<SensingCandidate> for SensingCandidateResponse {
 #[derive(Serialize)]
 struct TriggerResponse {
     accepted: bool,
-}
-
-#[derive(Default, Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct ReconciliationTriggerQuery {
-    #[serde(default)]
-    override_token_limit: bool,
-}
-
-#[derive(Serialize)]
-#[serde(rename_all = "camelCase")]
-struct ReconciliationTriggerResponse {
-    accepted: bool,
-    requires_confirmation: bool,
-    background_tokens_today: u64,
-    daily_token_limit: u64,
 }
 
 #[derive(Deserialize, Default)]
@@ -643,6 +615,7 @@ struct ApiError {
 
 pub fn router(state: AppState) -> Router {
     Router::new()
+        .merge(crate::retired_memory::routes())
         .route("/", get(index))
         .route("/app.js", get(app_js))
         .route(
@@ -672,7 +645,6 @@ pub fn router(state: AppState) -> Router {
         .route("/exploration-ui.js", get(exploration_ui_js))
         .route("/exploration-receipt.js", get(exploration_receipt_js))
         .route("/reflection-ui.js", get(reflection_ui_js))
-        .route("/reconciliation-ui.js", get(reconciliation_ui_js))
         .route("/topic-ui.js", get(topic_ui_js))
         .route("/topic-chat.js", get(topic_chat_js))
         .route("/topic-expansion.js", get(topic_expansion_js))
@@ -683,6 +655,7 @@ pub fn router(state: AppState) -> Router {
         .route("/quote-ui.js", get(quote_ui_js))
         .route("/permission-ui.js", get(permission_ui_js))
         .route("/trace-ui.js", get(trace_ui_js))
+        .route("/context-inspector.js", get(context_inspector_js))
         .route("/topbar-ui.js", get(topbar_ui_js))
         .route("/styles.css", get(styles_css))
         .route("/symbiont-avatar.png", get(default_avatar))
@@ -806,16 +779,6 @@ pub fn router(state: AppState) -> Router {
         .route("/api/reflection", get(reflection_snapshot))
         .route("/api/reflection/config", post(update_reflection))
         .route("/api/reflection/run", post(trigger_reflection))
-        .route("/api/reconciliation", get(reconciliation_snapshot))
-        .route(
-            "/api/internal/pcp-maintenance/evaluate",
-            post(evaluate_pcp_maintenance),
-        )
-        .route("/api/reconciliation/preview", post(preview_reconciliation))
-        .route(
-            "/api/reconciliation/apply/{run_id}",
-            post(apply_reconciliation),
-        )
         .route("/api/topics", get(topic_index))
         .route("/api/topics/{topic_id}", get(topic_detail))
         .route("/api/bridge/config", post(update_bridge_config))
@@ -1039,13 +1002,6 @@ async fn reflection_ui_js() -> impl IntoResponse {
     )
 }
 
-async fn reconciliation_ui_js() -> impl IntoResponse {
-    (
-        [(header::CONTENT_TYPE, "text/javascript; charset=utf-8")],
-        RECONCILIATION_UI_JS,
-    )
-}
-
 async fn topic_ui_js() -> impl IntoResponse {
     (
         [(header::CONTENT_TYPE, "text/javascript; charset=utf-8")],
@@ -1106,6 +1062,13 @@ async fn trace_ui_js() -> impl IntoResponse {
     (
         [(header::CONTENT_TYPE, "text/javascript; charset=utf-8")],
         TRACE_UI_JS,
+    )
+}
+
+async fn context_inspector_js() -> impl IntoResponse {
+    (
+        [(header::CONTENT_TYPE, "text/javascript; charset=utf-8")],
+        CONTEXT_INSPECTOR_JS,
     )
 }
 
@@ -1235,8 +1198,6 @@ async fn bootstrap(State(state): State<AppState>) -> Result<Json<BootstrapRespon
             .snapshot()
             .await
             .map_err(ApiError::internal)?,
-        reconciliation: state.reconciliation.snapshot().await,
-        memory_index: state.pcp_index.snapshot().await,
         conversation: state.conversation.snapshot().await,
         bridge: state.bridge.snapshot().await,
         permissions: state.permissions.snapshot().await,
@@ -1896,8 +1857,6 @@ async fn runtime(
         exploration: state.exploration.snapshot().await,
         attacker: state.attacker.snapshot().await,
         reflection: state.reflection.runtime().await,
-        reconciliation: state.reconciliation.runtime().await,
-        memory_index: state.pcp_index.snapshot().await,
         conversation: state.conversation.snapshot().await,
         compute_policies: state.compute_policies.snapshot().await,
         messages,
@@ -2028,83 +1987,6 @@ async fn trigger_reflection(State(state): State<AppState>) -> Json<TriggerRespon
     Json(TriggerResponse {
         accepted: state.reflection.trigger(),
     })
-}
-
-async fn reconciliation_snapshot(State(state): State<AppState>) -> Json<ReconciliationSnapshot> {
-    Json(state.reconciliation.snapshot().await)
-}
-
-async fn evaluate_pcp_maintenance(
-    State(state): State<AppState>,
-    Json(request): Json<pcp_runtime::MaintenanceWorkerRequest>,
-) -> Result<Json<pcp_runtime::MaintenanceWorkerResponse>, ApiError> {
-    state
-        .reconciliation
-        .evaluate_pcp_maintenance(request)
-        .await
-        .map(Json)
-        .map_err(ApiError::internal)
-}
-
-async fn preview_reconciliation(State(state): State<AppState>) -> Json<TriggerResponse> {
-    Json(TriggerResponse {
-        accepted: state.reconciliation.preview(),
-    })
-}
-
-async fn apply_reconciliation(
-    State(state): State<AppState>,
-    AxumPath(run_id): AxumPath<String>,
-    Query(query): Query<ReconciliationTriggerQuery>,
-) -> Result<Json<ReconciliationTriggerResponse>, ApiError> {
-    let headline = state
-        .usage
-        .headline(&today_started_at())
-        .await
-        .map_err(ApiError::internal)?;
-    let autonomy_limit = state.autonomy.snapshot().await.daily_token_limit;
-    let reflection_limit = state.reflection.store().config().await.daily_token_limit;
-    let (background_tokens_today, daily_token_limit) =
-        exceeded_reconciliation_budget(&headline, autonomy_limit, reflection_limit).unwrap_or((
-            headline.reflection_tokens_today,
-            nonzero_min(autonomy_limit, reflection_limit),
-        ));
-    let requires_confirmation = daily_token_limit > 0
-        && background_tokens_today >= daily_token_limit
-        && !query.override_token_limit;
-    let accepted = !requires_confirmation
-        && state
-            .reconciliation
-            .apply(run_id, query.override_token_limit);
-    Ok(Json(ReconciliationTriggerResponse {
-        accepted,
-        requires_confirmation,
-        background_tokens_today,
-        daily_token_limit,
-    }))
-}
-
-fn exceeded_reconciliation_budget(
-    headline: &UsageHeadline,
-    autonomy_limit: u64,
-    reflection_limit: u64,
-) -> Option<(u64, u64)> {
-    if autonomy_limit > 0 && headline.autonomous_tokens_today >= autonomy_limit {
-        return Some((headline.autonomous_tokens_today, autonomy_limit));
-    }
-    if reflection_limit > 0 && headline.reflection_tokens_today >= reflection_limit {
-        return Some((headline.reflection_tokens_today, reflection_limit));
-    }
-    None
-}
-
-fn nonzero_min(left: u64, right: u64) -> u64 {
-    match (left, right) {
-        (0, 0) => 0,
-        (0, right) => right,
-        (left, 0) => left,
-        (left, right) => left.min(right),
-    }
 }
 
 async fn topic_index(State(state): State<AppState>) -> Result<Json<TopicIndex>, ApiError> {
@@ -3239,14 +3121,22 @@ async fn run_chat(
         let compute = state.compute.snapshot().await;
         let route = resolve_compute_route(&state, &batch).await?;
         let profile = state.profile.snapshot().await;
-        let compute_policy_context = state.compute_policies.prompt().await;
         let scoped_history = match primary_topic.as_ref() {
             Some(topic) => Some(state.topics.chat_history(&topic.id).await?),
             None => None,
         };
         let excluded_local_revision_ids = match scoped_history.as_deref() {
-            Some(history) => recent_revision_ids(history, 16),
-            None => recent_revision_ids(&state.continuity.recent_messages(16).await?, 16),
+            Some(history) => recent_revision_ids(
+                history,
+                crate::working_context::WORKING_CONTEXT_MAX_MESSAGES,
+            ),
+            None => recent_revision_ids(
+                &state
+                    .continuity
+                    .recent_messages(crate::working_context::WORKING_CONTEXT_MAX_MESSAGES)
+                    .await?,
+                crate::working_context::WORKING_CONTEXT_MAX_MESSAGES,
+            ),
         };
         let compound = match compound_recall_query(&batch, primary_topic.as_ref()) {
             Some(query) => Some(
@@ -3260,20 +3150,23 @@ async fn run_chat(
         if let Some(compound) = compound.as_ref() {
             source_revision_ids.extend(compound.source_revision_ids());
         }
-        let continuity_base = format!(
-            "{}\n\n{}\n\n{}\n\n{}\n\n{}\n\n{}{}",
-            state.continuity.context_seed(Some(&current.stored)).await,
-            state.context.prompt().await?,
-            state.curiosity.prompt().await?,
-            state.reflection.store().prompt().await?,
-            compute_policy_context,
-            route.context,
-            compound
-                .as_ref()
-                .map(|packet| format!("\n\n{}", packet.prompt()))
-                .unwrap_or_default(),
+        let mut continuity_context = state.continuity.context_seed(Some(&current.stored)).await;
+        continuity_context.defer_background();
+        continuity_context.include(
+            "symbiont.route",
+            "宿主本轮计算路由",
+            "仅提供已选路由，不注入完整规则库",
+            route.context.clone(),
         );
-        let continuity_context = format!("{}\n\n{}", continuity_base, state.bridge.prompt().await);
+        if let Some(packet) = compound.as_ref() {
+            continuity_context.extend(packet.context());
+        }
+        continuity_context.include(
+            "symbiont.bridge",
+            "Host Bridge",
+            "跨入口调用边界",
+            state.bridge.prompt().await,
+        );
         let user_text = conversation_batch_text(&batch, first_batch);
         let mut council_ids = Vec::new();
         for id in batch

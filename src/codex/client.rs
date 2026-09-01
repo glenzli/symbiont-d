@@ -32,9 +32,8 @@ use super::{
     prompts::{
         additional_context_value, context_fragments, context_maintenance_prompt,
         developer_instructions, interaction_reflection_prompt, luna_sensing_developer_instructions,
-        memory_reconciliation_prompt, pcp_history_repair_developer_instructions,
-        pcp_history_repair_prompt, profile_review_prompt, summary_maintenance_prompt,
-        temporary_discussion_developer_instructions,
+        pcp_history_repair_developer_instructions, pcp_history_repair_prompt,
+        profile_review_prompt, temporary_discussion_developer_instructions,
     },
     tool_dedup::{ToolCallPlan, TurnToolDeduplicator},
     tools::{EscalationRequest, SymbiontTools, tool_result},
@@ -56,10 +55,6 @@ use crate::{
     outreach::{OutreachCandidate, PROPOSE_OUTREACH_TOOL},
     permission::PermissionBroker,
     profile::{ProfileSnapshot, ProfileStore},
-    reconciliation::{
-        ReconciliationAction, ReconciliationMode, ReconciliationModelOutcome,
-        ReconciliationProposal,
-    },
     reflection::ReflectionStore,
     rollover::{self, RolloverDecision, ThreadContextPressure},
     sensing::SensingCandidateDraft,
@@ -71,11 +66,9 @@ use crate::{
 
 const AUTONOMOUS_SILENT_MARKER: &str = "<symbiont-silent/>";
 const AUTONOMOUS_SUPERSEDED_MARKER: &str = "<symbiont-superseded/>";
-const MAINTENANCE_COMPLETE_MARKER: &str = "<symbiont-maintained/>";
 const CONTEXT_MAINTENANCE_COMPLETE_MARKER: &str = "<symbiont-context-maintained/>";
 const PROFILE_REVIEW_COMPLETE_MARKER: &str = "<symbiont-profile-reviewed/>";
 const REFLECTION_COMPLETE_MARKER: &str = "<symbiont-reflected/>";
-const RECONCILIATION_COMPLETE_MARKER: &str = "<symbiont-reconciled/>";
 const PCP_TRANSCRIPT_MIGRATION_COMPLETE_MARKER: &str = "<symbiont-pcp-transcript-batch/>";
 const CONTINUATION_SILENT_MARKER: &str = "<symbiont-no-continuation/>";
 const ATTACKER_COMPLETE_MARKER: &str = "<symbiont-attacker-reviewed/>";
@@ -186,13 +179,6 @@ pub struct HunchRevisionRef {
     pub revision_id: String,
 }
 
-pub struct MaintenanceOutcome {
-    pub invocations: Vec<InvocationRecord>,
-    pub summarized: bool,
-    pub model: Option<String>,
-    pub interrupted: bool,
-}
-
 pub struct ContextMaintenanceOutcome {
     pub invocations: Vec<InvocationRecord>,
     pub current_map_updated: bool,
@@ -230,23 +216,11 @@ pub struct ChatInput {
     pub input_events: watch::Receiver<u64>,
 }
 
-pub struct ReconciliationModelRequest<'a> {
-    pub mode: ReconciliationMode,
-    pub run_id: &'a str,
-    pub inventory_bundle: &'a str,
-    pub proposals: &'a [ReconciliationProposal],
-    pub compute: &'a ComputeConfig,
-    pub profile: &'a ProfileSnapshot,
-    pub continuity_context: &'a str,
-    pub input_events: watch::Receiver<u64>,
-    pub events: mpsc::Sender<RuntimeEvent>,
-}
-
 pub struct PcpTranscriptMigrationRequest<'a> {
     pub batch_bundle: &'a str,
     pub compute: &'a ComputeConfig,
     pub profile: &'a ProfileSnapshot,
-    pub continuity_context: &'a str,
+    pub continuity_context: &'a crate::context_assembly::ContextBundle,
     pub input_events: watch::Receiver<u64>,
     pub events: mpsc::Sender<RuntimeEvent>,
 }
@@ -319,6 +293,7 @@ enum BackgroundThread {
 
 #[derive(Clone, Copy)]
 enum ToolSurface {
+    Conversation,
     Full,
     LunaSensing,
     AutonomousScout,
@@ -350,6 +325,7 @@ pub struct CodexClient {
     thread_turns: HashMap<String, u64>,
     thread_compactions: HashMap<String, u64>,
     thread_context_pressure: HashMap<String, ThreadContextPressure>,
+    thread_configurations: HashMap<String, Value>,
     rate_limits: Arc<RwLock<Option<RateLimitInfo>>>,
     permissions: Arc<PermissionBroker>,
     compute_policies: Arc<crate::compute_policy::ComputePolicyStore>,
@@ -415,12 +391,12 @@ impl CodexClient {
             {
                 Ok(Ok(client)) => return Ok(client),
                 Ok(Err(error)) => {
-                    warn!(attempt, %error, "Codex app-server startup attempt failed");
+                    warn!(attempt, error = %format!("{error:#}"), "Codex app-server startup attempt failed");
                     tracing::warn!(
                         target: crate::runtime_log::TARGET,
                         event = "codex_start_failed",
                         attempt,
-                        error = %error,
+                        error = %format!("{error:#}"),
                         "Codex app-server startup attempt failed"
                     );
                     last_error = Some(error);
@@ -501,6 +477,7 @@ impl CodexClient {
             thread_turns: HashMap::new(),
             thread_compactions: HashMap::new(),
             thread_context_pressure: HashMap::new(),
+            thread_configurations: HashMap::new(),
             rate_limits,
             permissions: Arc::clone(&dependencies.permissions),
             compute_policies: Arc::clone(&dependencies.compute_policies),
@@ -509,7 +486,7 @@ impl CodexClient {
         client.models = client.load_models().await?;
         client.refresh_rate_limits().await;
         let interactive_thread_id = client
-            .start_thread(&config.workspace, ToolSurface::Full)
+            .start_thread(&config.workspace, ToolSurface::Conversation)
             .await?;
         client.interactive_threads = InteractiveThreads::new(interactive_thread_id);
         client.luna_sensing_thread_id = client
@@ -569,7 +546,7 @@ impl CodexClient {
         input: ChatInput,
         compute: &ComputeConfig,
         profile: &ProfileSnapshot,
-        continuity_context: &str,
+        continuity_context: &crate::context_assembly::ContextBundle,
         events: mpsc::Sender<RuntimeEvent>,
     ) -> Result<ChatOutcome> {
         let first_lane = input.initial_lane;
@@ -636,7 +613,10 @@ impl CodexClient {
         }
         if let Some(rollover) = rollover {
             let workspace = self.workspace.clone();
-            match self.start_thread(&workspace, ToolSurface::Full).await {
+            match self
+                .start_thread(&workspace, ToolSurface::Conversation)
+                .await
+            {
                 Ok(next_thread_id) => {
                     let previous = self
                         .interactive_threads
@@ -671,7 +651,7 @@ impl CodexClient {
         reason: &str,
         compute: &ComputeConfig,
         profile: &ProfileSnapshot,
-        continuity_context: &str,
+        continuity_context: &crate::context_assembly::ContextBundle,
         input_events: watch::Receiver<u64>,
         events: mpsc::Sender<RuntimeEvent>,
     ) -> Result<ChatOutcome> {
@@ -761,7 +741,12 @@ impl CodexClient {
                 "temporary_discussion",
                 compute,
                 profile,
-                memory_context,
+                &crate::context_assembly::ContextBundle::single(
+                    "symbiont.temporary_memory",
+                    "临时讨论的只读记忆快照",
+                    "临时讨论相关记忆",
+                    memory_context.to_owned(),
+                ),
                 None,
                 None,
                 false,
@@ -790,7 +775,7 @@ impl CodexClient {
     pub async fn reset_interactive_thread(&mut self) -> Result<()> {
         let workspace = self.workspace.clone();
         let next = self
-            .start_thread(&workspace, ToolSurface::Full)
+            .start_thread(&workspace, ToolSurface::Conversation)
             .await
             .context("start a fresh interactive Codex thread after message retraction")?;
         let previous = self.interactive_threads.reset(next);
@@ -808,7 +793,9 @@ impl CodexClient {
             return Ok(());
         }
         let workspace = self.workspace.clone();
-        let thread_id = self.start_thread(&workspace, ToolSurface::Full).await?;
+        let thread_id = self
+            .start_thread(&workspace, ToolSurface::Conversation)
+            .await?;
         for evicted in self
             .interactive_threads
             .insert_topic(topic_id.to_owned(), thread_id)
@@ -822,7 +809,7 @@ impl CodexClient {
         &mut self,
         compute: &ComputeConfig,
         profile: &ProfileSnapshot,
-        continuity_context: &str,
+        continuity_context: &crate::context_assembly::ContextBundle,
         input_events: watch::Receiver<u64>,
         events: mpsc::Sender<RuntimeEvent>,
     ) -> Result<ExplorationOutcome> {
@@ -943,7 +930,7 @@ impl CodexClient {
                 "luna_sense",
                 compute,
                 profile,
-                "",
+                &crate::context_assembly::ContextBundle::default(),
                 None,
                 None,
                 false,
@@ -993,7 +980,7 @@ impl CodexClient {
                 "attacker",
                 compute,
                 profile,
-                "",
+                &crate::context_assembly::ContextBundle::default(),
                 None,
                 None,
                 false,
@@ -1020,68 +1007,12 @@ impl CodexClient {
         })
     }
 
-    pub async fn maintain_summary(
-        &mut self,
-        target_revision_id: &str,
-        compute: &ComputeConfig,
-        profile: &ProfileSnapshot,
-        continuity_context: &str,
-        input_events: watch::Receiver<u64>,
-        events: mpsc::Sender<RuntimeEvent>,
-    ) -> Result<MaintenanceOutcome> {
-        let prompt = summary_maintenance_prompt(target_revision_id, MAINTENANCE_COMPLETE_MARKER);
-        let thread_id = self.maintenance_thread_id.clone();
-        let outcome = self
-            .run_request(
-                thread_id.clone(),
-                text_input_items(&prompt),
-                ComputeLane::Observe,
-                "maintenance",
-                compute,
-                profile,
-                continuity_context,
-                None,
-                None,
-                false,
-                Some(input_events),
-                &events,
-            )
-            .await;
-        let mut outcome = outcome?;
-        if !outcome.interrupted {
-            self.renew_background_thread(&thread_id, BackgroundThread::Maintenance)
-                .await;
-        }
-        for invocation in &mut outcome.invocations {
-            invocation.produced_message = false;
-        }
-        let summarized = outcome.invocations.iter().any(|invocation| {
-            invocation.trace_steps.iter().any(|step| {
-                step.namespace == "pcp"
-                    && step.tool == "write_summary"
-                    && step.succeeded
-                    && step.arguments.get("target_page_id").and_then(Value::as_str)
-                        == Some(target_revision_id)
-            })
-        });
-        let model = outcome
-            .invocations
-            .last()
-            .map(|invocation| invocation.effective_model.clone());
-        Ok(MaintenanceOutcome {
-            invocations: outcome.invocations,
-            summarized,
-            model,
-            interrupted: outcome.interrupted,
-        })
-    }
-
     pub async fn maintain_symbiont_context(
         &mut self,
         source_bundle: &str,
         compute: &ComputeConfig,
         profile: &ProfileSnapshot,
-        continuity_context: &str,
+        continuity_context: &crate::context_assembly::ContextBundle,
         input_events: watch::Receiver<u64>,
         events: mpsc::Sender<RuntimeEvent>,
     ) -> Result<ContextMaintenanceOutcome> {
@@ -1127,7 +1058,7 @@ impl CodexClient {
         source_bundle: &str,
         compute: &ComputeConfig,
         profile: &ProfileSnapshot,
-        continuity_context: &str,
+        continuity_context: &crate::context_assembly::ContextBundle,
         input_events: watch::Receiver<u64>,
         events: mpsc::Sender<RuntimeEvent>,
     ) -> Result<ProfileReviewOutcome> {
@@ -1202,7 +1133,7 @@ impl CodexClient {
         source_bundle: &str,
         compute: &ComputeConfig,
         profile: &ProfileSnapshot,
-        continuity_context: &str,
+        continuity_context: &crate::context_assembly::ContextBundle,
         input_events: watch::Receiver<u64>,
         events: mpsc::Sender<RuntimeEvent>,
     ) -> Result<ReflectionOutcome> {
@@ -1279,83 +1210,6 @@ impl CodexClient {
             metadata,
             outreach,
             context_revision_ids,
-            interrupted: outcome.interrupted,
-        })
-    }
-
-    pub async fn reconcile_memory(
-        &mut self,
-        request: ReconciliationModelRequest<'_>,
-    ) -> Result<ReconciliationModelOutcome> {
-        let prompt = memory_reconciliation_prompt(
-            request.mode,
-            request.run_id,
-            request.inventory_bundle,
-            request.proposals,
-            RECONCILIATION_COMPLETE_MARKER,
-        );
-        let origin = match request.mode {
-            ReconciliationMode::Preview => "reconciliation_preview",
-            ReconciliationMode::Apply => "reconciliation_apply",
-        };
-        let lane = match request.mode {
-            ReconciliationMode::Preview => ComputeLane::Investigate,
-            ReconciliationMode::Apply => ComputeLane::Critical,
-        };
-        let thread_id = self.maintenance_thread_id.clone();
-        let outcome = self
-            .run_request(
-                thread_id.clone(),
-                text_input_items(&prompt),
-                lane,
-                origin,
-                request.compute,
-                request.profile,
-                request.continuity_context,
-                None,
-                None,
-                false,
-                Some(request.input_events),
-                &request.events,
-            )
-            .await;
-        let mut outcome = outcome?;
-        if !outcome.interrupted {
-            self.renew_background_thread(&thread_id, BackgroundThread::Maintenance)
-                .await;
-        }
-        for invocation in &mut outcome.invocations {
-            invocation.produced_message = false;
-        }
-        let completion = outcome
-            .invocations
-            .iter()
-            .flat_map(|invocation| &invocation.trace_steps)
-            .rev()
-            .find(|step| {
-                step.succeeded
-                    && step.namespace == "symbiont"
-                    && step.tool == "complete_reconciliation"
-            });
-        let summary = completion
-            .and_then(|step| step.arguments.get("summary"))
-            .and_then(Value::as_str)
-            .map(str::trim)
-            .filter(|value| !value.is_empty())
-            .map(str::to_owned);
-        let proposals = completion
-            .and_then(|step| step.arguments.get("proposals"))
-            .cloned()
-            .map(serde_json::from_value::<Vec<ReconciliationProposal>>)
-            .transpose()
-            .context("parse memory reconciliation proposals")?
-            .unwrap_or_default();
-        let actions = reconciliation_actions(&outcome.invocations);
-        Ok(ReconciliationModelOutcome {
-            invocations: outcome.invocations,
-            summary,
-            proposals,
-            actions,
             interrupted: outcome.interrupted,
         })
     }
@@ -1486,7 +1340,7 @@ impl CodexClient {
                     origin,
                     request.compute,
                     request.profile,
-                    "",
+                    &crate::context_assembly::ContextBundle::default(),
                     None,
                     None,
                     false,
@@ -1565,7 +1419,7 @@ impl CodexClient {
         origin: &str,
         compute: &ComputeConfig,
         profile: &ProfileSnapshot,
-        continuity_context: &str,
+        continuity_context: &crate::context_assembly::ContextBundle,
         working_context: Option<WorkingContext>,
         rollover: Option<&RolloverDecision>,
         allow_escalation: bool,
@@ -1627,7 +1481,7 @@ impl CodexClient {
         origin: &str,
         compute: &ComputeConfig,
         profile: &ProfileSnapshot,
-        continuity_context: &str,
+        continuity_context: &crate::context_assembly::ContextBundle,
         working_context: Option<WorkingContext>,
         rollover: Option<&RolloverDecision>,
         allow_escalation: bool,
@@ -1771,7 +1625,7 @@ impl CodexClient {
         origin: &str,
         compute: &ComputeConfig,
         profile: &ProfileSnapshot,
-        continuity_context: &str,
+        continuity_context: &crate::context_assembly::ContextBundle,
         working_context: Option<&WorkingContext>,
         rollover: Option<&RolloverDecision>,
         allow_escalation: bool,
@@ -1835,15 +1689,26 @@ impl CodexClient {
                 value: interaction_disposition_prompt(),
             });
         }
+        let thread_configuration = self
+            .thread_configurations
+            .get(thread_id)
+            .cloned()
+            .context("missing submitted thread configuration")?;
+        let mut selection =
+            crate::context_assembly::audit_fragments(&fragments, &continuity_context.selection);
+        if matches!(origin, "interactive" | "continuation") {
+            crate::context_assembly::budget_recall(&mut fragments, &mut selection, 24_000);
+        }
         let mut context_snapshot = ContextSnapshot {
             input: input.clone(),
             fragments: fragments.clone(),
             working_context: working_context.cloned(),
-            developer_instructions: match origin {
-                "luna_sense" => luna_sensing_developer_instructions().to_owned(),
-                "temporary_discussion" => temporary_discussion_developer_instructions(),
-                _ => developer_instructions(),
-            },
+            developer_instructions: thread_configuration["developerInstructions"]
+                .as_str()
+                .unwrap_or_default()
+                .to_owned(),
+            selection,
+            submitted: None,
             native_thread: NativeThreadSnapshot {
                 thread_id: thread_id.to_owned(),
                 cursor_before: working_context.and_then(|context| context.cursor_before.clone()),
@@ -1889,6 +1754,10 @@ impl CodexClient {
             params.insert("sandboxPolicy".to_owned(), overrides.sandbox_policy.clone());
         }
 
+        context_snapshot.submitted = Some(crate::diagnostics::SubmittedContext {
+            thread_start: thread_configuration,
+            turn_start: Value::Object(params.clone()),
+        });
         let request_id = self
             .send_request("turn/start", Value::Object(params))
             .await?;
@@ -2260,6 +2129,7 @@ impl CodexClient {
         tool_surface: ToolSurface,
     ) -> Result<String> {
         let instructions = match tool_surface {
+            ToolSurface::Conversation => super::prompts::conversation_developer_instructions(),
             ToolSurface::LunaSensing => luna_sensing_developer_instructions().to_owned(),
             ToolSurface::TemporaryDiscussion => temporary_discussion_developer_instructions(),
             ToolSurface::PcpHistoryRepair => pcp_history_repair_developer_instructions(),
@@ -2268,6 +2138,7 @@ impl CodexClient {
             }
         };
         let dynamic_tools = match tool_surface {
+            ToolSurface::Conversation => SymbiontTools::conversation_specifications(),
             ToolSurface::Full => SymbiontTools::specifications(),
             ToolSurface::LunaSensing => SymbiontTools::sensing_specifications(),
             ToolSurface::AutonomousScout => SymbiontTools::scout_specifications(),
@@ -2276,32 +2147,34 @@ impl CodexClient {
                 Value::Array(Vec::new())
             }
         };
+        let configuration = json!({
+            "cwd": workspace,
+            "approvalPolicy": granular_approval_policy(),
+            "sandbox": "read-only",
+            "ephemeral": true,
+            "serviceName": "symbiont-d",
+            "developerInstructions": instructions,
+            "config": {
+                "web_search": "live"
+            },
+            "dynamicTools": dynamic_tools
+        });
         let result = self
-            .request(
-                "thread/start",
-                json!({
-                    "cwd": workspace,
-                    "approvalPolicy": granular_approval_policy(),
-                    "sandbox": "read-only",
-                    "ephemeral": true,
-                    "serviceName": "symbiont-d",
-                    "developerInstructions": instructions,
-                    "config": {
-                        "web_search": "live"
-                    },
-                    "dynamicTools": dynamic_tools
-                }),
-            )
+            .request("thread/start", configuration.clone())
             .await
             .context("start the symbiont Codex thread")?;
-        result
+        let thread_id = result
             .pointer("/thread/id")
             .and_then(Value::as_str)
             .map(str::to_owned)
-            .context("thread/start response omitted thread.id")
+            .context("thread/start response omitted thread.id")?;
+        self.thread_configurations
+            .insert(thread_id.clone(), configuration);
+        Ok(thread_id)
     }
 
     fn clear_thread_state(&mut self, thread_id: &str) {
+        self.thread_configurations.remove(thread_id);
         self.thread_usage.remove(thread_id);
         self.thread_turns.remove(thread_id);
         self.thread_compactions.remove(thread_id);
@@ -3043,60 +2916,6 @@ fn successful_hunch_revisions(invocations: &[InvocationRecord]) -> Vec<HunchRevi
         }
     }
     revisions
-}
-
-fn reconciliation_actions(invocations: &[InvocationRecord]) -> Vec<ReconciliationAction> {
-    invocations
-        .iter()
-        .flat_map(|invocation| &invocation.trace_steps)
-        .filter(|step| {
-            step.succeeded
-                && step.namespace == "pcp"
-                && matches!(
-                    step.tool.as_str(),
-                    "assess_validity"
-                        | "write_summary"
-                        | "write_page"
-                        | "revise_page"
-                        | "consolidate_pages"
-                        | "relate_pages"
-                )
-        })
-        .map(|step| {
-            let mut target_revision_ids = HashSet::new();
-            collect_revision_ids(&step.arguments, &mut target_revision_ids);
-            let result = step
-                .result
-                .pointer("/contentItems/0/text")
-                .and_then(Value::as_str)
-                .and_then(|text| serde_json::from_str::<Value>(text).ok())
-                .unwrap_or(Value::Null);
-            ReconciliationAction {
-                tool: format!("{}.{}", step.namespace, step.tool),
-                target_revision_ids: {
-                    let mut values = target_revision_ids.into_iter().collect::<Vec<_>>();
-                    values.sort();
-                    values
-                },
-                result_page_id: result
-                    .get("pageId")
-                    .or_else(|| result.get("summaryPageId"))
-                    .or_else(|| result.get("assessmentPageId"))
-                    .and_then(Value::as_str)
-                    .map(str::to_owned),
-                result_revision_id: result
-                    .get("revisionId")
-                    .or_else(|| result.get("summaryRevisionId"))
-                    .or_else(|| result.get("assessmentRevisionId"))
-                    .and_then(Value::as_str)
-                    .map(str::to_owned),
-                result_relation_id: result
-                    .get("relationId")
-                    .and_then(Value::as_str)
-                    .map(str::to_owned),
-            }
-        })
-        .collect()
 }
 
 fn proactive_message_candidate(invocations: &[InvocationRecord]) -> Option<OutreachCandidate> {

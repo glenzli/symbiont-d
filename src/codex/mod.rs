@@ -16,7 +16,7 @@ pub(crate) use client::is_recoverable_connection_error;
 pub use client::{
     ChatInput, ChatOutcome, CodexClient, CodexConfig, GeneratedImageOutput,
     PcpHistoryRepairProposal, PcpHistoryRepairRequest, PcpTranscriptMigrationRequest,
-    RateLimitInfo, ReconciliationModelRequest, RuntimeEvent,
+    RateLimitInfo, RuntimeEvent,
 };
 pub use images::import_generated_images;
 pub use interaction_output::ChatDisposition;

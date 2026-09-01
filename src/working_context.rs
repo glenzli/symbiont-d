@@ -3,8 +3,8 @@ use serde::{Deserialize, Serialize};
 use crate::memory::{MemoryEntry, MemoryRole, MessagePart, MessageQuote, MessageTopicReference};
 
 pub const WORKING_CONTEXT_SCAN_MESSAGES: usize = 64;
-const WORKING_CONTEXT_MAX_MESSAGES: usize = 16;
-const WORKING_CONTEXT_MAX_CHARS: usize = 16_000;
+pub const WORKING_CONTEXT_MAX_MESSAGES: usize = 8;
+const WORKING_CONTEXT_MAX_CHARS: usize = 8_000;
 const WORKING_CONTEXT_MAX_QUOTES: usize = 3;
 const WORKING_CONTEXT_MAX_QUOTE_CHARS: usize = 1_200;
 
@@ -281,7 +281,7 @@ mod tests {
         let context = WorkingContext::build(&entries, None, None, None);
         assert!(matches!(context.reason, WorkingContextReason::ThreadStart));
         assert_eq!(context.messages.len(), WORKING_CONTEXT_MAX_MESSAGES);
-        assert_eq!(context.messages[0].revision_id, "rev_14");
+        assert_eq!(context.messages[0].revision_id, "rev_22");
         assert!(context.truncated);
     }
 }

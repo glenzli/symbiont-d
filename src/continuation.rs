@@ -286,8 +286,13 @@ async fn run_continuation(
     }
     let compute = compute.snapshot().await;
     let profile = profile.snapshot().await;
-    let continuity_context = "This is a short continuation of the immediately preceding conversation. Use the native \
-         thread or the supplied exact working-context bridge; do not perform broad recall.";
+    let continuity_context = crate::context_assembly::ContextBundle::single(
+        "symbiont.continuation",
+        "本地已预约续话",
+        "仅延续上一条回复",
+        "Use the native thread or exact working-context bridge; do not perform broad recall."
+            .to_owned(),
+    );
     let scoped_history = if let Some(topic_id) = job.interactive_scope.topic_id() {
         let revision_ids = reflection
             .episode_revision_ids(topic_id, MAX_TOPIC_CONTINUATION_MESSAGES)
@@ -309,7 +314,7 @@ async fn run_continuation(
             &job.reason,
             &compute,
             &profile,
-            continuity_context,
+            &continuity_context,
             input_events,
             events,
         )

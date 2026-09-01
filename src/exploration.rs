@@ -1503,20 +1503,38 @@ async fn run_once(
         }
     };
     let continuity_context = match async {
-        Ok::<_, anyhow::Error>(format!(
-            "{}\n\n{}\n\n{}\n\n{}\n\n{}",
-            continuity.context_seed(None).await,
+        let mut bundle = continuity.context_seed(None).await;
+        bundle.include(
+            "symbiont.background.map",
+            "本地工作地图与开放问题",
+            "探索关注方向",
             context.exploration_prompt().await?,
+        );
+        bundle.include(
+            "symbiont.background.curiosity",
+            "本地探索问题",
+            "探索目标与反馈",
             curiosity.exploration_prompt().await?,
+        );
+        bundle.include(
+            "symbiont.autonomy",
+            "自主运行配置",
+            "探索行动边界",
             autonomy_config.attention_context(),
+        );
+        bundle.include(
+            "symbiont.exploration_evidence",
+            "近期探索日志、聊天与候选来源",
+            "探索去重与证据连续性",
             exploration_working_context(
                 &recent_messages,
                 &recent_explorations,
                 &reviewed_candidates,
                 trigger.as_ref(),
                 Utc::now(),
-            )
-        ))
+            ),
+        );
+        Ok::<_, anyhow::Error>(bundle)
     }
     .await
     {

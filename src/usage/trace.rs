@@ -161,7 +161,7 @@ fn is_pcp_recall(step: &ToolTraceStep) -> bool {
     step.namespace == "pcp"
         && matches!(
             step.tool.as_str(),
-            "browse_index" | "search_pages" | "read_pages"
+            "browse_index" | "search_pages" | "semantic_search" | "match_intent" | "read_pages"
         )
 }
 

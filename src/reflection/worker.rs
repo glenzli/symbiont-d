@@ -22,7 +22,6 @@ use crate::{
     exploration::{ExplorationHandle, quiet_end, today_started_at},
     memory::{MemoryEntry, MemoryRole, MessageMetadata},
     outreach::{OutreachCandidate, has_budget},
-    pcp_index::PcpIndex,
     profile::{ProfileStore, SetupStatus},
     symbiont_context::SymbiontContextStore,
     usage::UsageStore,
@@ -60,7 +59,6 @@ impl ReflectionHandle {
     #[allow(clippy::too_many_arguments)]
     pub fn start(
         store: Arc<ReflectionStore>,
-        pcp_index: Arc<PcpIndex>,
         autonomy: Arc<AutonomyStore>,
         profile: Arc<ProfileStore>,
         codex: Arc<Mutex<CodexClient>>,
@@ -77,7 +75,6 @@ impl ReflectionHandle {
         tokio::spawn(run(
             Arc::clone(&store),
             Arc::clone(&runtime),
-            pcp_index,
             autonomy,
             profile,
             codex,
@@ -220,7 +217,6 @@ impl ReflectionHandle {
 async fn run(
     store: Arc<ReflectionStore>,
     runtime: Arc<RwLock<ReflectionRuntime>>,
-    pcp_index: Arc<PcpIndex>,
     autonomy: Arc<AutonomyStore>,
     profile: Arc<ProfileStore>,
     codex: Arc<Mutex<CodexClient>>,
@@ -282,7 +278,6 @@ async fn run(
         match reflect_once(
             &store,
             &runtime,
-            &pcp_index,
             &autonomy,
             &profile,
             &codex,
@@ -331,7 +326,6 @@ enum ReflectState {
 async fn reflect_once(
     store: &ReflectionStore,
     runtime: &Arc<RwLock<ReflectionRuntime>>,
-    pcp_index: &PcpIndex,
     autonomy: &AutonomyStore,
     profile: &ProfileStore,
     codex: &Mutex<CodexClient>,
@@ -428,12 +422,29 @@ async fn reflect_once(
         current.current_activity = Some("正在理解近期对话".to_owned());
     }
     let compute = compute.snapshot().await;
-    let continuity_context = format!(
-        "{}\n\n{}\n\n{}\n\n{}\n\n{}",
-        continuity.context_seed(None).await,
+    let mut continuity_context = continuity.context_seed(None).await;
+    continuity_context.include(
+        "symbiont.background.map",
+        "本地工作地图与开放问题",
+        "后台整理的当前状态",
         context.prompt().await?,
+    );
+    continuity_context.include(
+        "symbiont.background.curiosity",
+        "本地探索问题",
+        "处理问题生命周期与明确反馈",
         curiosity.prompt().await?,
+    );
+    continuity_context.include(
+        "symbiont.background.reflection",
+        "本地互动记录与假说",
+        "后台整理专用证据",
         store.prompt().await?,
+    );
+    continuity_context.include(
+        "symbiont.autonomy",
+        "自主运行配置",
+        "后台行动边界",
         autonomy_config.attention_context(),
     );
     let (events_tx, mut events_rx) = mpsc::channel(64);
@@ -564,9 +575,6 @@ async fn reflect_once(
             batch.to_event_id,
         )
         .await?;
-    if let Err(error) = pcp_index.sync_all().await {
-        warn!(%error, "could not refresh the PCP model-written index after Reflection");
-    }
     store.prune().await?;
     {
         let mut current = runtime.write().await;

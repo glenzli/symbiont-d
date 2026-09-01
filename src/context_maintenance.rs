@@ -407,13 +407,21 @@ async fn combined_context(
     continuity: &ContinuityHost,
     context: &SymbiontContextStore,
     reflection: &ReflectionStore,
-) -> Result<String> {
-    Ok(format!(
-        "{}\n\n{}\n\n{}",
-        continuity.context_seed(None).await,
+) -> Result<crate::context_assembly::ContextBundle> {
+    let mut bundle = continuity.context_seed(None).await;
+    bundle.include(
+        "symbiont.background.map",
+        "本地工作地图与开放问题",
+        "维护目标及当前版本",
         context.prompt().await?,
-        reflection.prompt().await?
-    ))
+    );
+    bundle.include(
+        "symbiont.background.reflection",
+        "本地互动记录与假说",
+        "维护依据，不是稳定用户画像",
+        reflection.prompt().await?,
+    );
+    Ok(bundle)
 }
 
 fn conversation_source_bundle(

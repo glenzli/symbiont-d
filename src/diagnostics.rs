@@ -15,6 +15,18 @@ pub struct ContextSnapshot {
     pub working_context: Option<WorkingContext>,
     pub developer_instructions: String,
     pub native_thread: NativeThreadSnapshot,
+    #[serde(default)]
+    pub selection: Vec<crate::context_assembly::ContextSelection>,
+    /// Exact client-side request values, not a reconstructed provider prompt.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub submitted: Option<SubmittedContext>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SubmittedContext {
+    pub thread_start: Value,
+    pub turn_start: Value,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]

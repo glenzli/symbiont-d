@@ -8,16 +8,13 @@ use anyhow::{Context, Result};
 use chrono::{SecondsFormat, Utc};
 #[cfg(test)]
 use pcp_client::EmbeddedPcpClient;
-use pcp_client::{DurablePageInventoryItem, PcpTenantApi};
+use pcp_client::PcpTenantApi;
 use pcp_core::{
     AccessPermission, AccessPrincipal, AccessPrincipalType, AccessSession, Actor, ActorType,
-    AssessPageValidityRequest, BrowseIndexOrder, CreateScopeRequest, FeedbackSubmission,
-    IngestPageRequest, InitialRelation, LifecycleStatus, LinkPagesRequest, PageMutability,
-    PagePayload, Projection, ProvenanceEvent, QueryContextRequest, QueryContextResponse, ReadPage,
-    ReadPagesRequest, Relation, RevisePageRequest, Scope, SearchFilters, SearchMode,
-    SearchPagesRequest, SearchResult, SourceRef, SourceSpan, SubmitFeedbackRequest,
-    ValidityStanding, WritePageRequest, WriteResult, WriteSummaryRequest, WriteSummaryResult,
-    WriteValidityResult,
+    BrowseIndexOrder, CreateScopeRequest, FeedbackSubmission, IngestPageRequest, InitialRelation,
+    PagePayload, Projection, QueryContextRequest, QueryContextResponse, ReadPage, ReadPagesRequest,
+    Scope, SearchFilters, SearchMode, SearchPagesRequest, SearchResult, SourceRef, SourceSpan,
+    SubmitFeedbackRequest, WriteResult,
 };
 #[cfg(test)]
 use pcp_store::PcpStore;
@@ -35,7 +32,7 @@ use crate::{
         MemoryEntry, MemoryRole, MemoryStore, MessageDeliveryState, MessageExternalInputReference,
         MessageMetadata, MessagePart, MessageQuote, MessageQuoteDraft, MessageTopicReference,
     },
-    profile::{ProfileSnapshot, SetupStatus},
+    profile::ProfileSnapshot,
     signals::SignalEvent,
     transcript::{
         TranscriptMessageLinks, TranscriptRecall, TranscriptSearchOptions, TranscriptSearchResult,
@@ -59,17 +56,6 @@ const SYSTEM_ACTOR_ID: &str = "symbiont-d";
 const MAX_MODEL_WRITE_CHARS: usize = 64_000;
 const INDEX_EXCLUDED_PAGE_KINDS: &[&str] = &[
     "conversation_event",
-    "summary_projection",
-    "symbiont_current_map",
-    "symbiont_open_loops",
-    "symbiont_profile_review",
-    "symbiont_hunch",
-    "user_orientation",
-    "conversation_checkpoint",
-    "image_asset",
-    "tombstone",
-];
-const SUMMARY_EXCLUDED_PAGE_KINDS: &[&str] = &[
     "summary_projection",
     "symbiont_current_map",
     "symbiont_open_loops",
@@ -473,7 +459,10 @@ impl ContinuityHost {
         Ok(requested.to_vec())
     }
 
-    pub async fn context_seed(&self, current: Option<&StoredMessage>) -> String {
+    pub async fn context_seed(
+        &self,
+        current: Option<&StoredMessage>,
+    ) -> crate::context_assembly::ContextBundle {
         let orientation = self
             .orientation
             .read()
@@ -481,22 +470,14 @@ impl ContinuityHost {
             .as_ref()
             .map(|page| page.revision_id.clone())
             .unwrap_or_else(|| "none".to_owned());
-        let checkpoint = self
-            .latest_checkpoint_revision()
-            .await
-            .unwrap_or_else(|| "none".to_owned());
         let current_revision = current
             .map(|message| message.page.revision_id.as_str())
             .unwrap_or("none");
         let mut seed = format!(
-            "PCP compound boundary: the Host-local transcript is the authoritative raw Source Page \
-             plane for chat history. `{}` is Symbiont's writable durable Scope; the approved \
-             read-only cross-Host Scope set is [{}]. PCP contains retained material, not every turn \
-             and not a replayable chat log. Current local message: `{current_revision}`; \
-             orientation: `{orientation}`; latest checkpoint: `{checkpoint}`. Prefer the \
-             automatically assembled compound context, then selectively expand PCP sources before \
-             relying on compressed wording or asking the user to repeat it. Symbiont decides \
-             autonomously whether information is worth promoting into its durable Scope.",
+            "Local transcript message IDs address raw chat, not PCP Revisions; ctxrev IDs also belong to local working state, never pcp.read_pages. \
+             Writable PCP Scope: `{}`. Approved read Scopes: [{}]. Never derive a write across Scopes. \
+             Current local message: `{current_revision}`; orientation PCP Revision: `{orientation}`. \
+             Use supplied recall first; retain useful information autonomously with exact sources.",
             self.scopes.namespace,
             self.scopes.all().join(", ")
         );
@@ -509,26 +490,12 @@ impl ContinuityHost {
                 attachments.join(", ")
             ));
         }
-        seed
-    }
-
-    async fn latest_checkpoint_revision(&self) -> Option<String> {
-        self.search(SearchPagesRequest {
-            query: "conversation_checkpoint".to_owned(),
-            scopes: vec![self.scopes.namespace.clone()],
-            mode: SearchMode::Exact,
-            term_match: pcp_core::SearchTermMatch::All,
-            projections: vec![Projection::Facets],
-            filters: SearchFilters::default(),
-            limit: 1,
-            cursor: None,
-        })
-        .await
-        .ok()?
-        .hits
-        .into_iter()
-        .next()
-        .map(|hit| hit.revision_id)
+        crate::context_assembly::ContextBundle::single(
+            "symbiont.memory_boundary",
+            "宿主授权与当前消息身份",
+            "区分本地消息与 PCP Revision，保留读写边界",
+            seed,
+        )
     }
 
     pub async fn migrate_legacy(
@@ -1366,24 +1333,6 @@ impl ContinuityHost {
         Ok(revisions)
     }
 
-    pub async fn next_summary_candidate(&self, minimum_chars: usize) -> Result<Option<String>> {
-        let _ = minimum_chars;
-        Ok(None)
-    }
-
-    pub async fn durable_page_inventory(&self) -> Result<Vec<DurablePageInventoryItem>> {
-        Ok(Vec::new())
-    }
-
-    pub async fn mark_summary_assessed(
-        &self,
-        _target_revision_id: String,
-        _outcome: &str,
-        _tool_or_model: Option<String>,
-    ) -> Result<()> {
-        Ok(())
-    }
-
     pub async fn write_model_page(
         &self,
         namespace: Option<&str>,
@@ -1433,200 +1382,6 @@ impl ContinuityHost {
                 external_event_id: idempotency_key,
             })
             .await
-    }
-
-    pub async fn write_model_summary(
-        &self,
-        _target_page_id: String,
-        _target_revision_id: String,
-        _expected_summary_revision_id: Option<String>,
-        _content: String,
-        _source_revision_ids: Vec<String>,
-        _idempotency_key: Option<String>,
-        _tool_or_model: Option<String>,
-    ) -> Result<WriteSummaryResult> {
-        anyhow::bail!("PCP v0.8 tenant mode does not permit model-authored summaries")
-    }
-
-    pub async fn revise_current_model_page(
-        &self,
-        _target_page_id: String,
-        _expected_revision_id: String,
-        _content: String,
-        _source_revision_ids: Vec<String>,
-    ) -> Result<WriteResult> {
-        anyhow::bail!("PCP v0.8 tenant mode does not permit model-authored revisions")
-    }
-
-    #[cfg(any())]
-    pub async fn consolidate_model_pages(
-        &self,
-        canonical_page_id: String,
-        expected_canonical_revision_id: String,
-        replaced_pages: Vec<ConsolidationInput>,
-        content: String,
-        tool_or_model: Option<String>,
-    ) -> Result<WriteResult> {
-        if content.trim().is_empty() || content.chars().count() > MAX_MODEL_WRITE_CHARS {
-            anyhow::bail!(
-                "consolidated Page content must contain 1-{MAX_MODEL_WRITE_CHARS} characters"
-            );
-        }
-        let mut replaced_revision_ids = replaced_pages
-            .iter()
-            .map(|input| input.expected_revision_id.clone())
-            .collect::<Vec<_>>();
-        replaced_revision_ids.push(expected_canonical_revision_id.clone());
-        replaced_revision_ids.sort();
-        replaced_revision_ids.dedup();
-        if replaced_revision_ids.len() < 2 {
-            anyhow::bail!("consolidation requires at least two distinct current Pages");
-        }
-        let consolidation_pages = self
-            .store
-            .read_pages(ReadPagesRequest {
-                page_ids: Vec::new(),
-                revision_ids: replaced_revision_ids.clone(),
-                projections: vec![
-                    Projection::Manifest,
-                    Projection::Sources,
-                    Projection::Facets,
-                ],
-                max_chars: 8_000,
-            })
-            .await?;
-        let canonical = consolidation_pages
-            .iter()
-            .find(|page| page.revision.revision_id == expected_canonical_revision_id)
-            .context("canonical consolidation Page is not available")?;
-        if canonical.page.page_id != canonical_page_id {
-            anyhow::bail!("canonical Page and expected Revision do not match");
-        }
-        for replacement in &replaced_pages {
-            let replaced = consolidation_pages
-                .iter()
-                .find(|page| page.revision.revision_id == replacement.expected_revision_id)
-                .with_context(|| {
-                    format!(
-                        "replacement consolidation Revision {} is not available",
-                        replacement.expected_revision_id
-                    )
-                })?;
-            if replaced.page.page_id != replacement.page_id {
-                anyhow::bail!("replacement Page and expected Revision do not match");
-            }
-            for identity_key in ["stableKey", "episodeId"] {
-                let canonical_identity = canonical
-                    .revision
-                    .facets
-                    .as_ref()
-                    .and_then(|facets| facets.get(identity_key))
-                    .and_then(Value::as_str)
-                    .filter(|identity| !identity.trim().is_empty());
-                let replaced_identity = replaced
-                    .revision
-                    .facets
-                    .as_ref()
-                    .and_then(|facets| facets.get(identity_key))
-                    .and_then(Value::as_str)
-                    .filter(|identity| !identity.trim().is_empty());
-                if let (Some(canonical_identity), Some(replaced_identity)) =
-                    (canonical_identity, replaced_identity)
-                    && canonical_identity != replaced_identity
-                {
-                    anyhow::bail!(
-                        "consolidation cannot merge conflicting Host identity {identity_key}"
-                    );
-                }
-            }
-        }
-        let actor = model_actor();
-        let timestamp = now();
-        let mut facets = canonical
-            .revision
-            .facets
-            .clone()
-            .unwrap_or_else(|| json!({}));
-        if let Some(object) = facets.as_object_mut() {
-            object
-                .entry("kind")
-                .or_insert_with(|| Value::String("memory_synthesis".to_owned()));
-        }
-        let mut digest = Sha256::new();
-        for revision_id in &replaced_revision_ids {
-            digest.update(revision_id.as_bytes());
-            digest.update([0]);
-        }
-        digest.update(content.trim().as_bytes());
-        let idempotency_key = format!("model-consolidation:{:x}", digest.finalize());
-        self.store
-            .consolidate_pages(ConsolidatePagesRequest {
-                canonical_page_id,
-                expected_canonical_revision_id,
-                replaced_pages,
-                created_by: actor.clone(),
-                lifecycle_status: LifecycleStatus::Active,
-                observed_at: Some(timestamp.clone()),
-                valid_from: None,
-                valid_to: None,
-                payload: Some(PagePayload {
-                    media_type: "text/markdown".to_owned(),
-                    content: content.trim().to_owned(),
-                }),
-                source_refs: canonical.revision.source_refs.clone(),
-                facets: Some(facets),
-                provenance: vec![ProvenanceEvent {
-                    operation: "consolidate".to_owned(),
-                    actor,
-                    timestamp,
-                    input_revision_ids: replaced_revision_ids,
-                    tool_or_model: Some(tool_or_model.unwrap_or_else(|| "Codex".to_owned())),
-                }],
-                idempotency_key: Some(idempotency_key),
-            })
-            .await
-    }
-
-    #[allow(clippy::too_many_arguments)]
-    pub async fn assess_model_page_validity(
-        &self,
-        _target_page_id: String,
-        _target_revision_id: String,
-        _expected_assessment_id: Option<String>,
-        _standing: ValidityStanding,
-        _rationale: String,
-        _scope: Option<String>,
-        _basis_revision_ids: Vec<String>,
-        _idempotency_key: Option<String>,
-        _tool_or_model: Option<String>,
-    ) -> Result<WriteValidityResult> {
-        anyhow::bail!("PCP v0.8 tenant mode does not permit validity assessments")
-    }
-
-    #[allow(clippy::too_many_arguments)]
-    pub async fn revise_model_page(
-        &self,
-        _page_id: String,
-        _expected_revision_id: String,
-        _content: String,
-        _facets: Option<Value>,
-        _source_refs: Vec<SourceRef>,
-        _lifecycle_status: LifecycleStatus,
-        _source_revision_ids: Vec<String>,
-        _idempotency_key: Option<String>,
-    ) -> Result<WriteResult> {
-        anyhow::bail!("PCP v0.8 tenant mode does not permit model-authored revisions")
-    }
-
-    pub async fn link_model_pages(
-        &self,
-        _from_page_id: String,
-        _relation_type: String,
-        _to_page_id: String,
-        _basis_revision_ids: Vec<String>,
-        _idempotency_key: Option<String>,
-    ) -> Result<Relation> {
-        anyhow::bail!("PCP v0.8 tenant mode does not permit tenant-authored relations")
     }
 }
 

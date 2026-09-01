@@ -1,9 +1,12 @@
 import { formatDuration, formatTokens } from "/presentation.js";
+import { renderContextInspector } from "/context-inspector.js";
 
 export function initTraceUi() {
   const dialog = document.querySelector("#trace-dialog");
   const summary = document.querySelector("#trace-summary");
   const content = document.querySelector("#trace-content");
+  let requestGeneration = 0;
+  dialog.addEventListener("close", () => { requestGeneration += 1; });
 
   document.addEventListener("click", (event) => {
     const button =
@@ -14,6 +17,7 @@ export function initTraceUi() {
   });
 
   async function openTrace(traceId) {
+    const generation = ++requestGeneration;
     summary.textContent = "正在读取";
     content.textContent = "";
     dialog.showModal();
@@ -22,9 +26,11 @@ export function initTraceUi() {
         `/api/traces/${encodeURIComponent(traceId)}`,
       );
       const payload = await response.json();
+      if (generation !== requestGeneration) return;
       if (!response.ok) throw new Error(payload.error || "无法读取执行轨迹");
       renderTrace(payload);
     } catch (error) {
+      if (generation !== requestGeneration) return;
       summary.textContent = "读取失败";
       content.textContent = error.message;
     }
@@ -109,7 +115,7 @@ function renderRun(run, index) {
   )}`;
   article.append(tokenLine);
 
-  if (run.context) article.append(renderContext(run.context));
+  if (run.context) article.append(renderContextInspector(run.context));
 
   const timeline = document.createElement("section");
   timeline.className = "trace-timeline";
@@ -165,73 +171,6 @@ function stageLabel(stage) {
     reconciliation_apply: "应用整理",
     internal: "内部运行",
   }[stage] || stage;
-}
-
-function renderContext(context) {
-  const details = document.createElement("details");
-  details.className = "trace-context";
-  const summary = document.createElement("summary");
-  const title = document.createElement("span");
-  const state = document.createElement("span");
-  title.textContent = "模型可见上下文";
-  state.textContent = `${context.nativeThread.priorTurns} 个既有 turn · ${context.nativeThread.compactionsBefore} 次压缩`;
-  summary.append(title, state);
-
-  const body = document.createElement("div");
-  body.className = "trace-context-body";
-  const notice = document.createElement("p");
-  notice.className = "trace-context-notice";
-  notice.textContent =
-    "这里记录客户端提供的输入、应用上下文和 Working Context。Codex 未暴露内部最终组装的 token 序列。";
-  body.append(notice);
-
-  const metadata = document.createElement("dl");
-  metadata.className = "trace-context-meta";
-  appendMeta(metadata, "Thread", shortId(context.nativeThread.threadId));
-  appendMeta(
-    metadata,
-    "Context window",
-    context.nativeThread.modelContextWindow
-      ? formatTokens(context.nativeThread.modelContextWindow)
-      : "未报告",
-  );
-  appendMeta(
-    metadata,
-    "Cursor",
-    shortId(context.nativeThread.cursorBefore) || "新线程",
-  );
-  if (context.workingContext) {
-    appendMeta(
-      metadata,
-      "Bridge",
-      `${workingReason(context.workingContext.reason)} · ${context.workingContext.messages.length} 条`,
-    );
-  }
-  body.append(metadata);
-
-  if (context.nativeThread.observableHistoryTail?.length) {
-    const historyLabel = context.nativeThread.historyTailTruncated
-      ? "Codex 可观察历史尾部（更早部分省略）"
-      : "Codex 可观察历史尾部";
-    body.append(
-      tracePayload(
-        historyLabel,
-        context.nativeThread.observableHistoryTail,
-      ),
-    );
-  }
-  body.append(tracePayload("本轮直接输入", context.input));
-  for (const fragment of context.fragments) {
-    body.append(tracePayload(fragment.source, fragment.value));
-  }
-  if (context.workingContext) {
-    body.append(tracePayload("Working Context manifest", context.workingContext));
-  }
-  body.append(
-    tracePayload("Thread developer instructions", context.developerInstructions),
-  );
-  details.append(summary, body);
-  return details;
 }
 
 function renderTraceEvent(event) {
@@ -318,7 +257,7 @@ function countPcpSteps(trace, predicate) {
 function isPcpRecall(step) {
   return (
     step.namespace === "pcp" &&
-    ["browse_index", "search_pages", "read_pages"].includes(step.tool)
+    ["browse_index", "search_pages", "semantic_search", "match_intent", "read_pages"].includes(step.tool)
   );
 }
 
@@ -355,24 +294,6 @@ function tracePayload(label, value) {
     typeof value === "string" ? value : JSON.stringify(value, null, 2);
   details.append(summary, pre);
   return details;
-}
-
-function appendMeta(parent, term, description) {
-  const dt = document.createElement("dt");
-  const dd = document.createElement("dd");
-  dt.textContent = term;
-  dd.textContent = description;
-  parent.append(dt, dd);
-}
-
-function workingReason(value) {
-  const reasons = {
-    upToDate: "原生线程连续",
-    threadStart: "新线程恢复",
-    missingEvents: "补入缺失事件",
-    cursorOutsideWindow: "游标超出近期窗口",
-  };
-  return reasons[value] || value;
 }
 
 function eventTitle(kind) {

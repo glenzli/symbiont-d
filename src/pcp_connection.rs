@@ -10,7 +10,9 @@ use std::{
 };
 
 use anyhow::{Context, Result};
-use pcp_client::{ContentLibraryResult, ContentLibrarySummary, PcpApi, PcpTenantApi};
+use pcp_client::{
+    ContentLibraryFilter, ContentLibraryResult, ContentLibrarySummary, PcpApi, PcpTenantApi,
+};
 use pcp_core::{
     AccessSession, BrowseIndexOrder, Capabilities, FeedbackSubmission, IngestPageRequest,
     IntentEffort, QueryContextRequest, QueryContextResponse, ReadPage, ReadPagesRequest, Scope,
@@ -326,6 +328,7 @@ impl PcpTenantApi for ManagedPcpClient {
         limit: u32,
         cursor: Option<String>,
         max_chars: u32,
+        filter: ContentLibraryFilter,
     ) -> ContentLibraryResult);
     retrying_read!(browse_retrieval_pages(
         scopes: Vec<String>,
