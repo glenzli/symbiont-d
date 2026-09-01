@@ -39,14 +39,6 @@
           </button>
           <button
             class="top-icon-button"
-            id="open-topics"
-            type="button"
-            title="主题"
-            aria-label="主题"
-            data-tooltip="主题"
-          ><i data-lucide="list-tree" aria-hidden="true"></i></button>
-          <button
-            class="top-icon-button"
             id="open-archive"
             type="button"
             title="工作状态"
@@ -180,6 +172,14 @@
         </div>
         <div id="conversation-floating-controls" class="conversation-floating-controls">
           <button
+            id="open-topics"
+            class="conversation-topic-toggle"
+            type="button"
+            title="查看主题聊天"
+            aria-label="查看主题聊天"
+            data-tooltip="主题聊天"
+          ><i data-lucide="list-tree" aria-hidden="true"></i></button>
+          <button
             id="toggle-conversation-focus"
             class="conversation-focus-toggle"
             type="button"
@@ -234,18 +234,6 @@
           aria-label="当前参与模型"
           hidden
         ></div>
-        <div id="topic-target-tray" class="topic-target-tray" hidden>
-          <button id="open-selected-topic" type="button" title="查看当前主题">
-            <small>主题聊天</small>
-            <span id="topic-target-title"></span>
-          </button>
-          <button
-            id="clear-topic-target"
-            type="button"
-            title="清除主题上下文"
-            aria-label="清除主题上下文"
-          >×</button>
-        </div>
         <div class="composer-row">
           <label class="sr-only" for="message">消息</label>
           <textarea

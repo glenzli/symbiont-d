@@ -25,7 +25,6 @@ use crate::{
     pcp_index::PcpIndex,
     profile::{ProfileStore, SetupStatus},
     symbiont_context::SymbiontContextStore,
-    transcript::TranscriptSearchOptions,
     usage::UsageStore,
 };
 
@@ -384,17 +383,17 @@ async fn reflect_once(
             return Ok(ReflectState::Idle);
         }
     };
-    let recurrence_bundle = match transcript_recurrence_bundle(&batch.events, continuity).await {
+    let compound_bundle = match compound_recurrence_bundle(&batch.events, continuity).await {
         Ok(bundle) => bundle,
         Err(error) => {
-            warn!(%error, "could not inspect local transcript recurrence evidence");
+            warn!(%error, "could not assemble compound recurrence evidence");
             None
         }
     };
-    let source_bundle = match recurrence_bundle {
-        Some(recurrence) => format!(
-            "{}\n\n<transcript-recurrence-evidence>\n{}\n</transcript-recurrence-evidence>",
-            batch.source_bundle, recurrence
+    let source_bundle = match compound_bundle {
+        Some(compound) => format!(
+            "{}\n\n<pcp-compound-promotion-context>\n{}\n</pcp-compound-promotion-context>",
+            batch.source_bundle, compound
         ),
         None => batch.source_bundle.clone(),
     };
@@ -586,7 +585,7 @@ async fn reflect_once(
     Ok(ReflectState::Completed)
 }
 
-async fn transcript_recurrence_bundle(
+async fn compound_recurrence_bundle(
     events: &[InteractionEvent],
     continuity: &ContinuityHost,
 ) -> Result<Option<String>> {
@@ -611,23 +610,11 @@ async fn transcript_recurrence_bundle(
     }) else {
         return Ok(None);
     };
-    let result = continuity
-        .search_transcript(
-            &query,
-            TranscriptSearchOptions {
-                max_clusters: 4,
-                max_messages: 16,
-                max_chars: 8_000,
-                context_before: 1,
-                context_after: 1,
-                episode_gap_hours: 6,
-            },
-        )
-        .await?;
-    if !result.recurrence.repeated_across_time || result.clusters.is_empty() {
+    let context = continuity.compound_context(&query, &[]).await?;
+    if !context.has_meaningful_recurrence() {
         return Ok(None);
     }
-    Ok(Some(serde_json::to_string(&result)?))
+    Ok(Some(context.prompt()))
 }
 
 #[allow(clippy::too_many_arguments)]

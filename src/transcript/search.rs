@@ -15,8 +15,13 @@ use anyhow::{Result, bail};
 use chrono::DateTime;
 use rusqlite::{Connection, OptionalExtension, params, params_from_iter, types::Value};
 use serde::{Deserialize, Serialize};
+use tracing::warn;
 
-use super::{TranscriptStore, open_connection};
+use super::{
+    TranscriptStore, open_connection,
+    semantic::{SemanticMatch, TranscriptSemanticIndex},
+};
+use crate::infer_runtime::InferRuntimeAccess;
 use crate::memory::MemoryRole;
 
 const MAX_QUERY_CHARS: usize = 512;
@@ -67,7 +72,17 @@ pub struct TranscriptSearchResult {
     pub query: String,
     pub clusters: Vec<TranscriptSearchCluster>,
     pub recurrence: TranscriptRecurrenceEvidence,
+    pub semantic: TranscriptSemanticEvidence,
     pub truncated: bool,
+}
+
+#[derive(Clone, Debug, Default, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TranscriptSemanticEvidence {
+    pub available: bool,
+    pub embedding_space: Option<String>,
+    pub indexed_user_message_count: usize,
+    pub match_count: usize,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -152,11 +167,42 @@ pub struct TranscriptRecurrenceEvidence {
 #[derive(Clone)]
 pub struct TranscriptRecall {
     transcript: Arc<TranscriptStore>,
+    semantic: Option<Arc<TranscriptSemanticIndex>>,
 }
 
 impl TranscriptRecall {
     pub fn new(transcript: Arc<TranscriptStore>) -> Self {
-        Self { transcript }
+        Self {
+            transcript,
+            semantic: None,
+        }
+    }
+
+    pub(crate) fn with_infer(
+        transcript: Arc<TranscriptStore>,
+        runtime: Arc<InferRuntimeAccess>,
+    ) -> Self {
+        Self {
+            semantic: Some(Arc::new(TranscriptSemanticIndex::with_infer(
+                Arc::clone(&transcript),
+                runtime,
+            ))),
+            transcript,
+        }
+    }
+
+    #[cfg(test)]
+    pub(super) fn with_embedder(
+        transcript: Arc<TranscriptStore>,
+        embedder: Arc<dyn super::semantic::TranscriptEmbedder>,
+    ) -> Self {
+        Self {
+            semantic: Some(Arc::new(TranscriptSemanticIndex::new(
+                Arc::clone(&transcript),
+                embedder,
+            ))),
+            transcript,
+        }
     }
 
     pub async fn search(
@@ -164,7 +210,30 @@ impl TranscriptRecall {
         query: &str,
         options: TranscriptSearchOptions,
     ) -> Result<TranscriptSearchResult> {
-        self.transcript.search(query, options).await
+        let Some(semantic) = &self.semantic else {
+            return self.transcript.search(query, options).await;
+        };
+        match semantic.search(query, 32).await {
+            Ok(result) => {
+                self.transcript
+                    .search_with_semantic(
+                        query,
+                        options,
+                        result.matches,
+                        Some(TranscriptSemanticEvidence {
+                            available: true,
+                            embedding_space: Some(result.embedding_space),
+                            indexed_user_message_count: result.indexed_user_message_count,
+                            match_count: result.match_count,
+                        }),
+                    )
+                    .await
+            }
+            Err(error) => {
+                warn!(%error, "local transcript semantic recall is unavailable; using lexical fallback");
+                self.transcript.search(query, options).await
+            }
+        }
     }
 
     pub async fn recurrence_evidence(
@@ -181,6 +250,13 @@ impl TranscriptRecall {
         options: TranscriptSourceOptions,
     ) -> Result<TranscriptSourceResolution> {
         self.transcript.resolve_source(message_id, options).await
+    }
+
+    pub(crate) async fn backfill_semantic_index(&self) -> Result<usize> {
+        let Some(semantic) = &self.semantic else {
+            return Ok(0);
+        };
+        semantic.backfill_all().await
     }
 }
 
@@ -306,13 +382,33 @@ pub(super) fn search_transcript(
     path: &Path,
     query: &str,
     options: TranscriptSearchOptions,
+    semantic_matches: &[SemanticMatch],
+    semantic_evidence: Option<TranscriptSemanticEvidence>,
 ) -> Result<TranscriptSearchResult> {
     let query = normalize_query(query)?;
     let terms = lexical_terms(&query);
     let options = BoundedOptions::from(options);
     let connection = open_connection(path)?;
-    let candidates = search_candidates(&connection, &query, &terms, options.candidate_limit)?;
-    let recurrence = recurrence_evidence(&candidates, options.episode_gap_hours);
+    let mut candidates = search_candidates(&connection, &query, &terms, options.candidate_limit)?;
+    let semantic_ids = add_semantic_candidates(&connection, &mut candidates, semantic_matches)?;
+    candidates.sort_by(|left, right| {
+        right
+            .score
+            .total_cmp(&left.score)
+            .then_with(|| right.message.sequence.cmp(&left.message.sequence))
+    });
+    candidates.truncate(options.candidate_limit);
+    let semantic = semantic_evidence.unwrap_or_default();
+    let recurrence_candidates = if semantic.available {
+        candidates
+            .iter()
+            .filter(|candidate| semantic_ids.contains(&candidate.message.message_id))
+            .cloned()
+            .collect::<Vec<_>>()
+    } else {
+        candidates.clone()
+    };
+    let recurrence = recurrence_evidence(&recurrence_candidates, options.episode_gap_hours);
     let candidate_ids = candidates
         .iter()
         .map(|candidate| candidate.message.message_id.clone())
@@ -330,6 +426,7 @@ pub(super) fn search_transcript(
         query,
         clusters,
         recurrence,
+        semantic,
         truncated: truncated || candidates.len() >= options.candidate_limit,
     })
 }
@@ -650,6 +747,48 @@ fn search_candidates(
     });
     candidates.truncate(limit);
     Ok(candidates)
+}
+
+fn add_semantic_candidates(
+    connection: &Connection,
+    candidates: &mut Vec<Candidate>,
+    semantic_matches: &[SemanticMatch],
+) -> Result<HashSet<String>> {
+    let mut semantic_ids = HashSet::new();
+    if semantic_matches.is_empty() {
+        return Ok(semantic_ids);
+    }
+
+    let mut by_id = candidates
+        .drain(..)
+        .map(|candidate| (candidate.message.message_id.clone(), candidate))
+        .collect::<HashMap<_, _>>();
+    let mut statement = connection.prepare(
+        "SELECT message_id, sequence, occurred_at, role, content
+         FROM transcript_messages
+         WHERE message_id = ?1 AND retracted_at IS NULL AND role = 'user'",
+    )?;
+    for (rank, semantic_match) in semantic_matches.iter().enumerate() {
+        let message = statement
+            .query_row([&semantic_match.message_id], stored_message)
+            .optional()?;
+        let Some(message) = message else {
+            continue;
+        };
+        semantic_ids.insert(message.message_id.clone());
+        // Semantic and lexical scores have unrelated scales. Give a validated
+        // same-space semantic match a stable leading band while retaining the
+        // Runtime ranking and a small lexical bonus when both paths agree.
+        let score = 1_000.0 + semantic_match.similarity * 100.0 - rank as f64 * 0.001;
+        match by_id.get_mut(&message.message_id) {
+            Some(candidate) => candidate.score += score,
+            None => {
+                by_id.insert(message.message_id.clone(), Candidate { message, score });
+            }
+        }
+    }
+    candidates.extend(by_id.into_values());
+    Ok(semantic_ids)
 }
 
 fn stored_message(row: &rusqlite::Row<'_>) -> rusqlite::Result<StoredMessage> {
@@ -1024,8 +1163,55 @@ mod tests {
     use super::*;
     use crate::{
         memory::{MemoryEntry, MessagePart},
+        transcript::semantic::{
+            EmbeddingBatch, EmbeddingInput, EmbeddingVector, TranscriptEmbedder,
+        },
         transcript::{TranscriptMessageLinks, TranscriptStore},
     };
+
+    struct RelatedMeaningEmbedder;
+
+    #[async_trait::async_trait]
+    impl TranscriptEmbedder for RelatedMeaningEmbedder {
+        async fn embed_query(&self, input: EmbeddingInput) -> Result<EmbeddingBatch> {
+            Ok(batch(vec![EmbeddingVector {
+                id: input.id,
+                source_revision: input.source_revision,
+                values: vec![1.0, 0.0],
+            }]))
+        }
+
+        async fn embed_documents(&self, inputs: Vec<EmbeddingInput>) -> Result<EmbeddingBatch> {
+            Ok(batch(
+                inputs
+                    .into_iter()
+                    .map(|input| {
+                        let related =
+                            input.text.contains("共享状态") || input.text.contains("并行开发");
+                        EmbeddingVector {
+                            id: input.id,
+                            source_revision: input.source_revision,
+                            values: if related {
+                                vec![1.0, 0.0]
+                            } else {
+                                vec![0.0, 1.0]
+                            },
+                        }
+                    })
+                    .collect(),
+            ))
+        }
+    }
+
+    fn batch(vectors: Vec<EmbeddingVector>) -> EmbeddingBatch {
+        EmbeddingBatch {
+            space: "fixture-query-document-space".to_owned(),
+            dimensions: 2,
+            normalized: true,
+            distance_metric: "cosine".to_owned(),
+            vectors,
+        }
+    }
 
     fn entry(role: MemoryRole, at: &str, content: &str) -> MemoryEntry {
         MemoryEntry {
@@ -1175,6 +1361,48 @@ mod tests {
         assert_eq!(evidence.distinct_episode_count, 2);
         assert!(evidence.repeated_across_time);
         assert_eq!(evidence.source_message_ids.len(), 2);
+    }
+
+    #[tokio::test]
+    async fn semantic_recall_promotes_paraphrases_without_lexical_overlap() {
+        let temporary = tempfile::tempdir().expect("temporary directory");
+        let (store, _) = TranscriptStore::open(temporary.path().join("transcript.sqlite3"), None)
+            .await
+            .expect("open transcript");
+        let first = append(
+            &store,
+            MemoryRole::User,
+            "2026-08-01T00:00:00Z",
+            "共享状态让团队成员互相等待",
+        )
+        .await;
+        let second = append(
+            &store,
+            MemoryRole::User,
+            "2026-08-03T00:00:00Z",
+            "并行开发时协调成本又出现了",
+        )
+        .await;
+
+        let store = Arc::new(store);
+        let lexical = store
+            .search("如何减少沟通摩擦", TranscriptSearchOptions::default())
+            .await
+            .expect("lexical search");
+        assert!(lexical.clusters.is_empty());
+
+        let semantic =
+            TranscriptRecall::with_embedder(Arc::clone(&store), Arc::new(RelatedMeaningEmbedder))
+                .search("如何减少沟通摩擦", TranscriptSearchOptions::default())
+                .await
+                .expect("semantic transcript search");
+
+        assert!(semantic.semantic.available);
+        assert_eq!(semantic.semantic.match_count, 2);
+        assert_eq!(semantic.recurrence.user_match_count, 2);
+        assert!(semantic.recurrence.repeated_across_time);
+        assert!(semantic.recurrence.source_message_ids.contains(&first));
+        assert!(semantic.recurrence.source_message_ids.contains(&second));
     }
 
     #[tokio::test]

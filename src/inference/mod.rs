@@ -436,6 +436,7 @@ fn pcp_maintenance_workload(request: &MaintenanceWorkerRequest) -> InferenceWork
         | MaintenanceWorkerRequest::SelectRelation { .. }
         | MaintenanceWorkerRequest::ExtractTopic { .. }
         | MaintenanceWorkerRequest::AssessArchive { .. }
+        | MaintenanceWorkerRequest::ReconcileFeedback { .. }
         | MaintenanceWorkerRequest::SelectRetentionMilestones { .. } => {
             PCP_SEMANTIC_MAINTENANCE_WORKLOAD
         }

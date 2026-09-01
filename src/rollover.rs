@@ -75,11 +75,13 @@ impl RolloverDecision {
             RolloverReason::NativeCompaction => "Codex already compacted the native context",
         };
         format!(
-            "Native thread rollover follows this turn because {reason}. Before the final reply, \
-             write at most one PCP Page in `{}` if durable state exists. Set \
-             `facets.kind` to `conversation_checkpoint`; capture active threads, decisions, \
-             unresolved questions, and corrections; use selective PCP search/read to obtain exact \
-             `source_revision_ids`. Then answer normally.",
+            "Native thread rollover follows this turn because {reason}. This is context-compression \
+             pressure, not proof that durable memory should be written. The Host will bridge exact \
+             recent Source Pages into the next thread. Before the final reply, write at most one \
+             PCP Page in `{}` only if the underlying discussion independently contains durable \
+             state such as a decision, correction, stable constraint, unresolved long-running \
+             question, or meaningful recurrence. Preserve exact `source_message_ids`; do not create \
+             a generic conversation checkpoint or compression summary. Then answer normally.",
             self.conversation_scope
         )
     }
@@ -134,7 +136,8 @@ mod tests {
         let decision = decide(None, 1, "conversation:test").expect("rollover");
         assert_eq!(decision.reason(), "native_compaction");
         assert!(decision.prompt().contains("already compacted"));
-        assert!(decision.prompt().contains("conversation_checkpoint"));
+        assert!(decision.prompt().contains("not proof"));
+        assert!(decision.prompt().contains("do not create"));
     }
 
     #[test]

@@ -488,8 +488,8 @@ impl UsageStore {
                         ), 0),
                         COALESCE(SUM(
                             CASE
-                                WHEN activity = 'reflection'
-                                  OR stage IN ('pcp', 'reconciliation_preview', 'reconciliation_apply')
+                                WHEN (activity = 'reflection'
+                                  OR stage IN ('pcp', 'reconciliation_preview', 'reconciliation_apply'))
                                      AND completed_at >= ?1
                                 THEN total_tokens ELSE 0
                             END

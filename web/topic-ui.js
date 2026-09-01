@@ -23,10 +23,6 @@ export function initTopicUi({
   const status = document.querySelector("#topic-dialog-status");
   const list = document.querySelector("#topic-list");
   const detail = document.querySelector("#topic-detail");
-  const tray = document.querySelector("#topic-target-tray");
-  const trayTitle = document.querySelector("#topic-target-title");
-  const openSelected = document.querySelector("#open-selected-topic");
-  const clearSelected = document.querySelector("#clear-topic-target");
   const chatShell = document.querySelector("#topic-chat-shell");
   const chatConversation = document.querySelector("#topic-chat-conversation");
   const chatTitle = document.querySelector("#topic-chat-title");
@@ -47,10 +43,6 @@ export function initTopicUi({
   const packExpansion = new Map();
 
   openButton.addEventListener("click", () => open());
-  openSelected.addEventListener("click", () => {
-    if (pendingTopic) open(pendingTopic.id);
-  });
-  clearSelected.addEventListener("click", () => clear());
   exitChat.addEventListener("click", () => clear());
   inspectChat.addEventListener("click", () => {
     if (pendingTopic) open(pendingTopic.id);
@@ -220,8 +212,6 @@ export function initTopicUi({
     if (!topic?.id || !topic?.title) return;
     pendingTopic = { id: topic.id, title: topic.title };
     onScopeChange?.(pendingTopic);
-    trayTitle.textContent = topic.title;
-    tray.hidden = false;
     conversation.hidden = true;
     chatShell.hidden = false;
     chatTitle.textContent = topic.title;
@@ -258,8 +248,6 @@ export function initTopicUi({
     chatLoadEpoch += 1;
     pendingTopic = null;
     pendingResponse = null;
-    trayTitle.textContent = "";
-    tray.hidden = true;
     chatConversation.replaceChildren();
     chatStatus.textContent = "";
     chatShell.hidden = true;

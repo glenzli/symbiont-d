@@ -612,7 +612,7 @@ async fn inventory_candidates(
         let page = continuity
             .store()
             .browse_content_pages(
-                continuity.allowed_scopes(),
+                vec![continuity.pcp_scope().to_owned()],
                 None,
                 BrowseIndexOrder::Oldest,
                 INVENTORY_PAGE_SIZE,

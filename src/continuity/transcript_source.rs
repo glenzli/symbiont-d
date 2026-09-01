@@ -1,6 +1,6 @@
 use std::sync::Arc;
 
-use anyhow::Result;
+use anyhow::{Context, Result};
 use serde::Serialize;
 
 use crate::{
@@ -14,6 +14,7 @@ use crate::{
 
 const TRANSCRIPT_PROVIDER_ID: &str = "symbiont:transcript";
 const TRANSCRIPT_LOCATOR_PREFIX: &str = "message/";
+const TRANSCRIPT_STORE_LOCATOR_PREFIX: &str = "store/";
 const MAX_CONTEXT_MESSAGES_PER_SIDE: u64 = 2;
 const MAX_TARGET_CONTENT_CHARS: usize = 6_000;
 const MAX_CONTEXT_CONTENT_CHARS: usize = 1_500;
@@ -47,6 +48,7 @@ pub(crate) struct TranscriptSourceResolution {
 #[derive(Clone, Debug)]
 struct ParsedTranscriptSource {
     locator: String,
+    source_store_id: Option<String>,
     message_id: String,
 }
 
@@ -63,6 +65,20 @@ pub(super) async fn resolve(
             && context_after <= MAX_CONTEXT_MESSAGES_PER_SIDE,
         "transcript SourceRef context is limited to two messages on each side"
     );
+    if source
+        .source_store_id
+        .as_deref()
+        .is_some_and(|source_store_id| source_store_id != transcript.source_store_id())
+    {
+        return Ok(TranscriptSourceResolution {
+            provider_id: TRANSCRIPT_PROVIDER_ID.to_owned(),
+            locator: source.locator,
+            source_message_id: source.message_id,
+            status: TranscriptSourceStatus::Unavailable,
+            messages: Vec::new(),
+            truncated: false,
+        });
+    }
     let local = TranscriptRecall::new(transcript)
         .resolve_source(
             &source.message_id,
@@ -84,9 +100,26 @@ fn parse_source(provider_id: &str, locator: &str) -> Result<ParsedTranscriptSour
         provider_id == TRANSCRIPT_PROVIDER_ID,
         "unsupported SourceRef provider; only symbiont:transcript is local"
     );
-    let Some(message_id) = locator.strip_prefix(TRANSCRIPT_LOCATOR_PREFIX) else {
-        anyhow::bail!("unsupported transcript SourceRef locator");
-    };
+    let (source_store_id, message_id) =
+        if let Some(message_id) = locator.strip_prefix(TRANSCRIPT_LOCATOR_PREFIX) {
+            // Historical SourceRefs predate explicit Host source-store identity.
+            (None, message_id)
+        } else if let Some(rest) = locator.strip_prefix(TRANSCRIPT_STORE_LOCATOR_PREFIX) {
+            let (source_store_id, message_id) = rest
+                .split_once("/message/")
+                .context("unsupported transcript SourceRef locator")?;
+            anyhow::ensure!(
+                source_store_id.starts_with("src_")
+                    && source_store_id.len() == 36
+                    && source_store_id
+                        .chars()
+                        .all(|character| character.is_ascii_alphanumeric() || character == '_'),
+                "transcript SourceRef source store id is invalid"
+            );
+            (Some(source_store_id.to_owned()), message_id)
+        } else {
+            anyhow::bail!("unsupported transcript SourceRef locator");
+        };
     let message_id_chars = message_id.chars().count();
     anyhow::ensure!(
         (1..=MAX_MESSAGE_ID_CHARS).contains(&message_id_chars)
@@ -97,6 +130,7 @@ fn parse_source(provider_id: &str, locator: &str) -> Result<ParsedTranscriptSour
     );
     Ok(ParsedTranscriptSource {
         locator: locator.to_owned(),
+        source_store_id,
         message_id: message_id.to_owned(),
     })
 }
@@ -160,11 +194,19 @@ mod tests {
     #[test]
     fn accepts_only_the_local_transcript_source_ref_shape() {
         assert!(parse_source("symbiont:transcript", "message/msg_abc-123").is_ok());
+        assert!(
+            parse_source(
+                "symbiont:transcript",
+                "store/src_0123456789abcdef0123456789abcdef/message/msg_abc-123"
+            )
+            .is_ok()
+        );
         assert!(parse_source("web", "message/msg_abc").is_err());
         assert!(
             parse_source("symbiont:transcript", "https://example.com/message/msg_abc").is_err()
         );
         assert!(parse_source("symbiont:transcript", "message/../private").is_err());
+        assert!(parse_source("symbiont:transcript", "store/src_wrong/message/msg_abc").is_err());
     }
 
     #[tokio::test]
@@ -266,11 +308,29 @@ mod tests {
         assert_eq!(retracted.status, TranscriptSourceStatus::Retracted);
         assert!(retracted.messages.is_empty());
 
-        let unavailable = resolve(store, "symbiont:transcript", "message/msg_missing", 0, 0)
-            .await
-            .expect("resolve missing source");
+        let unavailable = resolve(
+            Arc::clone(&store),
+            "symbiont:transcript",
+            "message/msg_missing",
+            0,
+            0,
+        )
+        .await
+        .expect("resolve missing source");
         assert_eq!(unavailable.status, TranscriptSourceStatus::Unavailable);
         assert!(unavailable.messages.is_empty());
+
+        let foreign = resolve(
+            Arc::clone(&store),
+            "symbiont:transcript",
+            "store/src_0123456789abcdef0123456789abcdef/message/msg_missing",
+            0,
+            0,
+        )
+        .await
+        .expect("resolve foreign source store");
+        assert_eq!(foreign.status, TranscriptSourceStatus::Unavailable);
+        assert!(foreign.messages.is_empty());
     }
 
     #[tokio::test]

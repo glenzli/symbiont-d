@@ -3222,20 +3222,40 @@ async fn run_chat(
         let route = resolve_compute_route(&state, &batch).await?;
         let profile = state.profile.snapshot().await;
         let compute_policy_context = state.compute_policies.prompt().await;
+        let scoped_history = match primary_topic.as_ref() {
+            Some(topic) => Some(state.topics.chat_history(&topic.id).await?),
+            None => None,
+        };
+        let excluded_local_revision_ids = match scoped_history.as_deref() {
+            Some(history) => recent_revision_ids(history, 16),
+            None => recent_revision_ids(&state.continuity.recent_messages(16).await?, 16),
+        };
+        let compound = match compound_recall_query(&batch, primary_topic.as_ref()) {
+            Some(query) => Some(
+                state
+                    .continuity
+                    .compound_context(&query, &excluded_local_revision_ids)
+                    .await?,
+            ),
+            None => None,
+        };
+        if let Some(compound) = compound.as_ref() {
+            source_revision_ids.extend(compound.source_revision_ids());
+        }
         let continuity_base = format!(
-            "{}\n\n{}\n\n{}\n\n{}\n\n{}\n\n{}",
+            "{}\n\n{}\n\n{}\n\n{}\n\n{}\n\n{}{}",
             state.continuity.context_seed(Some(&current.stored)).await,
             state.context.prompt().await?,
             state.curiosity.prompt().await?,
             state.reflection.store().prompt().await?,
             compute_policy_context,
-            route.context
+            route.context,
+            compound
+                .as_ref()
+                .map(|packet| format!("\n\n{}", packet.prompt()))
+                .unwrap_or_default(),
         );
         let continuity_context = format!("{}\n\n{}", continuity_base, state.bridge.prompt().await);
-        let scoped_history = match primary_topic.as_ref() {
-            Some(topic) => Some(state.topics.chat_history(&topic.id).await?),
-            None => None,
-        };
         let user_text = conversation_batch_text(&batch, first_batch);
         let mut council_ids = Vec::new();
         for id in batch
@@ -3617,6 +3637,42 @@ fn conversation_batch_text(batch: &[QueuedUserMessage], first_batch: bool) -> St
     )
 }
 
+fn compound_recall_query(
+    batch: &[QueuedUserMessage],
+    topic: Option<&TopicContext>,
+) -> Option<String> {
+    let mut parts = batch
+        .iter()
+        .map(|message| message.text.trim())
+        .filter(|text| !text.is_empty())
+        .map(str::to_owned)
+        .collect::<Vec<_>>();
+    if let Some(topic) = topic {
+        parts.push(format!("主题：{}\n{}", topic.title, topic.summary));
+    }
+    let query = parts.join("\n");
+    recall_worthy(&query).then_some(query)
+}
+
+fn recall_worthy(query: &str) -> bool {
+    let query = query.trim();
+    query.chars().count() >= 4
+        || query
+            .chars()
+            .filter(|character| character.is_ascii_alphanumeric())
+            .count()
+            >= 3
+}
+
+fn recent_revision_ids(entries: &[MemoryEntry], limit: usize) -> Vec<String> {
+    entries
+        .iter()
+        .rev()
+        .take(limit)
+        .filter_map(|entry| entry.revision_id.clone())
+        .collect()
+}
+
 async fn council_context(
     state: &AppState,
     scoped_history: Option<&[MemoryEntry]>,
@@ -3958,6 +4014,14 @@ impl IntoResponse for ApiError {
 mod tests {
     use super::*;
     use crate::codex::{CodexTaskDetail, CodexTaskMessage, CodexTaskSummary};
+
+    #[test]
+    fn compound_recall_skips_acknowledgements_but_keeps_short_named_concepts() {
+        assert!(!recall_worthy("好的"));
+        assert!(!recall_worthy("嗯"));
+        assert!(recall_worthy("OET"));
+        assert!(recall_worthy("PCP 复合体"));
+    }
 
     #[test]
     fn leading_compute_directive_is_a_hard_constraint_and_not_message_content() {

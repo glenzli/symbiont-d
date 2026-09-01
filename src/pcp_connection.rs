@@ -12,9 +12,9 @@ use std::{
 use anyhow::{Context, Result};
 use pcp_client::{ContentLibraryResult, ContentLibrarySummary, PcpApi, PcpTenantApi};
 use pcp_core::{
-    AccessSession, BrowseIndexOrder, Capabilities, IngestPageRequest, IntentEffort,
-    QueryContextRequest, QueryContextResponse, ReadPage, ReadPagesRequest, Scope,
-    SearchPagesRequest, SearchResult, WriteResult,
+    AccessSession, BrowseIndexOrder, Capabilities, FeedbackSubmission, IngestPageRequest,
+    IntentEffort, QueryContextRequest, QueryContextResponse, ReadPage, ReadPagesRequest, Scope,
+    SearchPagesRequest, SearchResult, SubmitFeedbackRequest, WriteResult,
 };
 use tokio::sync::Mutex;
 use tracing::{info, warn};
@@ -339,6 +339,9 @@ impl PcpTenantApi for ManagedPcpClient {
         requested_scopes: Vec<String>,
     ) -> ContentLibrarySummary);
     retrying_read!(read_pages(request: ReadPagesRequest) -> Vec<ReadPage>);
+    recovering_write!(submit_feedback(
+        request: SubmitFeedbackRequest,
+    ) -> FeedbackSubmission);
     retrying_read!(semantic_search(
         request: QueryContextRequest,
     ) -> QueryContextResponse);

@@ -104,7 +104,7 @@ use tokio::{
     sync::Mutex,
     time::{Duration, sleep},
 };
-use tracing::info;
+use tracing::{info, warn};
 use transcript::TranscriptStore;
 use usage::UsageStore;
 use web::AppState;
@@ -169,6 +169,14 @@ async fn main() -> Result<()> {
         );
     }
     let transcript = Arc::new(transcript);
+    let infer_runtime = Arc::new(
+        InferRuntimeAccess::open(resolve_data_path(
+            &workspace,
+            "SYMBIONT_INFER_RUNTIME_SECRETS_PATH",
+            "infer-runtime-secrets.toml",
+        ))
+        .await?,
+    );
     let (symbiont_state, state_restore) = SymbiontStateStore::open(
         resolve_data_path(&workspace, "SYMBIONT_STATE_PATH", "symbiont-state.sqlite3"),
         default_legacy_snapshot_source(),
@@ -191,7 +199,7 @@ async fn main() -> Result<()> {
     let symbiont_state = Arc::new(symbiont_state);
     let pcp = pcp_connection::open(&workspace).await?;
     let continuity = Arc::new(
-        ContinuityHost::open_at(
+        ContinuityHost::open_at_with_infer(
             pcp,
             Arc::clone(&transcript),
             resolve_data_path(
@@ -199,6 +207,7 @@ async fn main() -> Result<()> {
                 "SYMBIONT_PCP_SOURCE_SEQUENCE_PATH",
                 "pcp-source-sequence.json",
             ),
+            Arc::clone(&infer_runtime),
         )
         .await?,
     );
@@ -209,9 +218,19 @@ async fn main() -> Result<()> {
         Arc::clone(&continuity),
         Arc::clone(&symbiont_state),
     ));
-    info!(
-        "local chat transcript and PCP recall client are ready; semantic maintenance is disabled"
-    );
+    let semantic_continuity = Arc::clone(&continuity);
+    tokio::spawn(async move {
+        match semantic_continuity
+            .backfill_transcript_semantic_index()
+            .await
+        {
+            Ok(indexed) => info!(indexed, "local transcript semantic index is ready"),
+            Err(error) => {
+                warn!(%error, "local transcript semantic backfill is unavailable; lexical recall remains active")
+            }
+        }
+    });
+    info!("local chat transcript, hybrid recall, and PCP recall client are ready");
     let reflection_store = Arc::new(
         ReflectionStore::open(
             resolve_data_path(&workspace, "SYMBIONT_REFLECTION_PATH", "reflection.sqlite3"),
@@ -441,14 +460,6 @@ async fn main() -> Result<()> {
             &workspace,
             "SYMBIONT_DRIVE_INPUT_PATH",
             "drive-input.toml",
-        ))
-        .await?,
-    );
-    let infer_runtime = Arc::new(
-        InferRuntimeAccess::open(resolve_data_path(
-            &workspace,
-            "SYMBIONT_INFER_RUNTIME_SECRETS_PATH",
-            "infer-runtime-secrets.toml",
         ))
         .await?,
     );

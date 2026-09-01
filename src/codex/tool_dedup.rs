@@ -59,6 +59,7 @@ fn is_pcp_mutation(tool: &str) -> bool {
         "assess_validity"
             | "write_summary"
             | "write_page"
+            | "submit_feedback"
             | "revise_page"
             | "consolidate_pages"
             | "relate_pages"

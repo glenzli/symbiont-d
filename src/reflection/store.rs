@@ -658,23 +658,33 @@ impl ReflectionStore {
         task::spawn_blocking(move || -> Result<Vec<String>> {
             let connection = open_connection(&path)?;
             let id = resolve_episode_alias(&connection, &id)?;
-            let mut statement = connection.prepare(
-                "
-                SELECT em.revision_id
-                FROM episode_messages em
-                LEFT JOIN conversation_events ce ON ce.revision_id = em.revision_id
-                WHERE em.episode_id = ?1 AND COALESCE(ce.retracted, 0) = 0
-                GROUP BY em.revision_id
-                ORDER BY MIN(COALESCE(ce.occurred_at, em.associated_at)) ASC
-                LIMIT ?2
-                ",
-            )?;
-            Ok(statement
-                .query_map(params![id, limit.clamp(1, 200) as i64], |row| row.get(0))?
-                .collect::<rusqlite::Result<Vec<_>>>()?)
+            read_episode_revision_ids(&connection, &id, limit)
         })
         .await
         .context("join Episode message read")?
+    }
+
+    pub async fn episode_revision_ids_by_topic(
+        &self,
+        episode_ids: &[String],
+        limit_per_topic: usize,
+    ) -> Result<HashMap<String, Vec<String>>> {
+        let path = self.path.clone();
+        let episode_ids = episode_ids.to_vec();
+        task::spawn_blocking(move || -> Result<HashMap<String, Vec<String>>> {
+            let connection = open_connection(&path)?;
+            let mut memberships = HashMap::new();
+            for id in episode_ids {
+                let id = resolve_episode_alias(&connection, &id)?;
+                memberships.insert(
+                    id.clone(),
+                    read_episode_revision_ids(&connection, &id, limit_per_topic)?,
+                );
+            }
+            Ok(memberships)
+        })
+        .await
+        .context("join Topic membership read")?
     }
 
     pub async fn conversation_turn_revision_ids(
@@ -1971,6 +1981,27 @@ fn source_time(connection: &Connection, revision_ids: &[String], latest: bool) -
     } else {
         values.into_iter().next()
     }
+}
+
+fn read_episode_revision_ids(
+    connection: &Connection,
+    id: &str,
+    limit: usize,
+) -> Result<Vec<String>> {
+    let mut statement = connection.prepare(
+        "
+        SELECT em.revision_id
+        FROM episode_messages em
+        LEFT JOIN conversation_events ce ON ce.revision_id = em.revision_id
+        WHERE em.episode_id = ?1 AND COALESCE(ce.retracted, 0) = 0
+        GROUP BY em.revision_id
+        ORDER BY MIN(COALESCE(ce.occurred_at, em.associated_at)) ASC
+        LIMIT ?2
+        ",
+    )?;
+    Ok(statement
+        .query_map(params![id, limit.clamp(1, 200) as i64], |row| row.get(0))?
+        .collect::<rusqlite::Result<Vec<_>>>()?)
 }
 
 fn validate_sources(sources: &[String]) -> Result<()> {

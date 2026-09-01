@@ -633,6 +633,7 @@ html[data-native-shell="macos"] .topbar {
   backdrop-filter: blur(12px);
 }
 
+.conversation-topic-toggle,
 .conversation-input-briefing-toggle {
   width: 36px;
   height: 36px;
@@ -650,11 +651,13 @@ html[data-native-shell="macos"] .topbar {
   backdrop-filter: blur(12px);
 }
 
+.conversation-topic-toggle:hover,
 .conversation-input-briefing-toggle:hover {
   color: var(--text);
   background: var(--surface-raised);
 }
 
+.conversation-topic-toggle svg,
 .conversation-input-briefing-toggle svg {
   width: 16px;
   height: 16px;
@@ -3056,51 +3059,6 @@ html[data-native-shell="macos"] .topbar {
   cursor: pointer;
   font-size: 10px;
   font-weight: 650;
-}
-
-.topic-target-tray {
-  min-width: 0;
-  margin-bottom: 7px;
-  display: flex;
-  align-items: center;
-  gap: 4px;
-}
-
-.composer .topic-target-tray > button {
-  height: 24px;
-  border: 0;
-  color: var(--text-soft);
-  background: transparent;
-  font-size: 10px;
-  font-weight: 500;
-}
-
-.composer .topic-target-tray #open-selected-topic {
-  min-width: 0;
-  padding: 0 5px;
-  display: flex;
-  align-items: baseline;
-  gap: 6px;
-}
-
-.topic-target-tray small {
-  flex: 0 0 auto;
-  color: var(--text-faint);
-  font-size: 9px;
-}
-
-.topic-target-tray #topic-target-title {
-  overflow: hidden;
-  color: var(--text);
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.composer .topic-target-tray #clear-topic-target {
-  width: 24px;
-  padding: 0;
-  font-size: 14px;
-  font-weight: 400;
 }
 
 .attachment-preview {

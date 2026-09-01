@@ -8,6 +8,7 @@
 use std::{
     path::{Path, PathBuf},
     sync::Arc,
+    time::Duration,
 };
 
 use anyhow::{Context, Result};
@@ -21,13 +22,17 @@ use tokio::{sync::Mutex, task};
 use crate::memory::{MemoryEntry, MemoryRole, MessagePart};
 
 mod search;
+mod semantic;
 
+#[cfg(test)]
+pub use search::TranscriptRecurrenceEvidence;
 pub use search::{
     TranscriptRecall, TranscriptSearchMessage, TranscriptSearchOptions, TranscriptSearchResult,
-    TranscriptSourceOptions, TranscriptSourceResolution, TranscriptSourceStatus,
+    TranscriptSemanticEvidence, TranscriptSourceOptions, TranscriptSourceResolution,
+    TranscriptSourceStatus,
 };
 
-const SCHEMA_VERSION: &str = "3";
+const SCHEMA_VERSION: &str = "5";
 
 #[derive(Clone, Debug, Default)]
 pub struct TranscriptRestoreReport {
@@ -72,6 +77,7 @@ pub struct MigrationTranscriptMessage {
 pub struct TranscriptStore {
     path: PathBuf,
     mutation: Arc<Mutex<()>>,
+    source_store_id: String,
 }
 
 impl TranscriptStore {
@@ -79,17 +85,48 @@ impl TranscriptStore {
         path: PathBuf,
         legacy_snapshot: Option<PathBuf>,
     ) -> Result<(Self, TranscriptRestoreReport)> {
-        let store = Self {
+        let mut store = Self {
             path,
             mutation: Arc::new(Mutex::new(())),
+            source_store_id: String::new(),
         };
         store.initialize().await?;
+        store.source_store_id = store.ensure_source_store_id().await?;
         let report = store.restore_if_empty(legacy_snapshot).await?;
         Ok((store, report))
     }
 
     pub fn path(&self) -> &Path {
         &self.path
+    }
+
+    pub fn source_store_id(&self) -> &str {
+        &self.source_store_id
+    }
+
+    async fn ensure_source_store_id(&self) -> Result<String> {
+        let path = self.path.clone();
+        task::spawn_blocking(move || -> Result<String> {
+            let connection = open_connection(&path)?;
+            if let Some(source_store_id) = connection
+                .query_row(
+                    "SELECT value FROM transcript_meta WHERE key = 'source_store_id'",
+                    [],
+                    |row| row.get::<_, String>(0),
+                )
+                .optional()?
+            {
+                return Ok(source_store_id);
+            }
+            let source_store_id = new_source_store_id();
+            connection.execute(
+                "INSERT INTO transcript_meta(key, value) VALUES ('source_store_id', ?1)",
+                [&source_store_id],
+            )?;
+            Ok(source_store_id)
+        })
+        .await
+        .context("join transcript source store identity initialization")?
     }
 
     async fn initialize(&self) -> Result<()> {
@@ -138,6 +175,20 @@ impl TranscriptStore {
                     completed_sequence INTEGER NOT NULL,
                     updated_at TEXT NOT NULL
                 );
+                CREATE TABLE IF NOT EXISTS transcript_message_embeddings (
+                    message_id TEXT NOT NULL,
+                    embedding_space TEXT NOT NULL,
+                    dimensions INTEGER NOT NULL,
+                    normalized INTEGER NOT NULL,
+                    distance_metric TEXT NOT NULL,
+                    vector_blob BLOB NOT NULL,
+                    indexed_at TEXT NOT NULL,
+                    PRIMARY KEY(message_id, embedding_space),
+                    FOREIGN KEY(message_id) REFERENCES transcript_messages(message_id)
+                        ON DELETE CASCADE
+                );
+                CREATE INDEX IF NOT EXISTS transcript_embeddings_space
+                    ON transcript_message_embeddings(embedding_space, message_id);
                 ",
             )?;
             search::initialize_index(&connection)?;
@@ -249,11 +300,24 @@ impl TranscriptStore {
         query: &str,
         options: TranscriptSearchOptions,
     ) -> Result<TranscriptSearchResult> {
+        self.search_with_semantic(query, options, Vec::new(), None)
+            .await
+    }
+
+    async fn search_with_semantic(
+        &self,
+        query: &str,
+        options: TranscriptSearchOptions,
+        semantic_matches: Vec<semantic::SemanticMatch>,
+        semantic_evidence: Option<search::TranscriptSemanticEvidence>,
+    ) -> Result<TranscriptSearchResult> {
         let path = self.path.clone();
         let query = query.to_owned();
-        task::spawn_blocking(move || search::search_transcript(&path, &query, options))
-            .await
-            .context("join transcript search")?
+        task::spawn_blocking(move || {
+            search::search_transcript(&path, &query, options, &semantic_matches, semantic_evidence)
+        })
+        .await
+        .context("join transcript search")?
     }
 
     pub async fn resolve_source(
@@ -393,7 +457,12 @@ impl TranscriptStore {
 }
 
 fn open_connection(path: &Path) -> Result<Connection> {
-    Connection::open(path).with_context(|| format!("open transcript database {}", path.display()))
+    let connection = Connection::open(path)
+        .with_context(|| format!("open transcript database {}", path.display()))?;
+    connection
+        .busy_timeout(Duration::from_secs(5))
+        .context("configure transcript SQLite busy timeout")?;
+    Ok(connection)
 }
 
 fn now() -> String {
@@ -425,6 +494,18 @@ fn new_message_id() -> String {
     fill(&mut bytes).expect("operating-system randomness for local message id");
     format!(
         "msg_{}",
+        bytes
+            .iter()
+            .map(|byte| format!("{byte:02x}"))
+            .collect::<String>()
+    )
+}
+
+fn new_source_store_id() -> String {
+    let mut bytes = [0_u8; 16];
+    fill(&mut bytes).expect("operating-system randomness for transcript source store id");
+    format!(
+        "src_{}",
         bytes
             .iter()
             .map(|byte| format!("{byte:02x}"))
@@ -668,6 +749,24 @@ mod tests {
         let restored = store.recent(10).await.expect("read transcript");
         assert_eq!(restored.len(), 1);
         assert_eq!(restored[0].content, "local only");
+    }
+
+    #[tokio::test]
+    async fn source_store_identity_is_stable_across_reopen() {
+        let temporary = tempfile::tempdir().expect("temporary directory");
+        let path = temporary.path().join("transcript-source.sqlite3");
+        let (first, _) = TranscriptStore::open(path.clone(), None)
+            .await
+            .expect("open transcript");
+        let source_store_id = first.source_store_id().to_owned();
+        assert!(source_store_id.starts_with("src_"));
+        assert_eq!(source_store_id.len(), 36);
+        drop(first);
+
+        let (reopened, _) = TranscriptStore::open(path, None)
+            .await
+            .expect("reopen transcript");
+        assert_eq!(reopened.source_store_id(), source_store_id);
     }
 
     #[tokio::test]

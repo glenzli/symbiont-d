@@ -763,11 +763,15 @@ async fn pcp_tools_write_search_and_read_through_the_dynamic_bridge() {
         traced_json["pages"][0]["revision"]["sourceRefs"][0]["providerId"],
         "symbiont:transcript"
     );
+    let transcript_locator = traced_json["pages"][0]["revision"]["sourceRefs"][0]["locator"]
+        .as_str()
+        .expect("transcript locator");
+    assert!(transcript_locator.starts_with("store/src_"));
+    assert!(transcript_locator.contains("/message/msg_"));
     assert!(
-        traced_json["pages"][0]["revision"]["sourceRefs"][0]["locator"]
+        traced_json["pages"][0]["revision"]["sourceRefs"][0]["contentDigest"]
             .as_str()
-            .expect("transcript locator")
-            .starts_with("message/msg_")
+            .is_some_and(|digest| digest.starts_with("sha256:"))
     );
 
     let derived_trace = tools
@@ -797,6 +801,43 @@ async fn pcp_tools_write_search_and_read_through_the_dynamic_bridge() {
             .is_empty()
     );
 
+    let correction_message = continuity
+        .ingest_message(
+            MemoryRole::User,
+            "Correction: the telescope is bronze, not brass.",
+            Vec::new(),
+            None,
+            MessageLinks::default(),
+        )
+        .await
+        .expect("store local correction source");
+    let feedback = tools
+        .execute_for_model(
+            &json!({
+                "namespace": "pcp",
+                "tool": "submit_feedback",
+                "arguments": {
+                    "kind": "correction",
+                    "authority": "subject_owner",
+                    "content": "The user clarifies that the telescope is bronze, not brass.",
+                    "source_message_ids": [correction_message.page.revision_id],
+                    "challenged_revision_ids": [revision_id],
+                    "used_revision_ids": [revision_id, derived_revision_id]
+                }
+            }),
+            Some("test-model"),
+            "interactive",
+        )
+        .await;
+    assert_eq!(feedback.response["success"], true, "{}", feedback.response);
+    let feedback_json = tool_content_json(&feedback.response);
+    assert_eq!(feedback_json["challengedRevisionIds"][0], revision_id);
+    assert!(
+        feedback_json["feedbackRevisionId"]
+            .as_str()
+            .is_some_and(|revision| revision.starts_with("rev_"))
+    );
+
     let _ = tokio::fs::remove_dir_all(root).await;
 }
 
@@ -817,16 +858,25 @@ async fn reflection_tools_accept_recalled_conversation_revisions_outside_the_eve
             .await
             .expect("open continuity host"),
     );
-    let recalled = continuity
-        .ingest_message(
-            MemoryRole::User,
-            "An older conversation Revision can still support a new Episode.",
-            Vec::new(),
-            None,
-            MessageLinks::default(),
-        )
-        .await
-        .expect("ingest recalled conversation source");
+    let mut recalled = Vec::new();
+    for content in [
+        "An older conversation Revision can still support a new Episode.",
+        "The user sustains that recalled design line in another turn.",
+        "A third user-authored turn makes the line eligible as a Topic.",
+    ] {
+        recalled.push(
+            continuity
+                .ingest_message(
+                    MemoryRole::User,
+                    content,
+                    Vec::new(),
+                    None,
+                    MessageLinks::default(),
+                )
+                .await
+                .expect("ingest recalled conversation source"),
+        );
+    }
     let profile = Arc::new(
         ProfileStore::open(root.join("profile.toml"), root.join("orientation.md"))
             .await
@@ -859,6 +909,24 @@ async fn reflection_tools_accept_recalled_conversation_revisions_outside_the_eve
         Arc::clone(&exploration_intents),
     );
 
+    let rejected = tools
+        .execute_for_model(
+            &json!({
+                "namespace": "symbiont",
+                "tool": "upsert_episode",
+                "arguments": {
+                    "title": "Premature design line",
+                    "summary": "One recalled turn is not enough for the user-visible Topic sequence.",
+                    "state": "forming",
+                    "source_revision_ids": [recalled[0].page.revision_id.clone()]
+                }
+            }),
+            Some("test-model"),
+            "reflection",
+        )
+        .await;
+    assert_eq!(rejected.response["success"], false);
+
     let result = tools
         .execute_for_model(
             &json!({
@@ -868,7 +936,7 @@ async fn reflection_tools_accept_recalled_conversation_revisions_outside_the_eve
                     "title": "Recalled design line",
                     "summary": "The source is outside Reflection's imported event tail but remains auditable through PCP.",
                     "state": "active",
-                    "source_revision_ids": [recalled.page.revision_id.clone()]
+                    "source_revision_ids": recalled.iter().map(|source| source.page.revision_id.clone()).collect::<Vec<_>>()
                 }
             }),
             Some("test-model"),
@@ -885,7 +953,7 @@ async fn reflection_tools_accept_recalled_conversation_revisions_outside_the_eve
                 "arguments": {
                     "reason": "Reconsider this as a distinct continuation after the current exchange has settled.",
                     "not_before": (chrono::Utc::now() + chrono::Duration::minutes(2)).to_rfc3339(),
-                    "source_revision_ids": [recalled.page.revision_id.clone()]
+                    "source_revision_ids": [recalled[0].page.revision_id.clone()]
                 }
             }),
             Some("test-model"),
@@ -903,7 +971,7 @@ async fn reflection_tools_accept_recalled_conversation_revisions_outside_the_eve
                 "arguments": {
                     "question": "Does this older design constraint still hold in the current runtime?",
                     "why_now": "The recalled Revision changes what evidence the next implementation decision needs.",
-                    "source_revision_ids": [recalled.page.revision_id]
+                    "source_revision_ids": [recalled[0].page.revision_id.clone()]
                 }
             }),
             Some("test-model"),

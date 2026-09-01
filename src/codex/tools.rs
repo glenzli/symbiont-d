@@ -2,8 +2,9 @@ use std::sync::Arc;
 
 use anyhow::{Context, Result};
 use pcp_core::{
-    IntentEffort, Projection, QueryContextRequest, ReadPagesRequest, SearchFilters, SearchMode,
-    SearchPagesRequest, SearchTermMatch, ValidityStanding,
+    FeedbackAuthority, FeedbackKind, IntentEffort, PagePayload, Projection, QueryContextRequest,
+    ReadPagesRequest, SearchFilters, SearchMode, SearchPagesRequest, SearchTermMatch,
+    SubmitFeedbackRequest, ValidityStanding,
 };
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
@@ -26,6 +27,7 @@ use crate::{
         HypothesisStatus, ReflectionStore,
     },
     symbiont_context::{ContextAuthor, ContextDocumentKind, SymbiontContextStore},
+    topics::TopicAdmissionEvidence,
     transcript::TranscriptSearchOptions,
     web_fetch::WebFetcher,
 };
@@ -130,7 +132,7 @@ impl SymbiontTools {
                     {
                         "type": "function",
                         "name": "resolve_source_ref",
-                        "description": "Resolve one exact PCP SourceRef through the Symbiont host when its original local transcript text is needed to interpret a recalled Page. Call only after PCP returned that specific SourceRef; never expand every recall result. Only provider_id=symbiont:transcript and locator=message/{id} are accepted. Context is opt-in and strictly bounded.",
+                        "description": "Resolve one exact PCP SourceRef through this Symbiont host when its original local transcript text is needed to interpret a recalled Page. Call only after PCP returned that specific SourceRef; never expand every recall result. New locators include a stable source-store identity so a reference from another Host returns unavailable rather than resolving against the wrong transcript. Historical message/{id} locators remain accepted. Context is opt-in and strictly bounded.",
                         "inputSchema": {
                             "type": "object",
                             "properties": {
@@ -141,7 +143,7 @@ impl SymbiontTools {
                                 },
                                 "locator": {
                                     "type": "string",
-                                    "pattern": "^message/[A-Za-z0-9_.-]{1,128}$",
+                                    "pattern": "^(message/[A-Za-z0-9_.-]{1,128}|store/src_[a-f0-9]{32}/message/[A-Za-z0-9_.-]{1,128})$",
                                     "description": "Copy the exact PCP SourceRef locator here."
                                 },
                                 "context_before": {
@@ -385,7 +387,7 @@ impl SymbiontTools {
                     {
                         "type": "function",
                         "name": "upsert_episode",
-                        "description": "Create or revise one selective, overlapping, user-visible Topic Episode during background reflection. Use only for a sustained and future-useful discussion line, never every event or incidental term. Episodes are revisable interpretations linked to exact message Revisions, not exclusive folders; one Revision may contribute to several.",
+                        "description": "Create or revise one selective, overlapping, user-visible Topic Episode during background reflection. A new Episode is admitted only after either three user-authored turns sustain it or the user returns to it in a separate conversation visit; one-off and adjacent two-turn discussion stays local. Episodes are revisable interpretations linked to exact message Revisions, not exclusive folders; one Revision may contribute to several.",
                         "inputSchema": {
                             "type": "object",
                             "properties": {
@@ -1078,6 +1080,50 @@ impl SymbiontTools {
                     },
                     {
                         "type": "function",
+                        "name": "submit_feedback",
+                        "description": "Record an explicit user correction or challenge against exact durable PCP Revisions recalled into the conversation. This creates a review signal in the symbiont-d Scope; PCP Runtime decides revision, consolidation, validity, and lifecycle. Never use this for ordinary disagreement with the assistant or as a substitute for a new durable Page.",
+                        "inputSchema": {
+                            "type": "object",
+                            "properties": {
+                                "kind": {
+                                    "type": "string",
+                                    "enum": ["challenge", "correction", "preference_change", "scope_exception"]
+                                },
+                                "authority": {
+                                    "type": "string",
+                                    "enum": ["subject_owner", "tenant_assertion", "external_claim", "unknown"]
+                                },
+                                "content": {
+                                    "type": "string",
+                                    "description": "What the user explicitly corrected or challenged, preserving uncertainty."
+                                },
+                                "source_message_ids": {
+                                    "type": "array",
+                                    "items": {"type": "string"},
+                                    "minItems": 1,
+                                    "maxItems": 100,
+                                    "description": "Exact local user-message IDs carrying the correction or challenge."
+                                },
+                                "challenged_revision_ids": {
+                                    "type": "array",
+                                    "items": {"type": "string"},
+                                    "minItems": 1,
+                                    "maxItems": 100,
+                                    "description": "Exact durable PCP Revisions being challenged."
+                                },
+                                "used_revision_ids": {
+                                    "type": "array",
+                                    "items": {"type": "string"},
+                                    "maxItems": 100,
+                                    "description": "All exact PCP Revisions actually used in the challenged answer or inference."
+                                }
+                            },
+                            "required": ["kind", "authority", "content", "source_message_ids", "challenged_revision_ids"],
+                            "additionalProperties": false
+                        }
+                    },
+                    {
+                        "type": "function",
                         "name": "revise_page",
                         "description": "Publish a new immutable Revision of one revisioned Page. The stable pageId does not change; expected_revision_id prevents overwriting a newer head.",
                         "inputSchema": {
@@ -1169,6 +1215,7 @@ impl SymbiontTools {
                 "match_intent",
                 "read_pages",
                 "write_page",
+                "submit_feedback",
             ];
             tools.retain(|tool| {
                 tool.get("name")
@@ -1655,6 +1702,17 @@ impl SymbiontTools {
                     .context("unknown Episode state")?;
                 let source_revision_ids = string_array(arguments, "source_revision_ids")?;
                 self.ensure_reflection_sources(&source_revision_ids).await?;
+                let episode_id = optional_text(arguments, "episode_id").map(str::to_owned);
+                if episode_id.is_none() {
+                    let source_messages = self
+                        .continuity
+                        .messages_by_revision_ids(&source_revision_ids)
+                        .await?;
+                    let admission = TopicAdmissionEvidence::from_messages(source_messages.iter());
+                    if !admission.qualifies() {
+                        anyhow::bail!(TopicAdmissionEvidence::requirement());
+                    }
+                }
                 let message_revision_ids = string_array(arguments, "message_revision_ids")?;
                 if !message_revision_ids.is_empty() {
                     self.ensure_reflection_sources(&message_revision_ids)
@@ -1663,7 +1721,7 @@ impl SymbiontTools {
                 let episode = self
                     .reflection
                     .upsert_episode(EpisodeInput {
-                        id: optional_text(arguments, "episode_id").map(str::to_owned),
+                        id: episode_id,
                         title: required_text(arguments, "title")?.to_owned(),
                         summary: required_text(arguments, "summary")?.to_owned(),
                         state,
@@ -2261,6 +2319,73 @@ impl SymbiontTools {
                     "created": written.created,
                 })
             }
+            "submit_feedback" => {
+                require_reflection_or_interactive_origin(run_origin, "pcp.submit_feedback")?;
+                let source_message_ids = string_array(arguments, "source_message_ids")?;
+                if source_message_ids.is_empty() {
+                    anyhow::bail!("submit_feedback requires exact local correction sources");
+                }
+                if run_origin == "reflection" {
+                    self.ensure_reflection_sources(&source_message_ids).await?;
+                }
+                let source_refs = self
+                    .continuity
+                    .transcript_source_refs(&source_message_ids)
+                    .await?;
+                let challenged_revision_ids = string_array(arguments, "challenged_revision_ids")?;
+                if challenged_revision_ids.is_empty() {
+                    anyhow::bail!("submit_feedback requires exact challenged PCP Revisions");
+                }
+                let used_revision_ids = string_array(arguments, "used_revision_ids")?;
+                let kind = parse_feedback_kind(required_text(arguments, "kind")?)?;
+                let authority = parse_feedback_authority(required_text(arguments, "authority")?)?;
+                let content = required_text(arguments, "content")?.to_owned();
+                let mut digest = Sha256::new();
+                digest.update(kind.as_str().as_bytes());
+                digest.update([0]);
+                digest.update(authority.as_str().as_bytes());
+                digest.update([0]);
+                digest.update(content.as_bytes());
+                for source in &source_message_ids {
+                    digest.update([1]);
+                    digest.update(source.as_bytes());
+                }
+                for revision in &challenged_revision_ids {
+                    digest.update([2]);
+                    digest.update(revision.as_bytes());
+                }
+                for revision in &used_revision_ids {
+                    digest.update([3]);
+                    digest.update(revision.as_bytes());
+                }
+                let submitted = self
+                    .continuity
+                    .submit_feedback(SubmitFeedbackRequest {
+                        namespace: self.continuity.pcp_scope().to_owned(),
+                        kind,
+                        authority,
+                        payload: PagePayload {
+                            media_type: "text/markdown".to_owned(),
+                            content,
+                        },
+                        observed_at: None,
+                        source_refs,
+                        challenged_revision_ids,
+                        used_revision_ids,
+                        response_ref: None,
+                        external_event_id: Some(format!(
+                            "symbiont-feedback:{:x}",
+                            digest.finalize()
+                        )),
+                    })
+                    .await?;
+                json!({
+                    "feedbackPageId": submitted.feedback_page_id,
+                    "feedbackRevisionId": submitted.feedback_revision_id,
+                    "created": submitted.created,
+                    "challengedRevisionIds": submitted.challenged_revision_ids,
+                })
+            }
             "revise_page" => {
                 let revised = self
                     .continuity
@@ -2487,6 +2612,15 @@ fn read_view_projections(view: &str) -> Result<Vec<Projection>> {
 
 fn parse_validity_standing(value: &str) -> Result<ValidityStanding> {
     ValidityStanding::parse(value).with_context(|| format!("unknown validity standing: {value}"))
+}
+
+fn parse_feedback_kind(value: &str) -> Result<FeedbackKind> {
+    FeedbackKind::parse(value).with_context(|| format!("unknown PCP feedback kind: {value}"))
+}
+
+fn parse_feedback_authority(value: &str) -> Result<FeedbackAuthority> {
+    FeedbackAuthority::parse(value)
+        .with_context(|| format!("unknown PCP feedback authority: {value}"))
 }
 
 fn normalize_arguments(arguments: Option<&Value>) -> Value {

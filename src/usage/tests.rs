@@ -320,6 +320,47 @@ async fn reflection_outreach_counts_as_an_attention_interruption_not_exploration
 }
 
 #[tokio::test]
+async fn reflection_budget_excludes_runs_before_the_requested_day() {
+    let nonce = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_nanos();
+    let path = std::env::temp_dir().join(format!("symbiont-reflection-day-usage-{nonce}.sqlite3"));
+    let store = UsageStore::open(path.clone()).await.unwrap();
+    let mut old = autonomous_invocation(
+        "old-reflection",
+        None,
+        "reflection",
+        "2025-12-31T00:00:00Z",
+        "2025-12-31T00:01:00Z",
+        900,
+        false,
+        Vec::new(),
+        Vec::new(),
+    );
+    old.origin = "reflection".to_owned();
+    let mut current = autonomous_invocation(
+        "current-reflection",
+        None,
+        "reflection",
+        "2026-01-01T01:00:00Z",
+        "2026-01-01T01:01:00Z",
+        42,
+        false,
+        Vec::new(),
+        Vec::new(),
+    );
+    current.origin = "reflection".to_owned();
+    store.record_all(&[old, current]).await.unwrap();
+
+    let headline = store.headline("2026-01-01T00:00:00Z").await.unwrap();
+    assert_eq!(headline.total_tokens, 942);
+    assert_eq!(headline.reflection_tokens_today, 42);
+
+    std::fs::remove_file(path).unwrap();
+}
+
+#[tokio::test]
 async fn prunes_expired_details_without_losing_usage_history() {
     let nonce = SystemTime::now()
         .duration_since(UNIX_EPOCH)

@@ -2833,6 +2833,7 @@ fn activity_label(item: Option<&Value>) -> Option<String> {
                     "read_pages" => "正在读取长期上下文",
                     "write_summary" => "正在建立上下文索引",
                     "write_page" => "正在整理长期上下文",
+                    "submit_feedback" => "正在记录长期上下文修正",
                     "revise_page" => "正在更新长期上下文",
                     "consolidate_pages" => "正在收敛重复上下文",
                     "relate_pages" => "正在建立上下文关系",

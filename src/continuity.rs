@@ -10,13 +10,14 @@ use chrono::{SecondsFormat, Utc};
 use pcp_client::EmbeddedPcpClient;
 use pcp_client::{DurablePageInventoryItem, PcpTenantApi};
 use pcp_core::{
-    AccessPrincipal, AccessPrincipalType, AccessSession, Actor, ActorType,
-    AssessPageValidityRequest, BrowseIndexOrder, CreateScopeRequest, IngestPageRequest,
-    InitialRelation, LifecycleStatus, LinkPagesRequest, PageMutability, PagePayload, Projection,
-    ProvenanceEvent, QueryContextRequest, QueryContextResponse, ReadPage, ReadPagesRequest,
-    Relation, RevisePageRequest, Scope, SearchFilters, SearchMode, SearchPagesRequest,
-    SearchResult, SourceRef, SourceSpan, ValidityStanding, WritePageRequest, WriteResult,
-    WriteSummaryRequest, WriteSummaryResult, WriteValidityResult,
+    AccessPermission, AccessPrincipal, AccessPrincipalType, AccessSession, Actor, ActorType,
+    AssessPageValidityRequest, BrowseIndexOrder, CreateScopeRequest, FeedbackSubmission,
+    IngestPageRequest, InitialRelation, LifecycleStatus, LinkPagesRequest, PageMutability,
+    PagePayload, Projection, ProvenanceEvent, QueryContextRequest, QueryContextResponse, ReadPage,
+    ReadPagesRequest, Relation, RevisePageRequest, Scope, SearchFilters, SearchMode,
+    SearchPagesRequest, SearchResult, SourceRef, SourceSpan, SubmitFeedbackRequest,
+    ValidityStanding, WritePageRequest, WriteResult, WriteSummaryRequest, WriteSummaryResult,
+    WriteValidityResult,
 };
 #[cfg(test)]
 use pcp_store::PcpStore;
@@ -43,8 +44,10 @@ use crate::{
     working_context::{WORKING_CONTEXT_SCAN_MESSAGES, WorkingContext},
 };
 
+mod compound;
 mod transcript_source;
 
+pub(crate) use compound::CompoundContext;
 pub(crate) use transcript_source::TranscriptSourceResolution;
 
 const USER_SCOPE_LABEL: &str = "User context";
@@ -148,23 +151,43 @@ impl SourceSequence {
 #[derive(Clone, Debug)]
 pub struct ScopePolicy {
     pub namespace: String,
+    readable_namespaces: Vec<String>,
 }
 
 impl ScopePolicy {
     fn for_owner(_owner_id: &str) -> Self {
         Self {
             namespace: PCP_NAMESPACE.to_owned(),
+            readable_namespaces: vec![PCP_NAMESPACE.to_owned()],
         }
     }
 
+    fn for_access(access: &AccessSession) -> Result<Self> {
+        anyhow::ensure!(
+            access.allows(PCP_NAMESPACE, AccessPermission::Search)
+                && access.allows(PCP_NAMESPACE, AccessPermission::ReadSummary)
+                && access.allows(PCP_NAMESPACE, AccessPermission::Ingest),
+            "PCP session does not grant the required Symbiont Scope access"
+        );
+        let mut readable_namespaces = access
+            .scopes_with_permissions(&[AccessPermission::Search, AccessPermission::ReadSummary]);
+        readable_namespaces.sort();
+        readable_namespaces.dedup();
+        Ok(Self {
+            namespace: PCP_NAMESPACE.to_owned(),
+            readable_namespaces,
+        })
+    }
+
     pub fn all(&self) -> Vec<String> {
-        vec![self.namespace.clone()]
+        self.readable_namespaces.clone()
     }
 }
 
 pub struct ContinuityHost {
     store: Arc<dyn PcpTenantApi>,
     transcript: Arc<TranscriptStore>,
+    transcript_recall: TranscriptRecall,
     scopes: ScopePolicy,
     source_sequence: SourceSequence,
     orientation: RwLock<Option<WriteResult>>,
@@ -333,7 +356,14 @@ impl ContinuityHost {
         store: Arc<dyn PcpTenantApi>,
         transcript: Arc<TranscriptStore>,
     ) -> Result<Self> {
-        Self::open_with_sequence(store, transcript, SourceSequence::in_memory()).await
+        let transcript_recall = TranscriptRecall::new(Arc::clone(&transcript));
+        Self::open_with_sequence(
+            store,
+            transcript,
+            transcript_recall,
+            SourceSequence::in_memory(),
+        )
+        .await
     }
 
     pub async fn open_at(
@@ -341,9 +371,27 @@ impl ContinuityHost {
         transcript: Arc<TranscriptStore>,
         sequence_path: PathBuf,
     ) -> Result<Self> {
+        let transcript_recall = TranscriptRecall::new(Arc::clone(&transcript));
         Self::open_with_sequence(
             store,
             transcript,
+            transcript_recall,
+            SourceSequence::open(sequence_path).await?,
+        )
+        .await
+    }
+
+    pub(crate) async fn open_at_with_infer(
+        store: Arc<dyn PcpTenantApi>,
+        transcript: Arc<TranscriptStore>,
+        sequence_path: PathBuf,
+        runtime: Arc<crate::infer_runtime::InferRuntimeAccess>,
+    ) -> Result<Self> {
+        let transcript_recall = TranscriptRecall::with_infer(Arc::clone(&transcript), runtime);
+        Self::open_with_sequence(
+            store,
+            transcript,
+            transcript_recall,
             SourceSequence::open(sequence_path).await?,
         )
         .await
@@ -352,13 +400,14 @@ impl ContinuityHost {
     async fn open_with_sequence(
         store: Arc<dyn PcpTenantApi>,
         transcript: Arc<TranscriptStore>,
+        transcript_recall: TranscriptRecall,
         source_sequence: SourceSequence,
     ) -> Result<Self> {
-        let identity_id = store.identity_id().to_owned();
-        let scopes = ScopePolicy::for_owner(&identity_id);
+        let scopes = ScopePolicy::for_access(store.access())?;
         Ok(Self {
             store,
             transcript,
+            transcript_recall,
             scopes,
             source_sequence,
             orientation: RwLock::new(None),
@@ -440,13 +489,16 @@ impl ContinuityHost {
             .map(|message| message.page.revision_id.as_str())
             .unwrap_or("none");
         let mut seed = format!(
-            "PCP boundary: the local transcript is authoritative for chat history. `{}` contains \
-             selected durable source material for recall, not every turn and not a replayable chat \
-             log. Current local message: `{current_revision}`; orientation: `{orientation}`; \
-             latest checkpoint: `{checkpoint}`. Search then selectively read PCP material before \
-             relying on it or asking the user to repeat it. Symbiont decides autonomously whether \
-             durable information is worth recording into this one Scope.",
-            self.scopes.namespace
+            "PCP compound boundary: the Host-local transcript is the authoritative raw Source Page \
+             plane for chat history. `{}` is Symbiont's writable durable Scope; the approved \
+             read-only cross-Host Scope set is [{}]. PCP contains retained material, not every turn \
+             and not a replayable chat log. Current local message: `{current_revision}`; \
+             orientation: `{orientation}`; latest checkpoint: `{checkpoint}`. Prefer the \
+             automatically assembled compound context, then selectively expand PCP sources before \
+             relying on compressed wording or asking the user to repeat it. Symbiont decides \
+             autonomously whether information is worth promoting into its durable Scope.",
+            self.scopes.namespace,
+            self.scopes.all().join(", ")
         );
         if let Some(attachments) = current
             .map(|message| &message.attachment_revision_ids)
@@ -906,11 +958,15 @@ impl ContinuityHost {
             .by_ids(&unique)
             .await?
             .into_iter()
-            .filter_map(|entry| entry.revision_id)
-            .collect::<HashSet<_>>();
+            .filter_map(|entry| {
+                entry
+                    .revision_id
+                    .map(|revision_id| (revision_id, entry.content))
+            })
+            .collect::<HashMap<_, _>>();
         let missing = unique
             .iter()
-            .filter(|id| !found.contains(*id))
+            .filter(|id| !found.contains_key(*id))
             .cloned()
             .collect::<Vec<_>>();
         anyhow::ensure!(
@@ -918,13 +974,16 @@ impl ContinuityHost {
             "transcript source messages were not found: {}",
             missing.join(", ")
         );
+        let source_store_id = self.transcript.source_store_id();
         Ok(unique
             .into_iter()
             .map(|message_id| SourceRef {
                 provider_id: "symbiont:transcript".to_owned(),
-                locator: format!("message/{message_id}"),
+                locator: format!("store/{source_store_id}/message/{message_id}"),
                 media_type: Some("text/markdown".to_owned()),
-                content_digest: None,
+                content_digest: found
+                    .get(&message_id)
+                    .map(|content| format!("sha256:{:x}", Sha256::digest(content.as_bytes()))),
             })
             .collect())
     }
@@ -951,9 +1010,19 @@ impl ContinuityHost {
         query: &str,
         options: TranscriptSearchOptions,
     ) -> Result<TranscriptSearchResult> {
-        TranscriptRecall::new(Arc::clone(&self.transcript))
-            .search(query, options)
-            .await
+        self.transcript_recall.search(query, options).await
+    }
+
+    pub(crate) async fn backfill_transcript_semantic_index(&self) -> Result<usize> {
+        self.transcript_recall.backfill_semantic_index().await
+    }
+
+    pub(crate) async fn compound_context(
+        &self,
+        query: &str,
+        excluded_local_revision_ids: &[String],
+    ) -> Result<CompoundContext> {
+        compound::assemble(self, query, excluded_local_revision_ids).await
     }
 
     pub async fn verify_context_source_ids(&self, source_ids: &[String]) -> Result<()> {
@@ -1193,6 +1262,14 @@ impl ContinuityHost {
     ) -> Result<QueryContextResponse> {
         request.scopes = self.resolve_scopes(&request.scopes)?;
         self.store.semantic_search(request).await
+    }
+
+    pub async fn submit_feedback(
+        &self,
+        mut request: SubmitFeedbackRequest,
+    ) -> Result<FeedbackSubmission> {
+        request.namespace = self.scopes.namespace.clone();
+        self.store.submit_feedback(request).await
     }
 
     pub async fn match_intent(

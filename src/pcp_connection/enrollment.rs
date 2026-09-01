@@ -64,6 +64,7 @@ struct SelectedEnrollment {
 #[serde(default, deny_unknown_fields)]
 struct EnrollmentState {
     credential: String,
+    intent_fingerprint: Option<String>,
     request_id: Option<String>,
     registration_id: Option<String>,
     service_instance_id: Option<String>,
@@ -102,6 +103,7 @@ struct EnrollmentIntent {
     principal_type: AccessPrincipalType,
     display_name: &'static str,
     mode: RequestedAccessMode,
+    read_all_scopes: bool,
 }
 
 impl EnrollmentIntent {
@@ -111,6 +113,7 @@ impl EnrollmentIntent {
             principal_type: AccessPrincipalType::Host,
             display_name: HOST_DISPLAY_NAME,
             mode: RequestedAccessMode::Contribute,
+            read_all_scopes: true,
         }
     }
 
@@ -120,6 +123,7 @@ impl EnrollmentIntent {
             principal_type: AccessPrincipalType::Service,
             display_name: REPAIR_DISPLAY_NAME,
             mode: RequestedAccessMode::Repair,
+            read_all_scopes: false,
         }
     }
 
@@ -137,8 +141,27 @@ impl EnrollmentIntent {
         RequestedAccess {
             mode: self.mode.clone(),
             scopes: vec![PCP_NAMESPACE.to_owned()],
+            read_all_scopes: self.read_all_scopes,
             allow_cross_scope_derivation: false,
         }
+    }
+
+    fn fingerprint(&self) -> String {
+        format!(
+            "{}|{}|{}|read_all={}|cross_scope=false",
+            self.principal_type.as_str(),
+            self.principal_id,
+            match self.mode {
+                RequestedAccessMode::Observe => "observe",
+                RequestedAccessMode::Read => "read",
+                RequestedAccessMode::Audit => "audit",
+                RequestedAccessMode::Contribute => "contribute",
+                RequestedAccessMode::Write => "write",
+                RequestedAccessMode::Repair => "repair",
+                RequestedAccessMode::Admin => "admin",
+            },
+            self.read_all_scopes
+        )
     }
 }
 
@@ -176,7 +199,13 @@ impl EnrollmentManager {
         state_path: PathBuf,
         intent: EnrollmentIntent,
     ) -> Result<Self> {
-        let state = load_state(&state_path).await?;
+        let mut state = load_state(&state_path).await?;
+        let fingerprint = intent.fingerprint();
+        if state.intent_fingerprint.as_deref() != Some(&fingerprint) {
+            clear_authorization_state(&mut state);
+            state.intent_fingerprint = Some(fingerprint);
+            persist_state(&state_path, &state).await?;
+        }
         Ok(Self {
             runtime_root,
             state_path,
@@ -353,12 +382,7 @@ impl EnrollmentManager {
             // replacement must never inherit a registration approved for the
             // previous Identity, but the locally generated enrollment
             // credential remains the same owner-only secret.
-            state.request_id = None;
-            state.registration_id = None;
-            state.generation_registration_id = None;
-            state.approved_generation = None;
-            state.reopened_after_generation_change = false;
-            state.rejected = false;
+            clear_authorization_state(&mut state);
         }
         state.service_instance_id = Some(instance_id.to_owned());
         let snapshot = state.clone();
@@ -393,16 +417,20 @@ impl EnrollmentManager {
 
     async fn clear_registration(&self) -> Result<()> {
         let mut state = self.state.lock().await;
-        state.registration_id = None;
-        state.request_id = None;
-        state.generation_registration_id = None;
-        state.approved_generation = None;
-        state.reopened_after_generation_change = false;
-        state.rejected = false;
+        clear_authorization_state(&mut state);
         let snapshot = state.clone();
         drop(state);
         persist_state(&self.state_path, &snapshot).await
     }
+}
+
+fn clear_authorization_state(state: &mut EnrollmentState) {
+    state.registration_id = None;
+    state.request_id = None;
+    state.generation_registration_id = None;
+    state.approved_generation = None;
+    state.reopened_after_generation_change = false;
+    state.rejected = false;
 }
 
 fn client_claim() -> EnrollmentClientClaim {
@@ -452,7 +480,34 @@ fn session_matches_intent(
         scopes,
         requested.allow_cross_scope_derivation,
     );
-    session.access == expected
+    if session.access.principal != expected.principal
+        || session.access.session_id != expected.session_id
+    {
+        return false;
+    }
+    let expected_primary = expected.grants.first();
+    if expected_primary
+        .is_none_or(|primary| !session.access.grants.iter().any(|grant| grant == primary))
+    {
+        return false;
+    }
+    if !requested.read_all_scopes {
+        return session.access == expected;
+    }
+    let read_permissions = AccessMode::Read
+        .session(
+            session.access.principal.clone(),
+            session.access.session_id.clone(),
+            vec!["read-scope".to_owned()],
+            false,
+        )
+        .grants
+        .remove(0)
+        .permissions;
+    session.access.grants.iter().all(|grant| {
+        expected.grants.iter().any(|primary| primary == grant)
+            || grant.permissions == read_permissions
+    })
 }
 
 async fn validate_active_session(
@@ -928,8 +983,8 @@ fn is_not_found(error: &anyhow::Error) -> bool {
 mod v08_tests {
     use super::*;
     use pcp_core::{
-        IngestPageRequest, PagePayload, Projection, SearchFilters, SearchMode, SearchPagesRequest,
-        SearchTermMatch, SourceSpan,
+        AccessPermission, IngestPageRequest, PagePayload, Projection, ScopeGrant, SearchFilters,
+        SearchMode, SearchPagesRequest, SearchTermMatch, SourceSpan,
     };
 
     #[test]
@@ -937,6 +992,7 @@ mod v08_tests {
         let request = requested_access();
         assert_eq!(request.mode, RequestedAccessMode::Contribute);
         assert_eq!(request.scopes, vec![PCP_NAMESPACE.to_owned()]);
+        assert!(request.read_all_scopes);
         assert!(!request.allow_cross_scope_derivation);
     }
 
@@ -947,10 +1003,98 @@ mod v08_tests {
         let claim = intent.client_claim();
         assert_eq!(request.mode, RequestedAccessMode::Repair);
         assert_eq!(request.scopes, vec![PCP_NAMESPACE.to_owned()]);
+        assert!(!request.read_all_scopes);
         assert!(!request.allow_cross_scope_derivation);
         assert_eq!(claim.principal.principal_id, "service:symbiont-pcp-repair");
         assert_eq!(claim.principal.principal_type, AccessPrincipalType::Service);
         assert_ne!(claim, client_claim());
+    }
+
+    #[test]
+    fn tenant_session_accepts_only_read_only_cross_host_grants() {
+        let intent = EnrollmentIntent::tenant();
+        let service = EnrollmentServiceIdentity {
+            kind: "pcp".to_owned(),
+            instance_id: "idn_runtime".to_owned(),
+            generation: "proc_generation".to_owned(),
+        };
+        let principal = pcp_core::AccessPrincipal {
+            principal_id: HOST_PRINCIPAL_ID.to_owned(),
+            principal_type: AccessPrincipalType::Host,
+            display_name: Some(HOST_DISPLAY_NAME.to_owned()),
+        };
+        let mut access = AccessMode::Contribute.session(
+            principal,
+            "ses_compound",
+            vec![PCP_NAMESPACE.to_owned()],
+            false,
+        );
+        access.grants.push(ScopeGrant {
+            namespace: "drive".to_owned(),
+            permissions: vec![
+                AccessPermission::ListScopes,
+                AccessPermission::Search,
+                AccessPermission::ReadSummary,
+                AccessPermission::ReadDetail,
+            ],
+        });
+        let session = EnrollmentSession {
+            registration_id: "reg_compound".to_owned(),
+            service: service.clone(),
+            binding: UNIX_SOCKET_BINDING.to_owned(),
+            endpoint: "sockets/private.sock".to_owned(),
+            access: access.clone(),
+        };
+        assert!(session_matches_intent(&intent, &service, &session));
+
+        let mut overprivileged = session;
+        overprivileged.access.grants[1]
+            .permissions
+            .push(AccessPermission::Ingest);
+        assert!(!session_matches_intent(&intent, &service, &overprivileged));
+    }
+
+    #[tokio::test]
+    async fn changed_access_intent_requires_a_fresh_approval() {
+        let temporary = tempfile::tempdir().expect("temporary directory");
+        let state_path = temporary.path().join("client.json");
+        let mut old_intent = EnrollmentIntent::tenant();
+        old_intent.read_all_scopes = false;
+        let old_manager = EnrollmentManager::open_at_with_intent(
+            temporary.path().to_owned(),
+            state_path.clone(),
+            old_intent,
+        )
+        .await
+        .expect("open old enrollment intent");
+        {
+            let mut state = old_manager.state.lock().await;
+            state.credential = "ab".repeat(32);
+            state.service_instance_id = Some("idn_same".to_owned());
+            state.registration_id = Some("reg_old".to_owned());
+            state.request_id = Some("req_old".to_owned());
+            state.approved_generation = Some("proc_old".to_owned());
+            state.generation_registration_id = Some("reg_old".to_owned());
+            persist_state(&state_path, &state)
+                .await
+                .expect("persist old approved intent");
+        }
+        drop(old_manager);
+
+        let manager = EnrollmentManager::open_at(temporary.path().to_owned(), state_path)
+            .await
+            .expect("open new enrollment intent");
+        let state = manager.state.lock().await;
+        assert_eq!(state.credential, "ab".repeat(32));
+        assert_eq!(state.service_instance_id.as_deref(), Some("idn_same"));
+        assert_eq!(
+            state.intent_fingerprint.as_deref(),
+            Some(EnrollmentIntent::tenant().fingerprint().as_str())
+        );
+        assert!(state.registration_id.is_none());
+        assert!(state.request_id.is_none());
+        assert!(state.approved_generation.is_none());
+        assert!(state.generation_registration_id.is_none());
     }
 
     #[tokio::test]

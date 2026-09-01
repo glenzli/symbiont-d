@@ -132,7 +132,25 @@ fn repair_math_expression(expression: &str) -> String {
                 .get(index + 2)
                 .map_or(true, |next| next.is_whitespace())
     });
-    if !has_duplicate_escape && !has_spaced_escaped_equal {
+    let has_escaped_script_bang = (0..characters.len()).any(|index| {
+        matches!(characters[index], '_' | '^')
+            && characters.get(index + 1) == Some(&'\\')
+            && characters.get(index + 2) == Some(&'!')
+    });
+    let has_escaped_bracket = (0..characters.len()).any(|index| {
+        characters[index] == '\\'
+            && characters
+                .get(index + 1)
+                .is_some_and(|next| matches!(next, '[' | ']'))
+    });
+    let has_escaped_numeric_comparison = (0..characters.len())
+        .any(|index| escaped_greater_is_numeric_comparison(&characters, index));
+    if !has_duplicate_escape
+        && !has_spaced_escaped_equal
+        && !has_escaped_script_bang
+        && !has_escaped_bracket
+        && !has_escaped_numeric_comparison
+    {
         return expression.to_owned();
     }
 
@@ -165,10 +183,46 @@ fn repair_math_expression(expression: &str) -> String {
             index += 2;
             continue;
         }
+        if matches!(characters[index], '_' | '^')
+            && characters.get(index + 1) == Some(&'\\')
+            && characters.get(index + 2) == Some(&'!')
+        {
+            output.push(characters[index]);
+            output.push('!');
+            index += 3;
+            continue;
+        }
+        if characters[index] == '\\'
+            && let Some(bracket @ ('[' | ']')) = characters.get(index + 1).copied()
+        {
+            output.push(bracket);
+            index += 2;
+            continue;
+        }
+        if escaped_greater_is_numeric_comparison(&characters, index) {
+            output.push('>');
+            index += 2;
+            continue;
+        }
         output.push(characters[index]);
         index += 1;
     }
     output
+}
+
+fn escaped_greater_is_numeric_comparison(characters: &[char], index: usize) -> bool {
+    if characters.get(index) != Some(&'\\') || characters.get(index + 1) != Some(&'>') {
+        return false;
+    }
+    let Some(previous) = index.checked_sub(1).and_then(|index| characters.get(index)) else {
+        return false;
+    };
+    let Some(next) = characters.get(index + 2) else {
+        return false;
+    };
+    let previous_is_operand = previous.is_ascii_alphanumeric() || matches!(previous, ')' | ']');
+    let next_is_operand = next.is_ascii_alphanumeric() || matches!(next, '(' | '[');
+    previous_is_operand && next_is_operand && (previous.is_ascii_digit() || next.is_ascii_digit())
 }
 
 fn duplicate_tex_escape_run(characters: &[char]) -> Option<usize> {
@@ -467,6 +521,22 @@ mod tests {
         assert_eq!(normalize_external_markdown(value), expected);
         assert_eq!(normalize_external_markdown(odd_layer), expected);
         assert_eq!(normalize_external_markdown(expected), expected);
+    }
+
+    #[test]
+    fn repairs_markdown_punctuation_escapes_that_break_or_change_tex() {
+        let value = r"六大运算 $f^*, f_*, f_\!, f^\!, \otimes^\mathbb{L}, \mathcal{R}\mathcal{H}om$；特征 $p\>0$；局域域 $k\[\[t\]\]$。";
+        let expected = r"六大运算 $f^*, f_*, f_!, f^!, \otimes^\mathbb{L}, \mathcal{R}\mathcal{H}om$；特征 $p>0$；局域域 $k[[t]]$。";
+
+        assert_eq!(normalize_external_markdown(value), expected);
+        assert_eq!(normalize_external_markdown(expected), expected);
+    }
+
+    #[test]
+    fn preserves_valid_tex_spacing_and_literal_punctuation() {
+        let value =
+            r"保留间距 $\int\! f(x)\,dx$、字面下划线 $\mathrm{file\_name}$ 与旧式间距 $a\>b$。";
+        assert_eq!(normalize_external_markdown(value), value);
     }
 
     #[test]

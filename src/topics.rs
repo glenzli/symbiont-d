@@ -1,6 +1,7 @@
-use std::sync::Arc;
+use std::{collections::HashMap, sync::Arc};
 
 use anyhow::{Context, Result};
+use chrono::{DateTime, Duration};
 use serde::{Deserialize, Serialize};
 
 use crate::{
@@ -11,6 +12,49 @@ use crate::{
 
 const MAX_TOPICS: usize = 80;
 const MAX_TOPIC_MESSAGES: usize = 200;
+const TOPIC_VISIT_GAP_HOURS: i64 = 6;
+const SUSTAINED_USER_TURNS: usize = 3;
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) struct TopicAdmissionEvidence {
+    pub user_turns: usize,
+    pub distinct_visits: usize,
+}
+
+impl TopicAdmissionEvidence {
+    pub(crate) fn from_messages<'a>(messages: impl IntoIterator<Item = &'a MemoryEntry>) -> Self {
+        let mut user_times = Vec::new();
+        let mut user_turns = 0;
+        for message in messages {
+            if message.role != MemoryRole::User {
+                continue;
+            }
+            user_turns += 1;
+            if let Ok(at) = DateTime::parse_from_rfc3339(&message.at) {
+                user_times.push(at);
+            }
+        }
+        user_times.sort();
+        let mut distinct_visits = usize::from(user_turns > 0);
+        for pair in user_times.windows(2) {
+            if pair[1].signed_duration_since(pair[0]) > Duration::hours(TOPIC_VISIT_GAP_HOURS) {
+                distinct_visits += 1;
+            }
+        }
+        Self {
+            user_turns,
+            distinct_visits,
+        }
+    }
+
+    pub(crate) fn qualifies(self) -> bool {
+        self.user_turns >= SUSTAINED_USER_TURNS || self.user_turns >= 2 && self.distinct_visits >= 2
+    }
+
+    pub(crate) fn requirement() -> &'static str {
+        "a new Topic requires either three user-authored turns or two user-authored mentions in separate conversation visits; keep one-off discussion local until it recurs"
+    }
+}
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -65,12 +109,42 @@ impl TopicService {
 
     pub async fn index(&self) -> Result<TopicIndex> {
         let topics = self.reflection.episodes(MAX_TOPICS).await?;
-        let counts = self.reflection.episode_message_counts().await?;
+        let topic_ids = topics
+            .iter()
+            .map(|topic| topic.id.clone())
+            .collect::<Vec<_>>();
+        let memberships = self
+            .reflection
+            .episode_revision_ids_by_topic(&topic_ids, MAX_TOPIC_MESSAGES)
+            .await?;
+        let mut member_revision_ids = memberships.values().flatten().cloned().collect::<Vec<_>>();
+        member_revision_ids.sort();
+        member_revision_ids.dedup();
+        let mut member_messages = HashMap::new();
+        for chunk in member_revision_ids.chunks(MAX_TOPIC_MESSAGES) {
+            for message in self.continuity.messages_by_revision_ids(chunk).await? {
+                if let Some(revision_id) = message.revision_id.clone() {
+                    member_messages.insert(revision_id, message);
+                }
+            }
+        }
         Ok(TopicIndex {
             topics: topics
                 .into_iter()
+                .filter(|topic| {
+                    TopicAdmissionEvidence::from_messages(
+                        memberships
+                            .get(&topic.id)
+                            .into_iter()
+                            .flatten()
+                            .filter_map(|revision_id| member_messages.get(revision_id)),
+                    )
+                    .qualifies()
+                })
                 .map(|topic| TopicListItem {
-                    message_count: counts.get(&topic.id).copied().unwrap_or_default(),
+                    message_count: memberships
+                        .get(&topic.id)
+                        .map_or(0, |revision_ids| revision_ids.len() as u64),
                     topic,
                 })
                 .collect(),
@@ -148,12 +222,39 @@ mod tests {
 
     use pcp_sqlite::SqlitePcpStore;
 
-    use super::TopicService;
+    use super::{TopicAdmissionEvidence, TopicService};
     use crate::{
         continuity::{ContinuityHost, MessageLinks},
-        memory::MemoryRole,
+        memory::{MemoryEntry, MemoryRole},
         reflection::{EpisodeInput, EpisodeState, ReflectionStore},
     };
+
+    fn message(role: MemoryRole, at: &str) -> MemoryEntry {
+        MemoryEntry {
+            role,
+            at: at.to_owned(),
+            content: "topic evidence".to_owned(),
+            revision_id: None,
+            parts: Vec::new(),
+            metadata: None,
+            delivery_state: None,
+        }
+    }
+
+    #[test]
+    fn topic_admission_requires_sustained_or_revisited_user_interest() {
+        let first = message(MemoryRole::User, "2026-08-01T10:00:00Z");
+        let adjacent = message(MemoryRole::User, "2026-08-01T10:05:00Z");
+        let sustained = message(MemoryRole::User, "2026-08-01T10:10:00Z");
+        let revisited = message(MemoryRole::User, "2026-08-02T10:00:00Z");
+        let assistant = message(MemoryRole::Assistant, "2026-08-01T10:06:00Z");
+
+        assert!(
+            !TopicAdmissionEvidence::from_messages([&first, &adjacent, &assistant]).qualifies()
+        );
+        assert!(TopicAdmissionEvidence::from_messages([&first, &adjacent, &sustained]).qualifies());
+        assert!(TopicAdmissionEvidence::from_messages([&first, &revisited]).qualifies());
+    }
 
     #[tokio::test]
     async fn reconstructs_a_topic_from_exact_conversation_revisions() {
@@ -211,6 +312,27 @@ mod tests {
             .record_message(&assistant.entry, Some(&user.page.revision_id), false, &[])
             .await
             .expect("reflect assistant message");
+        let mut topic_sources = vec![user.page.revision_id.clone()];
+        for content in [
+            "The user keeps developing this same line.",
+            "A third user turn makes the discussion sustained.",
+        ] {
+            let continuation = continuity
+                .ingest_message(
+                    MemoryRole::User,
+                    content,
+                    Vec::new(),
+                    None,
+                    MessageLinks::default(),
+                )
+                .await
+                .expect("store sustained topic turn");
+            reflection
+                .record_message(&continuation.entry, None, false, &[])
+                .await
+                .expect("reflect sustained topic turn");
+            topic_sources.push(continuation.page.revision_id);
+        }
         continuity
             .ingest_message(
                 MemoryRole::Assistant,
@@ -228,7 +350,7 @@ mod tests {
                 summary: "A compact interpretation points back to the original exchange."
                     .to_owned(),
                 state: EpisodeState::Active,
-                source_revision_ids: vec![user.page.revision_id.clone()],
+                source_revision_ids: topic_sources,
                 parent_episode_ids: Vec::new(),
             })
             .await
@@ -237,17 +359,43 @@ mod tests {
             .attach_episode_messages(&topic.id, &[assistant.page.revision_id.clone()])
             .await
             .expect("attach assistant message");
+        let incidental = continuity
+            .ingest_message(
+                MemoryRole::User,
+                "A one-off question should stay outside the Topic sequence.",
+                Vec::new(),
+                None,
+                MessageLinks::default(),
+            )
+            .await
+            .expect("store incidental turn");
+        reflection
+            .record_message(&incidental.entry, None, false, &[])
+            .await
+            .expect("reflect incidental turn");
+        reflection
+            .upsert_episode(EpisodeInput {
+                id: None,
+                title: "Incidental line".to_owned(),
+                summary: "This legacy low-evidence Episode remains internal.".to_owned(),
+                state: EpisodeState::Forming,
+                source_revision_ids: vec![incidental.page.revision_id],
+                parent_episode_ids: Vec::new(),
+            })
+            .await
+            .expect("create legacy incidental topic");
 
         let service = TopicService::new(Arc::clone(&reflection), Arc::clone(&continuity));
         let index = service.index().await.expect("read topic index");
         assert_eq!(index.topics.len(), 1);
-        assert_eq!(index.topics[0].message_count, 2);
+        assert_eq!(index.topics[0].topic.id, topic.id);
+        assert_eq!(index.topics[0].message_count, 4);
         let detail = service
             .detail(&topic.id)
             .await
             .expect("read topic detail")
             .expect("topic exists");
-        assert_eq!(detail.messages.len(), 2);
+        assert_eq!(detail.messages.len(), 4);
         assert_eq!(detail.messages[0].content, user.entry.content);
         assert_eq!(detail.messages[1].content, assistant.entry.content);
         let context = service
@@ -259,7 +407,7 @@ mod tests {
             .chat_history(&topic.id)
             .await
             .expect("read topic chat history");
-        assert_eq!(history.len(), 2);
+        assert_eq!(history.len(), 4);
         assert!(
             history
                 .iter()
