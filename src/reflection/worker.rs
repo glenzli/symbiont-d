@@ -361,8 +361,10 @@ async fn reflect_once(
         runtime.write().await.phase = ReflectionPhase::TokenLimit;
         return Ok(ReflectState::Idle);
     }
-    let batch = match store.pending_batch(MAX_BATCH_EVENTS).await? {
+    let retention_retry = continuity.retention_retry_bundle().await?;
+    let mut batch = match store.pending_batch(MAX_BATCH_EVENTS).await? {
         Some(batch) => batch,
+        None if retention_retry.is_some() => store.retention_batch(String::new()).await?,
         None if matches!(trigger, ReflectionTrigger::Manual)
             || store.lifecycle_review_due().await? =>
         {
@@ -377,6 +379,10 @@ async fn reflect_once(
             return Ok(ReflectState::Idle);
         }
     };
+    if let Some(retention_retry) = retention_retry {
+        batch.source_bundle.push_str("\n\n");
+        batch.source_bundle.push_str(&retention_retry);
+    }
     let compound_bundle = match compound_recurrence_bundle(&batch.events, continuity).await {
         Ok(bundle) => bundle,
         Err(error) => {

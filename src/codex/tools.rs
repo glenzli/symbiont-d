@@ -964,7 +964,7 @@ impl SymbiontTools {
                     {
                         "type": "function",
                         "name": "write_page",
-                        "description": "Record one self-contained item that Symbiont judges worth retaining. This is autonomous tenant ingest, not user approval and not raw transcript mirroring. Cite local transcript messages as source_message_ids and PCP derivation inputs only as based_on_revision_ids.",
+                        "description": "Propose one durable item. Host retrieves current own-Scope PCP evidence and source dates/roles, then returns review_required with a token. Autonomously review and call again with review; no user approval is needed. Only status=written means stored. Query failures defer locally; covered content must not be rewritten.",
                         "inputSchema": {
                             "type": "object",
                             "properties": {
@@ -979,8 +979,20 @@ impl SymbiontTools {
                                 "based_on_revision_ids": {
                                     "type": "array",
                                     "items": {"type": "string"},
-                                    "maxItems": 100,
+                                    "maxItems": 20,
                                     "description": "Exact PCP Revision IDs actually used to derive this record."
+                                },
+                                "review": {
+                                    "type": "object",
+                                    "properties": {
+                                        "token": {"type": "string"},
+                                        "disposition": {"type": "string", "enum": ["new_subject", "addition", "covered", "defer", "discard"]},
+                                        "rationale": {"type": "string", "description": "Concrete new information or overlap; not merely a shared topic or different wording."},
+                                        "attribution": {"type": "string", "enum": ["user_statement", "assistant_inference", "mixed"]},
+                                        "related_revision_ids": {"type": "array", "items": {"type":"string"}, "maxItems":20}
+                                    },
+                                    "required": ["token","disposition","rationale","attribution","related_revision_ids"],
+                                    "additionalProperties": false
                                 }
                             },
                             "required": ["content"],
@@ -2091,41 +2103,18 @@ impl SymbiontTools {
                 json!({"pages": self.continuity.read(request).await?})
             }
             "write_page" => {
-                let content = required_text(arguments, "content")?;
-                let facets = optional_text(arguments, "kind").map(|kind| json!({"kind": kind}));
-                let source_message_ids = string_array(arguments, "source_message_ids")?;
-                let source_refs = self
-                    .continuity
-                    .transcript_source_refs(&source_message_ids)
-                    .await?;
-                let based_on_revision_ids = string_array(arguments, "based_on_revision_ids")?;
-                let mut digest = Sha256::new();
-                digest.update(content.trim().as_bytes());
-                for source in &source_message_ids {
-                    digest.update([0]);
-                    digest.update(source.as_bytes());
-                }
-                for revision in &based_on_revision_ids {
-                    digest.update([1]);
-                    digest.update(revision.as_bytes());
-                }
-                let written = self
-                    .continuity
-                    .write_model_page(
-                        None,
-                        content,
-                        facets,
-                        source_refs,
-                        based_on_revision_ids,
-                        Vec::new(),
-                        Some(format!("symbiont-record:{:x}", digest.finalize())),
-                    )
-                    .await?;
-                json!({
-                    "pageId": written.page_id,
-                    "revisionId": written.revision_id,
-                    "created": written.created,
-                })
+                let proposal = crate::continuity::retention::Proposal {
+                    content: required_text(arguments, "content")?.to_owned(),
+                    kind: optional_text(arguments, "kind").map(str::to_owned),
+                    source_message_ids: string_array(arguments, "source_message_ids")?,
+                    based_on_revision_ids: string_array(arguments, "based_on_revision_ids")?,
+                };
+                let review = arguments
+                    .get("review")
+                    .cloned()
+                    .map(serde_json::from_value)
+                    .transpose()?;
+                self.continuity.retain_page(proposal, review).await?
             }
             "submit_feedback" => {
                 require_reflection_or_interactive_origin(run_origin, "pcp.submit_feedback")?;

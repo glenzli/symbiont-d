@@ -547,8 +547,8 @@ fn reflection_prompt_preserves_facts_uncertainty_and_profile_boundaries() {
     assert!(prompt.contains("Keep alternative explanations"));
     assert!(prompt.contains("do not force a tree"));
     assert!(prompt.contains("one-off questions"));
-    assert!(prompt.contains("without scores or fixed message thresholds"));
-    assert!(prompt.contains("Adjacency is not Topic evidence"));
+    assert!(prompt.contains("three user-authored turns"));
+    assert!(prompt.contains("Adjacent two-turn discussion is not enough"));
     assert!(prompt.contains("message_revision_ids"));
     assert!(prompt.contains("direct counterparts"));
     assert!(prompt.contains("cite assistant replies only when used"));
@@ -705,7 +705,7 @@ async fn orientation_tool_requires_active_calibration() {
 }
 
 #[tokio::test]
-async fn pcp_tools_write_search_and_read_through_the_dynamic_bridge() {
+async fn pcp_tools_defer_without_query_and_preserve_read_feedback_contracts() {
     let nonce = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .expect("clock")
@@ -809,6 +809,27 @@ async fn pcp_tools_write_search_and_read_through_the_dynamic_bridge() {
         written.response
     );
     let written_json = tool_content_json(&written.response);
+    assert_eq!(written_json["status"], "deferred");
+    assert_eq!(written_json["created"], false);
+    // This fixture has no Runtime query provider. Seed existing library data
+    // directly for the separate read/feedback assertions below; production
+    // tool writes must remain deferred instead of bypassing preflight.
+    let fixture_page = continuity
+        .write_model_page(
+            None,
+            "The PCP bridge remembers a brass telescope.",
+            Some(json!({"kind":"project_fact"})),
+            continuity
+                .transcript_source_refs(&[source_message.page.revision_id.clone()])
+                .await
+                .unwrap(),
+            vec![],
+            vec![],
+            None,
+        )
+        .await
+        .unwrap();
+    let written_json = json!({"pageId":fixture_page.page_id,"revisionId":fixture_page.revision_id});
     let page_id = written_json["pageId"].as_str().expect("written Page ID");
     let revision_id = written_json["revisionId"]
         .as_str()
@@ -829,6 +850,21 @@ async fn pcp_tools_write_search_and_read_through_the_dynamic_bridge() {
         derived.response
     );
     let derived_json = tool_content_json(&derived.response);
+    assert_eq!(derived_json["status"], "deferred");
+    let fixture_derived = continuity
+        .write_model_page(
+            None,
+            "The telescope is worth remembering.",
+            None,
+            vec![],
+            vec![revision_id.to_owned()],
+            vec![],
+            None,
+        )
+        .await
+        .unwrap();
+    let derived_json =
+        json!({"pageId":fixture_derived.page_id,"revisionId":fixture_derived.revision_id});
     let derived_page_id = derived_json["pageId"].as_str().expect("derived Page ID");
     let derived_revision_id = derived_json["revisionId"]
         .as_str()
@@ -984,6 +1020,23 @@ async fn pcp_tools_write_search_and_read_through_the_dynamic_bridge() {
         .await;
     assert_eq!(evidence.response["success"], true, "{}", evidence.response);
     let evidence_json = tool_content_json(&evidence.response);
+    assert_eq!(evidence_json["status"], "deferred");
+    let fixture_evidence = continuity
+        .write_model_page(
+            None,
+            "The user confirms that the observatory telescope is bronze.",
+            Some(json!({"kind":"project_fact"})),
+            continuity
+                .transcript_source_refs(&[correction_message.page.revision_id.clone()])
+                .await
+                .unwrap(),
+            vec![],
+            vec![],
+            None,
+        )
+        .await
+        .unwrap();
+    let evidence_json = json!({"revisionId":fixture_evidence.revision_id});
     let evidence_revision_id = evidence_json["revisionId"].as_str().unwrap();
     let correction_with_evidence = json!({
         "namespace": "pcp",

@@ -359,6 +359,18 @@ impl ReflectionStore {
         .context("join projection lifecycle batch read")?
     }
 
+    pub(crate) async fn retention_batch(&self, source_bundle: String) -> Result<ReflectionBatch> {
+        let path = self.path.clone();
+        let cursor = task::spawn_blocking(move || read_cursor(&open_connection(&path)?)).await??;
+        Ok(ReflectionBatch {
+            from_event_id: cursor,
+            to_event_id: cursor,
+            events: Vec::new(),
+            source_bundle,
+            lifecycle_audit: false,
+        })
+    }
+
     pub async fn projection_health(&self) -> Result<ProjectionHealth> {
         let path = self.path.clone();
         task::spawn_blocking(move || -> Result<ProjectionHealth> {

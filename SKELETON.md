@@ -14,6 +14,7 @@ This is a routing map for maintained source boundaries, not a product roadmap.
 
 - `src/reflection/worker.rs`: conversation-driven topic/hypothesis review, recurrence evidence and autonomous retention decisions. `src/context_maintenance.rs` maintains local working context; neither owns PCP library maintenance.
 - `src/continuity.rs` and `src/codex/tools.rs`: tenant recall, source resolution, autonomous ingest and exact-Revision feedback. Runtime owns PCP semantic projections and governance.
+- `src/continuity/retention.rs`: shared autonomous write preflight, exact-source/current-head review tokens, temporal attribution, and restart-safe deferred proposals/receipts. `GET /api/retention` exposes unsaved proposals; Reflection resumes them only after retrieval recovers.
 - `src/retired_memory.rs`: state-free HTTP 410 responses for retired reconciliation actions. The old UI, worker, Summary loop and episode-index sync are removed. Existing `reconciliation.json` and usage/trace records are not migrated, rewritten or deleted.
 - `src/bin/symbiont-pcp-worker.rs`: legacy command compatibility only; returns protocol `defer` locally without network/model calls. Operators should configure maintenance in PCP Runtime.
 

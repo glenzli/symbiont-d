@@ -9,11 +9,13 @@ use chrono::{SecondsFormat, Utc};
 #[cfg(test)]
 use pcp_client::EmbeddedPcpClient;
 use pcp_client::PcpTenantApi;
+#[cfg(test)]
+use pcp_core::CreateScopeRequest;
 use pcp_core::{
     AccessPermission, AccessPrincipal, AccessPrincipalType, AccessSession, Actor, ActorType,
-    BrowseIndexOrder, CreateScopeRequest, FeedbackSubmission, IngestPageRequest, InitialRelation,
-    PagePayload, Projection, QueryContextRequest, QueryContextResponse, ReadPage, ReadPagesRequest,
-    Scope, SearchFilters, SearchMode, SearchPagesRequest, SearchResult, SourceRef, SourceSpan,
+    BrowseIndexOrder, FeedbackSubmission, IngestPageRequest, InitialRelation, PagePayload,
+    Projection, QueryContextRequest, QueryContextResponse, ReadPage, ReadPagesRequest, Scope,
+    SearchFilters, SearchMode, SearchPagesRequest, SearchResult, SourceRef, SourceSpan,
     SubmitFeedbackRequest, WriteResult,
 };
 #[cfg(test)]
@@ -42,6 +44,7 @@ use crate::{
 };
 
 mod compound;
+pub(crate) mod retention;
 mod transcript_source;
 
 pub(crate) use compound::CompoundContext;
@@ -174,6 +177,7 @@ pub struct ContinuityHost {
     store: Arc<dyn PcpTenantApi>,
     transcript: Arc<TranscriptStore>,
     transcript_recall: TranscriptRecall,
+    retention: retention::RetentionQueue,
     scopes: ScopePolicy,
     source_sequence: SourceSequence,
     orientation: RwLock<Option<WriteResult>>,
@@ -390,10 +394,16 @@ impl ContinuityHost {
         source_sequence: SourceSequence,
     ) -> Result<Self> {
         let scopes = ScopePolicy::for_access(store.access())?;
+        let retention = retention::RetentionQueue::open(retention::RetentionQueue::path_for(
+            transcript.path(),
+            store.identity_id(),
+        ))
+        .await?;
         Ok(Self {
             store,
             transcript,
             transcript_recall,
+            retention,
             scopes,
             source_sequence,
             orientation: RwLock::new(None),
@@ -1333,6 +1343,7 @@ impl ContinuityHost {
         Ok(revisions)
     }
 
+    #[cfg(test)]
     pub async fn write_model_page(
         &self,
         namespace: Option<&str>,

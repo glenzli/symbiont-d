@@ -166,6 +166,34 @@ fn is_pcp_recall(step: &ToolTraceStep) -> bool {
 }
 
 fn is_pcp_write(step: &ToolTraceStep) -> bool {
+    if step.namespace == "pcp" && step.tool == "write_page" {
+        if !step.succeeded
+            || step
+                .result
+                .pointer("/_symbiontTrace/deduplicated")
+                .and_then(Value::as_bool)
+                == Some(true)
+        {
+            return false;
+        }
+        // Review packets can be large enough to be truncated in old traces;
+        // absence of a readable write receipt must not count as a stored Page.
+        if let Some(text) = step
+            .result
+            .pointer("/contentItems/0/text")
+            .and_then(Value::as_str)
+        {
+            let Ok(receipt) = serde_json::from_str::<Value>(text) else {
+                return false;
+            };
+            return receipt
+                .get("status")
+                .is_none_or(|status| status == "written")
+                && receipt.get("created").and_then(Value::as_bool) != Some(false);
+        }
+        // Historical traces can have only the tool success flag.
+        return true;
+    }
     step.namespace == "pcp"
         && matches!(
             step.tool.as_str(),
@@ -176,6 +204,46 @@ fn is_pcp_write(step: &ToolTraceStep) -> bool {
                 | "consolidate_pages"
                 | "relate_pages"
         )
+}
+
+#[cfg(test)]
+mod retention_counts {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn review_defer_covered_and_reused_receipts_are_not_writes() {
+        let mut step = ToolTraceStep {
+            sequence: 0,
+            namespace: "pcp".to_owned(),
+            tool: "write_page".to_owned(),
+            started_at: String::new(),
+            completed_at: String::new(),
+            duration_ms: 1,
+            succeeded: true,
+            arguments: json!({}),
+            result: json!({}),
+        };
+        for (status, created, expected) in [
+            ("review_required", false, false),
+            ("deferred", false, false),
+            ("covered", false, false),
+            ("discarded", false, false),
+            ("written", false, false),
+            ("written", true, true),
+        ] {
+            step.result = json!({"success":true,"contentItems":[{"text":json!({"status":status,"created":created}).to_string()}]});
+            assert_eq!(is_pcp_write(&step), expected, "{status}");
+        }
+        step.result["_symbiontTrace"] = json!({"deduplicated":true});
+        assert!(!is_pcp_write(&step));
+        step.result = json!({"success":true,"contentItems":[{"text":"truncated review packet"}]});
+        assert!(!is_pcp_write(&step));
+        step.result = json!({"success":true});
+        assert!(is_pcp_write(&step));
+        step.succeeded = false;
+        assert!(!is_pcp_write(&step));
+    }
 }
 
 pub(super) fn prune(transaction: &rusqlite::Transaction<'_>) -> Result<()> {

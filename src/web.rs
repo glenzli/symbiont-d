@@ -777,6 +777,7 @@ pub fn router(state: AppState) -> Router {
         .route("/api/runtime", get(runtime))
         .route("/api/runtime/recover", post(recover_runtime))
         .route("/api/reflection", get(reflection_snapshot))
+        .route("/api/retention", get(retention_snapshot))
         .route("/api/reflection/config", post(update_reflection))
         .route("/api/reflection/run", post(trigger_reflection))
         .route("/api/topics", get(topic_index))
@@ -2127,6 +2128,10 @@ async fn recent_explorations(
         intents: state.exploration.recent_intents(20).await,
         candidates,
     }))
+}
+
+async fn retention_snapshot(State(state): State<AppState>) -> Json<serde_json::Value> {
+    Json(state.continuity.retention_snapshot().await)
 }
 
 async fn redeliver_exploration(
