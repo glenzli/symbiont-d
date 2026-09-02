@@ -6,7 +6,7 @@
 //! preserves both identities so the model can use durable orientation first
 //! and expand exact raw evidence only when it matters.
 
-use std::collections::HashSet;
+use std::{collections::HashSet, time::Instant};
 
 use anyhow::{Context, Result};
 use pcp_core::{QueryContextRequest, QueryContextResponse};
@@ -24,121 +24,26 @@ const DURABLE_CONTEXT_CHARS: u32 = 8_000;
 const DURABLE_RESULT_LIMIT: u32 = 8;
 
 pub(crate) struct CompoundContext {
-    query: String,
-    source_store_id: String,
-    local: Option<TranscriptSearchResult>,
-    durable: Option<QueryContextResponse>,
-    local_available: bool,
-    durable_available: bool,
+    pub(super) query: String,
+    pub(super) source_store_id: String,
+    pub(super) local: Option<TranscriptSearchResult>,
+    pub(super) durable: Option<QueryContextResponse>,
+    pub(super) local_available: bool,
+    pub(super) durable_available: bool,
+    pub(super) audit: crate::context_assembly::RecallAudit,
 }
 
 impl CompoundContext {
-    /// Small, attributed first-pass evidence. Full sources remain addressable;
-    /// selection drops whole records rather than summarizing their meaning.
+    #[cfg(test)]
     pub(crate) fn context(&self) -> crate::context_assembly::ContextBundle {
-        let mut bundle = crate::context_assembly::ContextBundle::default();
-        let status = json!({
-            "query": self.query,
-            "pcp": if self.durable_available { "available" } else { "unavailable_not_a_miss" },
-            "local": if self.local_available { "available" } else { "unavailable" },
-            "pcpAnchors": self.durable.as_ref().map(|result| result.anchor_count),
-            "localSourceRef": {"providerId": "symbiont:transcript", "locatorTemplate": format!("store/{}/message/{{id}}", self.source_store_id)},
-            "promotionCandidate": self.promotion_candidate(),
-            "recurrence": self.local.as_ref().map(|result| json!({
-                "distinctDays": result.recurrence.distinct_day_count,
-                "distinctEpisodes": result.recurrence.distinct_episode_count,
-                "repeatedAcrossTime": result.recurrence.repeated_across_time
-            })),
-        });
-        bundle.include(
-            "symbiont.recall_status",
-            "宿主自动召回执行结果",
-            "区分未命中与不可用；本地寻址格式",
-            status.to_string(),
-        );
-        let mut remaining = 12_000usize;
-        if let Some(durable) = &self.durable {
-            let mut seen = HashSet::new();
-            for entry in &durable.entries {
-                if !seen.insert(&entry.revision_id) {
-                    continue;
-                }
-                let source = format!("symbiont.pcp.{}", entry.revision_id);
-                let value = serde_json::to_string(entry).unwrap_or_default();
-                let chars = value.chars().count();
-                if chars > remaining {
-                    bundle.defer(
-                        &source,
-                        "PCP Runtime",
-                        "召回包预算不足，保留在 PCP，可按 Revision 读取",
-                    );
-                    continue;
-                }
-                remaining -= chars;
-                bundle.include(
-                    &source,
-                    &format!(
-                        "PCP Runtime · Scope {} · Page {}",
-                        entry.namespace, entry.page_id
-                    ),
-                    "本轮查询命中；保留 Revision、Scope、有效性及来源限定",
-                    value,
-                );
-            }
-        }
-        if let Some(local) = &self.local {
-            let mut messages = local
-                .clusters
-                .iter()
-                .flat_map(|cluster| &cluster.messages)
-                .collect::<Vec<_>>();
-            // User-authored anchors first; assistant neighbors are supporting
-            // context, not additional independent evidence about the user.
-            messages.sort_by_key(|message| {
-                (
-                    !message.matched,
-                    !matches!(message.role, crate::memory::MemoryRole::User),
-                )
-            });
-            let mut seen = HashSet::new();
-            for message in messages {
-                if !seen.insert(&message.message_id) {
-                    continue;
-                }
-                let source = format!("symbiont.transcript.{}", message.message_id);
-                let value = json!({"id": message.message_id, "role": message.role, "at": message.occurred_at,
-                    "content": message.content, "truncated": message.truncated, "matched": message.matched}).to_string();
-                let chars = value.chars().count();
-                if chars > remaining {
-                    bundle.defer(
-                        &source,
-                        "本地聊天记录",
-                        "召回包预算不足；用 resolve_source_ref 按消息 ID 读取原文",
-                    );
-                    continue;
-                }
-                remaining -= chars;
-                bundle.include(
-                    &source,
-                    &format!(
-                        "本地聊天记录 · {} · {}",
-                        if matches!(message.role, crate::memory::MemoryRole::User) {
-                            "用户原话"
-                        } else {
-                            "助手输出（非用户陈述）"
-                        },
-                        message.occurred_at
-                    ),
-                    if message.matched {
-                        "本轮查询匹配"
-                    } else {
-                        "匹配消息的相邻语境，不是独立命中"
-                    },
-                    value,
-                );
-            }
-        }
-        bundle
+        super::recall_selection::fallback(self)
+    }
+
+    pub(crate) async fn selected_context(
+        &self,
+        continuity: &ContinuityHost,
+    ) -> crate::context_assembly::ContextBundle {
+        super::recall_selection::select(self, continuity).await
     }
 
     pub(crate) fn prompt(&self) -> String {
@@ -249,8 +154,8 @@ pub(super) async fn assemble(
     let query = bounded_query(query).context("compound context query is empty")?;
     let local_query = query.clone();
     let durable_query = query.clone();
-    let (local, durable) = tokio::join!(
-        continuity.search_transcript(
+    let ((local, local_ms), (durable, durable_ms)) = tokio::join!(
+        timed(continuity.search_transcript(
             &local_query,
             TranscriptSearchOptions {
                 max_clusters: 4,
@@ -260,15 +165,42 @@ pub(super) async fn assemble(
                 context_after: 1,
                 ..TranscriptSearchOptions::default()
             },
-        ),
-        continuity.semantic_search(QueryContextRequest {
+        )),
+        timed(continuity.semantic_search(QueryContextRequest {
             query: durable_query,
             scopes: Vec::new(),
             result_limit: Some(DURABLE_RESULT_LIMIT),
             context_budget_chars: Some(DURABLE_CONTEXT_CHARS),
-        })
+        }))
     );
 
+    let audit = crate::context_assembly::RecallAudit {
+        query: query.clone(),
+        pcp: crate::context_assembly::RetrievalAudit {
+            available: durable.is_ok(),
+            duration_ms: durable_ms,
+            candidates: durable
+                .as_ref()
+                .map(|r| r.entries.len())
+                .unwrap_or_default(),
+        },
+        transcript: crate::context_assembly::RetrievalAudit {
+            available: local.is_ok(),
+            duration_ms: local_ms,
+            candidates: local
+                .as_ref()
+                .map(|r| {
+                    r.clusters
+                        .iter()
+                        .flat_map(|c| &c.messages)
+                        .map(|m| &m.message_id)
+                        .collect::<HashSet<_>>()
+                        .len()
+                })
+                .unwrap_or_default(),
+        },
+        ..Default::default()
+    };
     let excluded = excluded_local_revision_ids
         .iter()
         .cloned()
@@ -299,6 +231,7 @@ pub(super) async fn assemble(
         }
     };
     Ok(CompoundContext {
+        audit,
         query,
         source_store_id: continuity.transcript.source_store_id().to_owned(),
         local_available: local.is_some(),
@@ -306,6 +239,12 @@ pub(super) async fn assemble(
         local,
         durable,
     })
+}
+
+async fn timed<T>(future: impl std::future::Future<Output = T>) -> (T, u64) {
+    let start = Instant::now();
+    let result = future.await;
+    (result, start.elapsed().as_millis() as u64)
 }
 
 fn bounded_query(query: &str) -> Option<String> {
@@ -374,6 +313,7 @@ mod tests {
     #[test]
     fn recurrence_without_a_durable_anchor_is_only_a_promotion_signal() {
         let mut context = CompoundContext {
+            audit: Default::default(),
             query: "反复出现的长期主题".to_owned(),
             source_store_id: "src_0123456789abcdef0123456789abcdef".to_owned(),
             local: Some(TranscriptSearchResult {
@@ -441,6 +381,7 @@ mod tests {
             .unwrap();
         let store_id = host.transcript.source_store_id().to_owned();
         let context = CompoundContext {
+            audit: Default::default(),
             query: "抽象".into(),
             source_store_id: store_id.clone(),
             durable: None,

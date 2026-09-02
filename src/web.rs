@@ -3164,7 +3164,7 @@ async fn run_chat(
             route.context.clone(),
         );
         if let Some(packet) = compound.as_ref() {
-            continuity_context.extend(packet.context());
+            continuity_context.extend(packet.selected_context(&state.continuity).await);
         }
         continuity_context.include(
             "symbiont.bridge",

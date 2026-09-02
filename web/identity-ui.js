@@ -33,6 +33,7 @@ export function initIdentityUi(state) {
   function applyImage(image, fallback, slot) {
     if (!image) return;
     const url = avatar(slot)?.url;
+    image.classList.toggle("symbiont-avatar-art", slot === "symbiont" && !url);
     if (!url && slot === "user") {
       image.hidden = true;
       if (fallback) fallback.hidden = false;
@@ -48,6 +49,7 @@ export function initIdentityUi(state) {
       : null;
     image.onerror = () => {
       if (defaultUrl && !image.src.endsWith(defaultUrl)) {
+        image.classList.add("symbiont-avatar-art");
         image.src = defaultUrl;
         return;
       }

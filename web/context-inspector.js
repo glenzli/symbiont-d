@@ -19,6 +19,27 @@ const labels = {
 const chars = value => Array.from(typeof value === "string" ? value : JSON.stringify(value ?? null)).length;
 const count = value => Number(value || 0).toLocaleString("zh-CN");
 
+export function automaticRecallCounts(context) {
+  const parts = context?.fragments || [];
+  const pcp = parts.filter(p => p.source.startsWith("symbiont.pcp."));
+  const transcript = parts.filter(p => p.source.startsWith("symbiont.transcript.")).length;
+  let references = 0;
+  for (const part of pcp) {
+    try { if (JSON.parse(part.value).detail === "reference") references++; } catch { /* Old plain text is a body, not a fabricated reference. */ }
+  }
+  return {
+    observed: Boolean(context?.recall || parts.some(p => p.source === "symbiont.recall_status") || pcp.length || transcript),
+    pcpBodies: pcp.length - references, pcpReferences: references, transcript,
+  };
+}
+
+export function automaticRecallSummary(trace) {
+  const counts = (trace.runs || []).map(run => automaticRecallCounts(run.context));
+  if (!counts.some(c => c.observed)) return "自动召回未记录";
+  const total = counts.reduce((n, c) => n + c.pcpBodies + c.pcpReferences + c.transcript, 0);
+  return `自动装入 ${total} 条${counts.some(c => !c.observed) ? "（部分运行未记录）" : ""}`;
+}
+
 export function submittedContextExport(context) {
   if (!context.submitted) return null;
   return JSON.stringify({
@@ -26,6 +47,7 @@ export function submittedContextExport(context) {
     ...context.submitted,
     observableNativeHistory: context.nativeThread,
     diagnosticSelectionNotSentToModel: context.selection || [],
+    diagnosticRecallNotSentToModel: context.recall || null,
   }, null, 2);
 }
 
@@ -69,6 +91,27 @@ export function renderContextInspector(context, doc = document) {
   const tools = context.submitted?.threadStart?.dynamicTools;
   stats.textContent = `直接输入文字 ${count(textChars)} 字符 · 应用上下文 ${count(fragmentChars)} 字符 · 线程指令 ${count(chars(context.developerInstructions || ""))} 字符${tools ? ` · 工具定义 JSON ${count(chars(tools))} 字符` : " · 工具定义未记录"}。字符数不等于 tokens。`;
   body.append(stats);
+  const recalled = automaticRecallCounts(context);
+  if (recalled.observed) {
+    const recall = doc.createElement("p");
+    recall.className = "trace-context-notice";
+    recall.textContent = `宿主自动召回实际装入：PCP ${recalled.pcpBodies} 条正文${recalled.pcpReferences ? `＋${recalled.pcpReferences} 条引用` : ""} · 聊天原文 ${recalled.transcript} 条。装入不等于模型采用；与模型主动工具调用分开统计。`;
+    body.append(recall);
+    if (context.recall) {
+      const audit = context.recall;
+      const state = doc.createElement("p");
+      state.className = "trace-context-notice";
+      const retrieval = (label, data) => data ? `${label} ${data.available ? `${data.candidates} 个候选` : "不可用（不是未命中）"} / ${data.durationMs} ms` : `${label} 未记录`;
+      const ranking = audit.ranker === "local_semantic_rerank" ? "本地语义重排" : audit.rankingError?.includes("intent_forbidden") ? "本地重排未授权，词法降级筛选" : "词法降级筛选";
+      state.textContent = `${retrieval("PCP", audit.pcp)} · ${retrieval("聊天", audit.transcript)} · ${ranking} ${audit.rankingDurationMs} ms · 来源元数据读取 ${audit.sourceReadCalls} 次。分数用于筛选，不是事实概率或覆盖证明。`;
+      body.append(state, payload(doc, "自动召回候选与来源覆盖 · 诊断记录，未传入模型", audit));
+    } else {
+      const legacy = doc.createElement("p");
+      legacy.className = "trace-context-notice";
+      legacy.textContent = "旧轨迹只能核对实际装入条目；自动检索次数、耗时和完整候选未记录，不事后推算。";
+      body.append(legacy);
+    }
+  }
   const nativeInfo = doc.createElement("p");
   nativeInfo.className = "trace-context-notice";
   nativeInfo.textContent = `线程 ${native.threadId || "未记录"} · 窗口容量 ${native.modelContextWindow ? count(native.modelContextWindow) + " tokens（不是实际输入量）" : "未报告"} · 最近桥接 ${context.workingContext?.messages?.length || 0} 条${context.workingContext?.truncated ? "（较早部分省略，可检索）" : ""}`;

@@ -77,6 +77,7 @@ async fn records_and_groups_invocations() {
                 working_context: None,
                 developer_instructions: "test instructions".to_owned(),
                 selection: Vec::new(),
+                recall: None,
                 submitted: Some(crate::diagnostics::SubmittedContext {
                     thread_start: json!({"developerInstructions": "test instructions", "dynamicTools": [{"name": "pcp"}]}),
                     turn_start: json!({"input": [{"type": "text", "text": "原文".repeat(60_000)}], "additionalContext": {"symbiont.pcp": {"kind": "application", "value": "PCP is available."}}}),

@@ -44,6 +44,8 @@ use crate::{
 };
 
 mod compound;
+mod recall_selection;
+mod recall_sources;
 pub(crate) mod retention;
 mod transcript_source;
 
@@ -177,6 +179,7 @@ pub struct ContinuityHost {
     store: Arc<dyn PcpTenantApi>,
     transcript: Arc<TranscriptStore>,
     transcript_recall: TranscriptRecall,
+    recall_runtime: Option<Arc<crate::infer_runtime::InferRuntimeAccess>>,
     retention: retention::RetentionQueue,
     scopes: ScopePolicy,
     source_sequence: SourceSequence,
@@ -377,14 +380,17 @@ impl ContinuityHost {
         sequence_path: PathBuf,
         runtime: Arc<crate::infer_runtime::InferRuntimeAccess>,
     ) -> Result<Self> {
-        let transcript_recall = TranscriptRecall::with_infer(Arc::clone(&transcript), runtime);
-        Self::open_with_sequence(
+        let transcript_recall =
+            TranscriptRecall::with_infer(Arc::clone(&transcript), Arc::clone(&runtime));
+        let mut host = Self::open_with_sequence(
             store,
             transcript,
             transcript_recall,
             SourceSequence::open(sequence_path).await?,
         )
-        .await
+        .await?;
+        host.recall_runtime = Some(runtime);
+        Ok(host)
     }
 
     async fn open_with_sequence(
@@ -404,6 +410,7 @@ impl ContinuityHost {
             transcript,
             transcript_recall,
             retention,
+            recall_runtime: None,
             scopes,
             source_sequence,
             orientation: RwLock::new(None),
@@ -484,10 +491,8 @@ impl ContinuityHost {
             .map(|message| message.page.revision_id.as_str())
             .unwrap_or("none");
         let mut seed = format!(
-            "Local transcript message IDs address raw chat, not PCP Revisions; ctxrev IDs also belong to local working state, never pcp.read_pages. \
-             Writable PCP Scope: `{}`. Approved read Scopes: [{}]. Never derive a write across Scopes. \
-             Current local message: `{current_revision}`; orientation PCP Revision: `{orientation}`. \
-             Use supplied recall first; retain useful information autonomously with exact sources.",
+            "Writable PCP Scope: `{}`. Approved read Scopes: [{}]. No cross-Scope derivation. \
+             Current local message (not a PCP Revision): `{current_revision}`. Orientation PCP Revision: `{orientation}`.",
             self.scopes.namespace,
             self.scopes.all().join(", ")
         );

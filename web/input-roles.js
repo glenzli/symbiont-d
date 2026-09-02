@@ -50,6 +50,7 @@ export function applyInputRoleAvatar(element, avatar = "moon-window") {
     element.replaceChildren(image);
   }
   image.hidden = false;
+  image.classList.toggle("symbiont-avatar-art", selected === "symbiont-dissent");
   image.src = `/assets/input-role-avatars/${encodeURIComponent(selected)}.png?v=${INPUT_ROLE_AVATAR_VERSION}`;
 }
 

@@ -9,6 +9,18 @@
     <link rel="stylesheet" href="/styles.css">
   </head>
   <body>
+    <svg class="avatar-filter-definitions" width="0" height="0" aria-hidden="true" focusable="false">
+      <defs>
+        <filter id="symbiont-avatar-midtone" color-interpolation-filters="sRGB">
+          <!-- Lift clay midtones, keeping black eyes, pale highlights and alpha intact. -->
+          <feComponentTransfer>
+            <feFuncR type="table" tableValues="0 .10 .245 .35 .445 .54 .635 .73 .82 .91 1"/>
+            <feFuncG type="table" tableValues="0 .10 .245 .35 .445 .54 .635 .73 .82 .91 1"/>
+            <feFuncB type="table" tableValues="0 .10 .245 .35 .445 .54 .635 .73 .82 .91 1"/>
+          </feComponentTransfer>
+        </filter>
+      </defs>
+    </svg>
     <main class="shell">
       <header class="topbar">
         <div class="identity" aria-label="symbiont-d">
@@ -1198,7 +1210,7 @@
       <article class="message">
         <div class="message-layout">
           <div class="message-avatar" aria-hidden="true">
-            <img class="message-avatar-image" src="/symbiont-avatar-small.png?v=clay-20260828-v1" alt="">
+            <img class="message-avatar-image symbiont-avatar-art" src="/symbiont-avatar-small.png?v=clay-20260828-v1" alt="">
             <span class="message-avatar-fallback" hidden>你</span>
           </div>
           <div class="message-content">

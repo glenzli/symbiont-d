@@ -8,6 +8,40 @@ use crate::diagnostics::ContextFragment;
 pub struct ContextBundle {
     pub fragments: Vec<ContextFragment>,
     pub selection: Vec<ContextSelection>,
+    pub recall: Option<RecallAudit>,
+}
+
+/// Host preparation evidence, never part of additionalContext. Candidate counts
+/// describe retrieval, not model use. Final admission is read from fragments.
+#[derive(Clone, Debug, Default, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RecallAudit {
+    pub query: String,
+    pub pcp: RetrievalAudit,
+    pub transcript: RetrievalAudit,
+    pub ranker: String,
+    pub ranking_error: Option<String>,
+    pub ranking_duration_ms: u64,
+    pub source_read_calls: usize,
+    pub candidates: Vec<RecallCandidateAudit>,
+}
+
+#[derive(Clone, Debug, Default, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RetrievalAudit {
+    pub available: bool,
+    pub duration_ms: u64,
+    pub candidates: usize,
+}
+
+#[derive(Clone, Debug, Default, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RecallCandidateAudit {
+    pub source: String,
+    pub score: Option<f32>,
+    pub source_messages: Vec<String>,
+    pub lineage_complete: bool,
+    pub covered_by: Option<String>,
 }
 
 pub fn audit_fragments(
@@ -130,6 +164,10 @@ impl ContextBundle {
     }
 
     pub fn extend(&mut self, other: Self) {
+        if other.recall.is_some() {
+            assert!(self.recall.is_none(), "duplicate automatic recall audit");
+            self.recall = other.recall;
+        }
         for fragment in &other.fragments {
             assert!(
                 !self

@@ -1,5 +1,5 @@
 import { formatDuration, formatTokens } from "/presentation.js";
-import { renderContextInspector } from "/context-inspector.js";
+import { automaticRecallSummary, renderContextInspector } from "/context-inspector.js";
 
 export function initTraceUi() {
   const dialog = document.querySelector("#trace-dialog");
@@ -46,7 +46,9 @@ export function initTraceUi() {
     const reuseSummary = reusedRecallCount
       ? `，${reusedRecallCount} 次重复请求已复用`
       : "";
-    summary.textContent = `${trace.runs.length} 个模型运行 · ${trace.eventCount} 个可观察阶段 · ${executedRecallCount} 次召回${reuseSummary} · ${writeCount} 次写入`;
+    const sourceReads = (trace.runs || []).flatMap(run => run.steps || []).filter(step =>
+      step.namespace === "symbiont" && step.tool === "resolve_source_ref" && step.succeeded).length;
+    summary.textContent = `${trace.runs.length} 个模型运行 · ${trace.eventCount} 个可观察阶段 · ${automaticRecallSummary(trace)} · 模型追加 PCP 检索 ${executedRecallCount} 次${reuseSummary} · 原文溯源 ${sourceReads} 次 · ${writeCount} 次写入`;
     content.replaceChildren();
 
     const retention = document.createElement("p");
@@ -59,7 +61,7 @@ export function initTraceUi() {
       recall.className = "trace-recall-notice";
       const title = document.createElement("strong");
       const description = document.createElement("span");
-      title.textContent = `PCP 实际召回 ${executedRecallCount} 次`;
+      title.textContent = `模型追加 PCP 检索 ${executedRecallCount} 次`;
       description.textContent = reusedRecallCount
         ? `模型还提交了 ${reusedRecallCount} 次完全相同的请求，Host 直接复用了本轮前次结果；对应步骤已在下方标记。`
         : "模型在本轮主动搜索或读取了长期上下文；对应步骤已在下方高亮。";
@@ -120,13 +122,31 @@ function renderRun(run, index) {
   const timeline = document.createElement("section");
   timeline.className = "trace-timeline";
   const usedToolSteps = new Set();
+  // Group by the host-issued proposal, never by similar text or tool name.
+  const retentionGroups = new Map();
+  for (const step of run.steps) {
+    const proposalId = retentionReceipt(step)?.proposalId;
+    if (typeof proposalId !== "string" || !proposalId) continue;
+    if (!retentionGroups.has(proposalId)) retentionGroups.set(proposalId, []);
+    retentionGroups.get(proposalId).push(step);
+  }
+  const renderedProposals = new Set();
+  function appendStep(step, sequence) {
+    const proposalId = retentionReceipt(step)?.proposalId;
+    if (!retentionGroups.has(proposalId)) {
+      timeline.append(renderTraceStep(step, sequence));
+    } else if (!renderedProposals.has(proposalId)) {
+      renderedProposals.add(proposalId);
+      timeline.append(renderRetention(retentionGroups.get(proposalId), sequence));
+    }
+  }
   for (const event of run.events || []) {
     if (event.kind === "toolCall") {
       const sequence = event.details?.toolSequence;
       const step = run.steps.find((candidate) => candidate.sequence === sequence);
       if (step) {
         usedToolSteps.add(sequence);
-        timeline.append(renderTraceStep(step, event.sequence));
+        appendStep(step, event.sequence);
         continue;
       }
     }
@@ -134,7 +154,7 @@ function renderRun(run, index) {
   }
   for (const step of run.steps) {
     if (!usedToolSteps.has(step.sequence)) {
-      timeline.append(renderTraceStep(step, null));
+      appendStep(step, null);
     }
   }
   if (!timeline.childElementCount) {
@@ -145,6 +165,29 @@ function renderRun(run, index) {
   }
   article.append(timeline);
   return article;
+}
+
+function renderRetention(steps, sequence) {
+  const ordered = [...steps].sort((a, b) => a.sequence - b.sequence);
+  const details = document.createElement("details");
+  details.className = "trace-step trace-retention-process";
+  const summary = document.createElement("summary");
+  const name = document.createElement("span");
+  const timing = document.createElement("span");
+  const written = ordered.some(isPcpWrite);
+  const last = ordered.at(-1);
+  const state = written ? "已写入" : retentionPhase(last);
+  name.textContent = `${sequence === null ? `工具 ${ordered[0].sequence + 1}` : sequence + 1}. PCP 留存 · ${state}`;
+  timing.textContent = `${ordered.length} 个调用步骤`;
+  summary.append(name, timing);
+  const body = document.createElement("div");
+  body.className = "trace-payload";
+  const explanation = document.createElement("p");
+  explanation.textContent = "预检不落库；模型复核后才可能写入。以下保留每次调用的输入、输出和原始顺序。";
+  body.append(explanation, ...ordered.map(step => renderTraceStep(step, null)));
+  details.dataset.pcpAction = written ? "write" : "retention";
+  details.append(summary, body);
+  return details;
 }
 
 function activityLabel(activity) {
@@ -215,10 +258,12 @@ function renderTraceStep(step, eventSequence) {
   const position =
     eventSequence === null ? `工具 ${step.sequence + 1}` : eventSequence + 1;
   const label = document.createElement("span");
-  label.textContent = `${position}. ${step.namespace}.${step.tool}`;
+  const retention = step.namespace === "pcp" && step.tool === "write_page";
+  label.textContent = `${position}. ${retention ? `PCP ${retentionPhase(step)}` : `${step.namespace}.${step.tool}`}`;
+  if (retention) label.title = "pcp.write_page";
   name.append(label);
   if (isPcpRecall(step)) name.append(traceToolBadge("PCP 召回"));
-  else if (isPcpWrite(step)) name.append(traceToolBadge("PCP 写入"));
+  else if (isPcpWrite(step) && !retention) name.append(traceToolBadge("PCP 写入"));
   if (reusedFromSequence !== null) {
     name.append(traceToolBadge(`复用 #${reusedFromSequence + 1}`, "reuse"));
   }
@@ -232,10 +277,19 @@ function renderTraceStep(step, eventSequence) {
   payload.className = "trace-payload";
   payload.append(
     tracePayload("输入", step.arguments),
-    tracePayload("输出", step.result),
+    tracePayload("模型收到的输出", modelToolResult(step.result)),
   );
+  if (step.result?._symbiontTrace) {
+    payload.append(tracePayload("宿主诊断（未发送给模型）", step.result._symbiontTrace));
+  }
   details.append(summary, payload);
   return details;
+}
+
+export function modelToolResult(result) {
+  if (!result || typeof result !== "object" || Array.isArray(result)) return result;
+  const { _symbiontTrace, ...model } = result;
+  return model;
 }
 
 function traceToolBadge(label, variant = "") {
@@ -271,6 +325,14 @@ function deduplicatedFromSequence(step) {
 }
 
 function isPcpWrite(step) {
+  if (step.namespace === "pcp" && step.tool === "write_page") {
+    if (!step.succeeded || step.result?._symbiontTrace?.deduplicated === true || deduplicatedFromSequence(step) !== null) return false;
+    const receipt = retentionReceipt(step);
+    // Same receipt-based rule as the backend. Unreadable evidence is not proof
+    // of a write; only very old traces with no text receipt use legacy success.
+    if (!receipt) return typeof step.result?.contentItems?.[0]?.text !== "string";
+    return (!receipt.status || receipt.status === "written") && receipt.created !== false;
+  }
   return (
     step.namespace === "pcp" &&
     [
@@ -282,6 +344,27 @@ function isPcpWrite(step) {
       "relate_pages",
     ].includes(step.tool)
   );
+}
+
+function retentionReceipt(step) {
+  if (step.namespace !== "pcp" || step.tool !== "write_page") return null;
+  try {
+    const result = JSON.parse(step.result?.contentItems?.[0]?.text);
+    return result && typeof result === "object" && !Array.isArray(result) ? result : null;
+  } catch { return null; }
+}
+
+function retentionPhase(step) {
+  if (!step.succeeded) return "留存调用失败";
+  const receipt = retentionReceipt(step);
+  if (deduplicatedFromSequence(step) !== null || receipt?.reusedReceipt) return "复用已有回执（未再次写入）";
+  return {
+    review_required: "写入预检（未写入）",
+    written: receipt?.created === false ? "已有记录（未新建）" : "已写入",
+    covered: "已有内容覆盖（未写入）",
+    discarded: "仅保留本地聊天",
+    deferred: "暂缓写入",
+  }[receipt?.status] || "留存调用（结果未确认）";
 }
 
 function tracePayload(label, value) {

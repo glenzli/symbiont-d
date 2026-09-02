@@ -1276,6 +1276,8 @@ dependencies = [
  "async-trait",
  "pcp-core",
  "pcp-store",
+ "serde",
+ "serde_json",
 ]
 
 [[package]]

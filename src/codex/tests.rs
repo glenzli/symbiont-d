@@ -184,9 +184,13 @@ fn all_dynamic_tool_surfaces_use_consistent_canonical_types() {
     // its type and mixes the legacy shape into a canonical namespace.
     for specs in [
         SymbiontTools::specifications(),
-        SymbiontTools::conversation_specifications(),
+        SymbiontTools::conversation_specifications(false),
+        SymbiontTools::conversation_specifications(true),
         SymbiontTools::sensing_specifications(),
-        SymbiontTools::scout_specifications(),
+        super::tool_surface::initial("interactive", false),
+        super::tool_surface::initial("autonomous_scout", false),
+        super::tool_surface::initial("autonomous", false),
+        super::tool_surface::initial("maintenance", false),
         SymbiontTools::attacker_specifications(),
     ] {
         for namespace in specs.as_array().unwrap() {
@@ -201,7 +205,7 @@ fn all_dynamic_tool_surfaces_use_consistent_canonical_types() {
 
 #[test]
 fn foreground_tools_keep_autonomous_memory_but_not_background_bookkeeping() {
-    let specs = SymbiontTools::conversation_specifications();
+    let specs = SymbiontTools::conversation_specifications(false);
     let names = specs[0]["tools"]
         .as_array()
         .unwrap()
@@ -209,6 +213,14 @@ fn foreground_tools_keep_autonomous_memory_but_not_background_bookkeeping() {
         .map(|tool| tool["name"].as_str().unwrap())
         .collect::<Vec<_>>();
     assert!(names.contains(&"search_transcript"));
+    assert!(!names.contains(&"complete_orientation"));
+    assert!(
+        SymbiontTools::conversation_specifications(true)[0]["tools"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|tool| tool["name"] == "complete_orientation")
+    );
     assert!(names.contains(&"read_background_context"));
     for background in [
         "upsert_episode",
@@ -232,6 +244,39 @@ fn foreground_tools_keep_autonomous_memory_but_not_background_bookkeeping() {
             .unwrap()
             .iter()
             .any(|tool| tool["name"] == "semantic_search")
+    );
+    let full = SymbiontTools::specifications();
+    for (index, namespace) in specs.as_array().unwrap().iter().enumerate() {
+        for tool in namespace["tools"].as_array().unwrap() {
+            let original = full[index]["tools"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|candidate| candidate["name"] == tool["name"])
+                .unwrap();
+            assert_eq!(
+                tool["inputSchema"], original["inputSchema"],
+                "description reduction must preserve validation/permission contracts"
+            );
+        }
+    }
+    let instructions = super::prompts::conversation_developer_instructions();
+    for boundary in [
+        "Autonomous PCP retention",
+        "without user approval",
+        "retention_basis and recall_value",
+        "status=written",
+        "never derive a write across Scopes",
+        "SourceRefs",
+        "old wishes are not renewed",
+    ] {
+        assert!(instructions.contains(boundary), "missing {boundary}");
+    }
+    assert!(instructions.chars().count() < 4_497);
+    eprintln!(
+        "foreground context: instructions={} chars, tools={} JSON chars",
+        instructions.chars().count(),
+        specs.to_string().chars().count()
     );
 }
 
@@ -257,6 +302,7 @@ fn context_provenance_matches_sent_fragments_and_deduplicates_the_bridge() {
         updated_at: None,
     };
     let bridge = crate::working_context::WorkingContext {
+        deferred_message_ids: Vec::new(),
         cursor_before: None,
         current_revision_id: Some("msg_1".into()),
         reply_to_revision_id: None,
@@ -289,32 +335,28 @@ fn context_provenance_matches_sent_fragments_and_deduplicates_the_bridge() {
 
 #[test]
 fn autonomous_scout_sees_only_its_read_only_tool_surface() {
-    let specs = SymbiontTools::scout_specifications();
+    let specs = super::tool_surface::initial("autonomous_scout", false);
     let symbiont = specs[0]["tools"]
         .as_array()
         .unwrap()
         .iter()
         .filter_map(|tool| tool["name"].as_str())
         .collect::<Vec<_>>();
-    let pcp = specs[1]["tools"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .filter_map(|tool| tool["name"].as_str())
-        .collect::<Vec<_>>();
-
-    assert_eq!(symbiont, vec!["submit_exploration_finding"]);
     assert_eq!(
-        pcp,
+        symbiont,
         vec![
-            "describe",
-            "list_scopes",
-            "browse_index",
-            "search_pages",
-            "semantic_search",
-            "match_intent",
-            "read_pages"
+            "discover_tools",
+            "invoke_tool",
+            "submit_exploration_finding"
         ]
+    );
+    assert!(
+        super::tool_surface::discover(&json!({"tool":"pcp.read_pages"}), "autonomous_scout", false)
+            .is_ok()
+    );
+    assert!(
+        super::tool_surface::discover(&json!({"tool":"pcp.write_page"}), "autonomous_scout", false)
+            .is_err()
     );
 }
 
@@ -383,11 +425,11 @@ fn persistent_instructions_define_a_short_unambiguous_pcp_boundary() {
     assert!(instructions.contains("PCP is a compound context system"));
     assert!(instructions.contains("Host-local source plane owns raw user and assistant"));
     assert!(instructions.contains("PCP Runtime owns retained cross-Host Pages"));
-    assert!(instructions.contains("plausible future value"));
-    assert!(instructions.contains("It need not be verified, exceptional, or polished"));
+    assert!(instructions.contains("a future recall use as well as the actual new information"));
+    assert!(instructions.contains("certainty, polish and recurrence are not prerequisites"));
     assert!(instructions.contains("before asking the user to repeat known history"));
     assert!(instructions.contains("Autonomously call `pcp.write_page`"));
-    assert!(instructions.contains("Do not mirror every turn"));
+    assert!(instructions.contains("Mere assent/praise"));
     assert!(instructions.contains("Do not repeat an identical PCP search or read"));
     assert!(instructions.contains("Rarely use `symbiont.reserve_continuation`"));
     assert!(instructions.contains("PCP memory operations remain available"));
@@ -881,7 +923,7 @@ async fn pcp_tools_defer_without_query_and_preserve_read_feedback_contracts() {
         .await;
     assert_eq!(searched.response["success"], true);
     let searched_json = tool_content_json(&searched.response);
-    assert_eq!(searched_json["hits"][0]["pageId"], page_id);
+    assert_eq!(searched_json["items"][0]["pageId"], page_id);
     let read = tools
         .execute(&json!({
             "namespace": "pcp",
@@ -895,18 +937,34 @@ async fn pcp_tools_defer_without_query_and_preserve_read_feedback_contracts() {
     assert_eq!(read.response["success"], true);
     let read_json = tool_content_json(&read.response);
     assert_eq!(
-        read_json["pages"][0]["revision"]["payload"]["content"],
+        read_json["items"][0]["content"],
         "The PCP bridge remembers a brass telescope."
     );
-    assert!(
-        read_json["pages"][0]["revision"]
-            .get("sourceRefs")
-            .is_none()
+    assert!(read_json["items"][0].get("sourceRefs").is_none());
+    assert!(read_json["items"][0].get("provenance").is_none());
+
+    assert_eq!(
+        read.raw_result.as_ref().unwrap()["pages"][0]["revision"]["payload"]["content"],
+        read_json["items"][0]["content"]
     );
+    let discovered = tools.execute_for_model(&json!({"namespace":"symbiont","tool":"discover_tools","arguments":{"tool":"pcp.read_pages"}}), Some("test-model"), "autonomous_scout").await;
+    assert!(discovered.succeeded);
+    let deferred = super::tool_surface::resolve(&json!({"namespace":"symbiont","tool":"invoke_tool","arguments":{"namespace":"pcp","tool":"read_pages","arguments":{"revision_ids":[revision_id],"view":"context"}}})).unwrap();
+    let resolved_read = tools
+        .execute_for_model(&deferred, Some("test-model"), "autonomous_scout")
+        .await;
+    assert!(resolved_read.succeeded);
+    assert_eq!(resolved_read.tool_name, "pcp.read_pages");
+    assert_eq!(
+        tool_content_json(&resolved_read.response)["items"][0]["content"],
+        read_json["items"][0]["content"]
+    );
+    let prohibited = super::tool_surface::resolve(&json!({"namespace":"symbiont","tool":"invoke_tool","arguments":{"namespace":"pcp","tool":"write_page","arguments":{"content":"Do not write from a scout"}}})).unwrap();
     assert!(
-        read_json["pages"][0]["revision"]
-            .get("provenance")
-            .is_none()
+        !tools
+            .execute_for_model(&prohibited, Some("test-model"), "autonomous_scout")
+            .await
+            .succeeded
     );
 
     let traced = tools
@@ -921,22 +979,19 @@ async fn pcp_tools_defer_without_query_and_preserve_read_feedback_contracts() {
         .await;
     assert_eq!(traced.response["success"], true);
     let traced_json = tool_content_json(&traced.response);
-    assert_eq!(traced_json["pages"][0]["page"]["pageId"], page_id);
+    assert_eq!(traced_json["items"][0]["pageId"], page_id);
+    assert_eq!(traced_json["items"][0]["revisionId"], revision_id);
     assert_eq!(
-        traced_json["pages"][0]["revision"]["revisionId"],
-        revision_id
-    );
-    assert_eq!(
-        traced_json["pages"][0]["revision"]["sourceRefs"][0]["providerId"],
+        traced_json["items"][0]["sourceRefs"][0]["providerId"],
         "symbiont:transcript"
     );
-    let transcript_locator = traced_json["pages"][0]["revision"]["sourceRefs"][0]["locator"]
+    let transcript_locator = traced_json["items"][0]["sourceRefs"][0]["locator"]
         .as_str()
         .expect("transcript locator");
     assert!(transcript_locator.starts_with("store/src_"));
     assert!(transcript_locator.contains("/message/msg_"));
     assert!(
-        traced_json["pages"][0]["revision"]["sourceRefs"][0]["contentDigest"]
+        traced_json["items"][0]["sourceRefs"][0]["contentDigest"]
             .as_str()
             .is_some_and(|digest| digest.starts_with("sha256:"))
     );
@@ -954,19 +1009,24 @@ async fn pcp_tools_defer_without_query_and_preserve_read_feedback_contracts() {
     assert_eq!(derived_trace.response["success"], true);
     let derived_trace_json = tool_content_json(&derived_trace.response);
     assert_eq!(
-        derived_trace_json["pages"][0]["revision"]["provenance"][0]["inputRevisionIds"][0],
+        derived_trace_json["items"][0]["basisRevisionIds"][0],
         revision_id
     );
     assert_eq!(
-        derived_trace_json["pages"][0]["revision"]["provenance"][0]["operation"],
+        derived_trace.raw_result.as_ref().unwrap()["pages"][0]["revision"]["provenance"][0]["operation"],
         "ingest"
     );
-    assert!(
-        derived_trace_json["pages"][0]["relations"]
-            .as_array()
-            .expect("relations array")
-            .is_empty()
-    );
+    assert!(derived_trace_json["items"][0].get("relations").is_none());
+    for view in ["sources", "history"] {
+        let result = tools
+            .execute(&json!({"namespace":"pcp","tool":"read_pages",
+            "arguments":{"revision_ids":[revision_id],"view":view}}))
+            .await;
+        assert!(result.succeeded, "{}", result.response);
+        let projected = tool_content_json(&result.response);
+        assert!(projected["items"][0].get("content").is_none());
+        assert_eq!(projected["items"][0]["revisionId"], revision_id);
+    }
 
     let correction_message = continuity
         .ingest_message(

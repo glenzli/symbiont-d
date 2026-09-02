@@ -1430,6 +1430,21 @@ html[data-native-shell="macos"] .topbar {
   object-fit: cover;
 }
 
+.avatar-filter-definitions {
+  position: absolute;
+  pointer-events: none;
+}
+
+/* Keep the supplied art intact. Its ~89% silhouette becomes ~80% of the circle. */
+.message-avatar-image.symbiont-avatar-art,
+.input-role-avatar > img.symbiont-avatar-art,
+.avatar-settings-preview > img.symbiont-avatar-art {
+  width: 90%;
+  height: 90%;
+  object-fit: contain;
+  filter: url(#symbiont-avatar-midtone);
+}
+
 .message[data-role="assistant"] .message-avatar,
 .topic-chat-message[data-role="assistant"] .message-avatar {
   background: var(--symbiont-avatar-bg);
@@ -1911,6 +1926,14 @@ html[data-native-shell="macos"] .topbar {
 #avatar-preview {
   background: var(--symbiont-avatar-bg);
   object-fit: contain;
+}
+
+.avatar-settings-preview:has(> #avatar-preview.symbiont-avatar-art) {
+  background: var(--symbiont-avatar-bg);
+}
+
+#avatar-preview.symbiont-avatar-art {
+  background: transparent;
 }
 
 .avatar-settings-preview > img {

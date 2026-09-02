@@ -24,13 +24,13 @@ use crate::memory::{MemoryEntry, MemoryRole, MessagePart};
 mod search;
 mod semantic;
 
-#[cfg(test)]
-pub use search::TranscriptRecurrenceEvidence;
 pub use search::{
     TranscriptRecall, TranscriptSearchMessage, TranscriptSearchOptions, TranscriptSearchResult,
     TranscriptSemanticEvidence, TranscriptSourceOptions, TranscriptSourceResolution,
     TranscriptSourceStatus,
 };
+#[cfg(test)]
+pub use search::{TranscriptRecurrenceEvidence, TranscriptSearchCluster};
 
 const SCHEMA_VERSION: &str = "5";
 

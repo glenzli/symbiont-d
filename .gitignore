@@ -20,6 +20,7 @@
 /data/pcp-enrollments.json
 /data/pcp-history-repair.json
 /data/pcp-language-repair.json
+/data/transcript.retention-*.json
 /data/infer-runtime.toml
 /data/infer-runtime-secrets.toml
 /data/profile.toml

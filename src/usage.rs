@@ -6,7 +6,9 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use tokio::task;
 
-use crate::diagnostics::{ContextSnapshot, ExecutionTraceEvent, bounded_trace_value};
+use crate::diagnostics::{
+    ContextSnapshot, ExecutionTraceEvent, bounded_tool_result, bounded_trace_value,
+};
 
 #[path = "usage/activity.rs"]
 mod activity;
@@ -299,7 +301,7 @@ impl UsageStore {
                                 if step.succeeded { 1_i64 } else { 0_i64 },
                                 serde_json::to_string(&bounded_trace_value(step.arguments.clone()))
                                     .context("encode tool trace arguments")?,
-                                serde_json::to_string(&bounded_trace_value(step.result.clone()))
+                                serde_json::to_string(&bounded_tool_result(step.result.clone()))
                                     .context("encode tool trace result")?,
                             ],
                         )

@@ -199,7 +199,76 @@ fn proposal(source: &str, content: &str) -> Proposal {
     }
 }
 fn decision(packet: &Value, disposition: Disposition, related: Vec<String>) -> RetentionReview {
-    RetentionReview {token:packet["reviewToken"].as_str().unwrap().to_owned(),disposition,rationale:"The exact source supports this decision; no assistant-added requirements are being promoted.".to_owned(),attribution:Attribution::UserStatement,related_revision_ids:related}
+    RetentionReview {token:packet["reviewToken"].as_str().unwrap().to_owned(),disposition,rationale:"The exact source supports this decision; no assistant-added requirements are being promoted.".to_owned(),attribution:Attribution::UserStatement,related_revision_ids:related,
+        retention_basis:Some(RetentionBasis::ExplicitState),recall_value:Some("When this project resumes, recall the user's exact constraint instead of guessing it.".to_owned())}
+}
+
+#[tokio::test]
+async fn novelty_without_recall_value_cannot_write_but_one_explicit_decision_can() {
+    let f = Fixture::new(false).await;
+    let source = f
+        .source(&timestamp(), MemoryRole::User, "此项目只使用本地推理。")
+        .await;
+    let p = proposal(&source, "此项目只使用本地推理。");
+    let packet = f.host.retain_page(p.clone(), None).await.unwrap();
+    let mut review = decision(&packet, Disposition::NewSubject, vec![]);
+    review.recall_value = None;
+    assert!(
+        f.host
+            .retain_page(p.clone(), Some(review.clone()))
+            .await
+            .is_err()
+    );
+    assert_eq!(f.count().await, 0);
+    review.recall_value = Some("选部署方案时，排除需要远程推理的方案。".into());
+    review.retention_basis = None;
+    assert!(
+        f.host
+            .retain_page(p.clone(), Some(review.clone()))
+            .await
+            .is_err()
+    );
+    review.retention_basis = Some(RetentionBasis::Insufficient);
+    assert!(
+        f.host
+            .retain_page(p.clone(), Some(review.clone()))
+            .await
+            .is_err()
+    );
+    assert_eq!(f.count().await, 0);
+    review.retention_basis = Some(RetentionBasis::ExplicitState);
+    let saved = f.host.retain_page(p, Some(review)).await.unwrap();
+    assert_eq!(saved["status"], "written");
+    assert_eq!(f.count().await, 1);
+}
+
+#[tokio::test]
+async fn weak_material_stays_local_without_periodic_retry_or_new_pcp_page() {
+    let f = Fixture::new(false).await;
+    let source = f
+        .source(&timestamp(), MemoryRole::User, "不错，挺好。")
+        .await;
+    let p = proposal(&source, "用户对此表示赞同。");
+    let packet = f.host.retain_page(p.clone(), None).await.unwrap();
+    let mut review = decision(&packet, Disposition::Discard, vec![]);
+    review.retention_basis = Some(RetentionBasis::Insufficient);
+    review.recall_value = None;
+    let result = f.host.retain_page(p.clone(), Some(review)).await.unwrap();
+    assert_eq!(result["status"], "discarded");
+    assert_eq!(f.count().await, 0);
+    assert_eq!(f.transcript.by_ids(&[source]).await.unwrap().len(), 1);
+    assert!(f.host.retention_retry_bundle().await.unwrap().is_none());
+    assert_eq!(f.host.retain_page(p, None).await.unwrap()["created"], false);
+}
+
+#[test]
+fn old_review_receipts_remain_readable_without_granting_new_write_eligibility() {
+    let review: RetentionReview =
+        serde_json::from_value(json!({"token":"old", "disposition":"addition",
+        "rationale":"A prior review", "attribution":"mixed", "related_revision_ids":["rev_1"]}))
+        .unwrap();
+    assert_eq!(review.retention_basis, None);
+    assert_eq!(review.recall_value, None);
 }
 
 #[tokio::test]

@@ -294,7 +294,8 @@ enum BackgroundThread {
 #[derive(Clone, Copy)]
 enum ToolSurface {
     Conversation,
-    Full,
+    AutonomousReview,
+    Maintenance,
     LunaSensing,
     AutonomousScout,
     Attacker,
@@ -496,10 +497,10 @@ impl CodexClient {
             .start_thread(&config.workspace, ToolSurface::AutonomousScout)
             .await?;
         client.autonomous_review_thread_id = client
-            .start_thread(&config.workspace, ToolSurface::Full)
+            .start_thread(&config.workspace, ToolSurface::AutonomousReview)
             .await?;
         client.maintenance_thread_id = client
-            .start_thread(&config.workspace, ToolSurface::Full)
+            .start_thread(&config.workspace, ToolSurface::Maintenance)
             .await?;
         client.temporary_discussion_thread_id = client
             .start_thread(&config.workspace, ToolSurface::TemporaryDiscussion)
@@ -857,6 +858,8 @@ impl CodexClient {
                 .map(|matched| matched.policy.minimum_lane)
                 .unwrap_or(ComputeLane::Conversation);
             let prompt = review_prompt(&finding, AUTONOMOUS_SILENT_MARKER)?;
+            let review_context =
+                super::exploration_context::review_context(continuity_context, &finding);
             let review_thread_id = self.autonomous_review_thread_id.clone();
             let mut review = self
                 .run_request(
@@ -866,7 +869,7 @@ impl CodexClient {
                     "autonomous",
                     compute,
                     profile,
-                    continuity_context,
+                    &review_context,
                     None,
                     None,
                     true,
@@ -1388,7 +1391,8 @@ impl CodexClient {
             BackgroundThread::Attacker => ToolSurface::Attacker,
             BackgroundThread::PcpHistoryRepair => ToolSurface::PcpHistoryRepair,
             BackgroundThread::TemporaryDiscussion => ToolSurface::TemporaryDiscussion,
-            BackgroundThread::AutonomousReview | BackgroundThread::Maintenance => ToolSurface::Full,
+            BackgroundThread::AutonomousReview => ToolSurface::AutonomousReview,
+            BackgroundThread::Maintenance => ToolSurface::Maintenance,
         };
         match self.start_thread(&workspace, tool_surface).await {
             Ok(next) => {
@@ -1696,6 +1700,17 @@ impl CodexClient {
             .context("missing submitted thread configuration")?;
         let mut selection =
             crate::context_assembly::audit_fragments(&fragments, &continuity_context.selection);
+        if let Some(context) = working_context {
+            selection.extend(context.deferred_message_ids.iter().map(|id| {
+                crate::context_assembly::ContextSelection {
+                    source: format!("symbiont.working_context.{id}"),
+                    origin: "本地探索播报".into(),
+                    purpose: "未被用户引用或接续的后台播报，不因时间最近而预装".into(),
+                    included: false,
+                    chars: 0,
+                }
+            }));
+        }
         if matches!(origin, "interactive" | "continuation") {
             crate::context_assembly::budget_recall(&mut fragments, &mut selection, 24_000);
         }
@@ -1708,6 +1723,7 @@ impl CodexClient {
                 .unwrap_or_default()
                 .to_owned(),
             selection,
+            recall: continuity_context.recall.clone(),
             submitted: None,
             native_thread: NativeThreadSnapshot {
                 thread_id: thread_id.to_owned(),
@@ -2128,20 +2144,36 @@ impl CodexClient {
         workspace: &PathBuf,
         tool_surface: ToolSurface,
     ) -> Result<String> {
-        let instructions = match tool_surface {
+        let mut instructions = match tool_surface {
             ToolSurface::Conversation => super::prompts::conversation_developer_instructions(),
             ToolSurface::LunaSensing => luna_sensing_developer_instructions().to_owned(),
             ToolSurface::TemporaryDiscussion => temporary_discussion_developer_instructions(),
             ToolSurface::PcpHistoryRepair => pcp_history_repair_developer_instructions(),
-            ToolSurface::Full | ToolSurface::AutonomousScout | ToolSurface::Attacker => {
-                developer_instructions()
-            }
+            ToolSurface::AutonomousReview
+            | ToolSurface::Maintenance
+            | ToolSurface::AutonomousScout
+            | ToolSurface::Attacker => developer_instructions(),
         };
+        if matches!(
+            tool_surface,
+            ToolSurface::Conversation
+                | ToolSurface::AutonomousReview
+                | ToolSurface::Maintenance
+                | ToolSurface::AutonomousScout
+        ) {
+            instructions.push_str("\n\n");
+            instructions.push_str(super::tool_surface::GUIDANCE);
+        }
         let dynamic_tools = match tool_surface {
-            ToolSurface::Conversation => SymbiontTools::conversation_specifications(),
-            ToolSurface::Full => SymbiontTools::specifications(),
+            ToolSurface::Conversation => super::tool_surface::initial(
+                "interactive",
+                self.dependencies.profile.snapshot().await.status
+                    == crate::profile::SetupStatus::Calibrating,
+            ),
+            ToolSurface::AutonomousReview => super::tool_surface::initial("autonomous", false),
+            ToolSurface::Maintenance => super::tool_surface::initial("maintenance", false),
             ToolSurface::LunaSensing => SymbiontTools::sensing_specifications(),
-            ToolSurface::AutonomousScout => SymbiontTools::scout_specifications(),
+            ToolSurface::AutonomousScout => super::tool_surface::initial("autonomous_scout", false),
             ToolSurface::Attacker => SymbiontTools::attacker_specifications(),
             ToolSurface::PcpHistoryRepair | ToolSurface::TemporaryDiscussion => {
                 Value::Array(Vec::new())
@@ -2343,7 +2375,10 @@ impl CodexClient {
             .get("id")
             .cloned()
             .context("dynamic tool request omitted id")?;
-        let params = message.get("params").unwrap_or(&Value::Null);
+        let wire_params = message.get("params").unwrap_or(&Value::Null);
+        let resolved = super::tool_surface::resolve(wire_params);
+        let resolution_error = resolved.as_ref().err().map(ToString::to_string);
+        let params = resolved.as_ref().unwrap_or(wire_params);
         let started = Instant::now();
         let started_at = now();
         let requested_namespace = params
@@ -2361,8 +2396,16 @@ impl CodexClient {
                 ToolCallPlan::Execute => None,
                 ToolCallPlan::Reuse { original_sequence } => Some(original_sequence),
             };
-        let (tool_name, succeeded, mut response, execution_escalation) =
-            if let Some(original_sequence) = duplicate_from {
+        let (tool_name, succeeded, mut response, execution_escalation, raw_result) =
+            if let Some(error) = resolution_error {
+                (
+                    format!("{requested_namespace}.{requested_tool}"),
+                    false,
+                    tool_result(false, error),
+                    None,
+                    None,
+                )
+            } else if let Some(original_sequence) = duplicate_from {
                 (
                     format!("{requested_namespace}.{requested_tool}"),
                     true,
@@ -2375,6 +2418,7 @@ impl CodexClient {
                         ),
                     ),
                     None,
+                    None,
                 )
             } else {
                 let execution = self
@@ -2386,6 +2430,7 @@ impl CodexClient {
                     execution.succeeded,
                     execution.response,
                     execution.escalation,
+                    execution.raw_result,
                 )
             };
         if let Some(request) = execution_escalation {
@@ -2414,16 +2459,25 @@ impl CodexClient {
             tool_deduplicator.remember_success(&namespace, &tool, &arguments, tool_sequence);
         }
         let mut trace_result = response.clone();
-        if let Some(original_sequence) = duplicate_from
-            && let Some(result) = trace_result.as_object_mut()
-        {
-            result.insert(
-                "_symbiontTrace".to_owned(),
-                json!({
-                    "deduplicated": true,
-                    "reusedFromSequence": original_sequence
-                }),
-            );
+        if let Some(raw) = raw_result {
+            trace_result["_symbiontTrace"] = json!({
+                "projection": "pcp-model-view-v1",
+                "rawResult": raw,
+                "modelResponseChars": response.to_string().chars().count(),
+            });
+        }
+        if wire_params != params {
+            if trace_result.get("_symbiontTrace").is_none() {
+                trace_result["_symbiontTrace"] = json!({});
+            }
+            trace_result["_symbiontTrace"]["invokedVia"] = json!("symbiont.invoke_tool");
+        }
+        if let Some(original_sequence) = duplicate_from {
+            if trace_result.get("_symbiontTrace").is_none() {
+                trace_result["_symbiontTrace"] = json!({});
+            }
+            trace_result["_symbiontTrace"]["deduplicated"] = json!(true);
+            trace_result["_symbiontTrace"]["reusedFromSequence"] = json!(original_sequence);
         }
         trace_steps.push(ToolTraceStep {
             sequence: tool_sequence,

@@ -17,6 +17,8 @@ pub struct ContextSnapshot {
     pub native_thread: NativeThreadSnapshot,
     #[serde(default)]
     pub selection: Vec<crate::context_assembly::ContextSelection>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub recall: Option<crate::context_assembly::RecallAudit>,
     /// Exact client-side request values, not a reconstructed provider prompt.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub submitted: Option<SubmittedContext>,
@@ -92,4 +94,32 @@ pub fn bounded_trace_value(value: Value) -> Value {
         "originalChars": encoded.chars().count(),
         "jsonPreview": preview
     })
+}
+
+/// Diagnostic copies must not push an otherwise readable model response over
+/// the trace limit. Each compartment is bounded and labelled independently.
+pub fn bounded_tool_result(mut value: Value) -> Value {
+    let diagnostic = value
+        .as_object_mut()
+        .and_then(|object| object.remove("_symbiontTrace"));
+    let mut model = bounded_trace_value(value);
+    if let Some(diagnostic) = diagnostic {
+        model["_symbiontTrace"] = bounded_trace_value(diagnostic);
+    }
+    model
+}
+
+#[cfg(test)]
+mod tool_result_tests {
+    use super::*;
+    #[test]
+    fn diagnostic_size_cannot_hide_the_model_response_or_write_receipt() {
+        let model = json!({"success":true,"contentItems":[{"text":"{\"status\":\"written\"}"}]});
+        let mut result = model.clone();
+        result["_symbiontTrace"] = json!({"rawResult":"x".repeat(TRACE_VALUE_MAX_CHARS + 1)});
+        let mut bounded = bounded_tool_result(result);
+        assert_eq!(bounded["_symbiontTrace"]["truncated"], true);
+        bounded.as_object_mut().unwrap().remove("_symbiontTrace");
+        assert_eq!(bounded, model);
+    }
 }

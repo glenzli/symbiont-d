@@ -1,14 +1,17 @@
 mod approvals;
 mod autonomous;
 mod client;
+mod exploration_context;
 mod images;
 mod interaction_output;
 mod interactive_threads;
+mod pcp_projection;
 mod prompts;
 mod task_bridge;
 mod task_source_client;
 mod task_sources;
 mod tool_dedup;
+mod tool_surface;
 mod tools;
 mod trace;
 

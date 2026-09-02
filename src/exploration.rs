@@ -1,4 +1,5 @@
 mod attempt_log;
+mod context;
 mod intent;
 mod manual_run;
 mod sensing_route;
@@ -45,10 +46,7 @@ use crate::{
     outreach::all_budgets_exhausted,
     profile::{ProfileStore, SetupStatus},
     reflection::ReflectionStore,
-    sensing::{
-        SensingCandidate, SensingDeduplicationReference, SensingIntakeBrief, SensingStore,
-        format_candidate_pool,
-    },
+    sensing::{SensingCandidate, SensingDeduplicationReference, SensingIntakeBrief, SensingStore},
     signals::{SignalPublishOutcome, SignalStore},
     symbiont_context::SymbiontContextStore,
     usage::{UsageHeadline, UsageStore},
@@ -62,8 +60,6 @@ use self::sensing_route::{
 const POLICY_REFRESH: Duration = Duration::from_secs(30);
 const EXPLORATION_CHAT_TAIL: usize = 14;
 const EXPLORATION_JOURNAL_RUNS: usize = 8;
-const EXPLORATION_CONTEXT_CHARS: usize = 16_000;
-const EXPLORATION_MESSAGE_EXCERPT_CHARS: usize = 700;
 const EXPLORATION_EDGE_EXCERPT_CHARS: usize = 900;
 const SENSING_CHAT_TAIL: usize = 2;
 const SENSING_MESSAGE_EXCERPT_CHARS: usize = 320;
@@ -807,7 +803,7 @@ async fn run_once(
     compute: Arc<ComputeStore>,
     profile: Arc<ProfileStore>,
     continuity: Arc<ContinuityHost>,
-    context: Arc<SymbiontContextStore>,
+    _context: Arc<SymbiontContextStore>,
     curiosity: Arc<CuriosityStore>,
     reflection: Arc<ReflectionStore>,
     usage: Arc<UsageStore>,
@@ -1504,11 +1500,10 @@ async fn run_once(
     };
     let continuity_context = match async {
         let mut bundle = continuity.context_seed(None).await;
-        bundle.include(
+        bundle.defer(
             "symbiont.background.map",
             "本地工作地图与开放问题",
-            "探索关注方向",
-            context.exploration_prompt().await?,
+            "工作地图可能混有助手归纳；需要时 read_background_context，不作为每轮选题框架",
         );
         bundle.include(
             "symbiont.background.curiosity",
@@ -1522,18 +1517,13 @@ async fn run_once(
             "探索行动边界",
             autonomy_config.attention_context(),
         );
-        bundle.include(
-            "symbiont.exploration_evidence",
-            "近期探索日志、聊天与候选来源",
-            "探索去重与证据连续性",
-            exploration_working_context(
-                &recent_messages,
-                &recent_explorations,
-                &reviewed_candidates,
-                trigger.as_ref(),
-                Utc::now(),
-            ),
-        );
+        bundle.extend(context::working_context(
+            &recent_messages,
+            &recent_explorations,
+            &reviewed_candidates,
+            trigger.as_ref(),
+            Utc::now(),
+        ));
         Ok::<_, anyhow::Error>(bundle)
     }
     .await
@@ -1811,6 +1801,7 @@ impl ExplorationRunCompletion {
     }
 }
 
+#[cfg(test)]
 fn exploration_working_context(
     messages: &[MemoryEntry],
     runs: &[crate::usage::ExplorationRunSummary],
@@ -1818,87 +1809,12 @@ fn exploration_working_context(
     trigger: Option<&ExplorationTrigger>,
     now: DateTime<Utc>,
 ) -> String {
-    let mut lines = vec![
-        "Autonomous working context. Use this to continue the relationship and avoid thematic repetition; it is bounded operational memory, not a relevance score."
-            .to_owned(),
-        match trigger {
-            Some(ExplorationTrigger::Manual { .. }) => {
-                "Wake reason: the user explicitly requested an exploration cycle.".to_owned()
-            }
-            Some(ExplorationTrigger::DeferredFollowUp) => {
-                "Wake reason: a deferred conversational continuation has reached its earliest useful time. Reconsider it against everything said since it was scheduled. Continue only if it is still live and can enter the present conversation naturally; otherwise remain silent."
-                    .to_owned()
-            }
-            Some(ExplorationTrigger::Intent(intent)) => format!(
-                "Wake reason: the model explicitly requested an evidence-seeking exploration from recent thought. Re-evaluate it against the latest conversation before searching.\n<exploration-intent id=\"{}\" origin=\"{}\">\nquestion: {}\nwhy-now: {}\nsource-revisions: {}\n</exploration-intent>",
-                intent.id,
-                intent.origin.as_str(),
-                intent.question,
-                intent.why_now,
-                intent.source_revision_ids.join(", ")
-            ),
-            None => "Wake reason: scheduled exploration cycle.".to_owned(),
-        },
-        conversation_edge(messages, now),
-        "<recent-conversation>".to_owned(),
-    ];
-    for entry in messages {
-        let role = match entry.role {
-            MemoryRole::User => "user",
-            MemoryRole::Assistant => "assistant",
-            MemoryRole::Memory => "memory",
-        };
-        let origin = entry
-            .metadata
-            .as_ref()
-            .and_then(|metadata| metadata.origin.as_deref())
-            .unwrap_or("conversation");
-        let content = bounded_message_excerpt(&entry.content, EXPLORATION_MESSAGE_EXCERPT_CHARS);
-        let revision = entry.revision_id.as_deref().unwrap_or("");
-        lines.push(format!(
-            "<message role=\"{role}\" origin=\"{origin}\" at=\"{}\" revision=\"{revision}\">{content}</message>",
-            entry.at
-        ));
-    }
-    lines.push("</recent-conversation>".to_owned());
-    lines.push("<recent-exploration-journal>".to_owned());
-    for run in runs {
-        let message = run.message.as_deref().unwrap_or("[silent]");
-        let queries = if run.search_queries.is_empty() {
-            "none".to_owned()
-        } else {
-            run.search_queries.join(" | ")
-        };
-        let reasoning = run
-            .reasoning_summaries
-            .iter()
-            .take(3)
-            .cloned()
-            .collect::<Vec<_>>()
-            .join(" ");
-        lines.push(format!(
-            "<exploration at=\"{}\" surfaced=\"{}\">\nqueries: {}\ninternal-summary: {}\nmessage: {}\n</exploration>",
-            run.completed_at,
-            run.surfaced,
-            queries,
-            reasoning.chars().take(1_200).collect::<String>(),
-            message.chars().take(1_200).collect::<String>()
-        ));
-    }
-    lines.push("</recent-exploration-journal>".to_owned());
-    if !candidates.is_empty() {
-        lines.push(format_candidate_pool(candidates));
-    }
-    let joined = lines.join("\n");
-    if joined.chars().count() <= EXPLORATION_CONTEXT_CHARS {
-        return joined;
-    }
-    let mut truncated = joined
-        .chars()
-        .take(EXPLORATION_CONTEXT_CHARS)
-        .collect::<String>();
-    truncated.push_str("\n[older working context truncated]");
-    truncated
+    context::working_context(messages, runs, candidates, trigger, now)
+        .fragments
+        .into_iter()
+        .map(|f| f.value)
+        .collect::<Vec<_>>()
+        .join("\n")
 }
 
 fn sensing_deduplication_references(
@@ -2144,7 +2060,9 @@ fn conversation_edge(messages: &[MemoryEntry], now: DateTime<Utc>) -> String {
     {
         lines.push(edge_message("last-direct-reply", entry));
     }
-    lines.push(edge_message("last-visible-message", last_visible));
+    if last_user_index != Some(last_visible_index) {
+        lines.push(edge_message("last-visible-message", last_visible));
+    }
     if unsolicited_since_last_user > 0 {
         lines.push(
             "<attention-state>The user has not spoken since these unsolicited messages. This is pending attention, not negative feedback. Do not repeat their topic or a close variant. A distinct credible signal may still be left as a note when it has its own connection to the user's long-term map, or as a discussion when it independently deserves conversation; do not treat it as an urgent intervention or pretend it continues the unanswered thread.</attention-state>"
@@ -2162,10 +2080,18 @@ fn edge_message(label: &str, entry: &MemoryEntry) -> String {
         MemoryRole::Memory => "memory",
     };
     format!(
-        "<{label} role=\"{role}\" origin=\"{}\" at=\"{}\">{}</{label}>",
+        "<{label} role=\"{role}\" origin=\"{}\" at=\"{}\" message-id=\"{}\">{}</{label}>",
         message_origin(entry),
         entry.at,
-        bounded_message_excerpt(&entry.content, EXPLORATION_EDGE_EXCERPT_CHARS)
+        entry.revision_id.as_deref().unwrap_or(""),
+        bounded_message_excerpt(
+            &entry.content,
+            if entry.role == MemoryRole::User {
+                EXPLORATION_EDGE_EXCERPT_CHARS
+            } else {
+                300
+            }
+        )
     )
 }
 

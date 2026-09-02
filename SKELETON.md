@@ -7,14 +7,19 @@ This is a routing map for maintained source boundaries, not a product roadmap.
 - `src/context_assembly.rs`: typed context fragments, provenance/omission audit and final optional-recall budget. Audit metadata is not sent to models.
 - `src/web.rs`: foreground composition uses identity/boundary, selected route and federated recall; background maps, hypotheses and queues are deferred. `src/reflection/worker.rs`, `src/context_maintenance.rs` and `src/exploration.rs` select their own task-specific background inputs.
 - `src/continuity/compound.rs`: compact PCP and local-source evidence with exact identities, source resolution and unavailable-versus-miss semantics; no rewriting of stored content.
+- `src/continuity/recall_selection.rs`: foreground-only joint relevance admission through local Infer reranking, conservative lexical fallback, identity-bound source coverage, and diagnostic-only selection evidence. Stored content and background recurrence remain independent.
+- `src/continuity/recall_sources.rs`: bounded, read-only Revision-to-SourceRef lineage expansion. Missing, foreign, denied or cyclic sources are not coverage proof; no cross-Scope derived writes or persistent ACL cache.
 - `src/codex/client.rs` and `src/codex/prompts.rs`: submit the selected fragments and capture the actual thread configuration and turn request. Native/provider final prompts are not exposed. Conversation tool registration is separate from maintenance tools.
+- `src/codex/tool_surface.rs`: minimal stage registration, exact-schema discovery, deferred call normalization and origin allowlists; execution remains behind domain/evidence guards. It consumes the host-owned catalog, not the PCP MCP catalog.
+- `src/codex/pcp_projection.rs`: consumes `pcp-client::model_context` directly, without MCP or double clipping; adds explicit storage-actor attribution. Source/history/full are evidence views, raw API objects remain diagnostic-only. Retention preflight uses the same projection without changing source/token identity.
+- `src/exploration/context.rs` and `src/codex/exploration_context.rs`: separate exploration intent, user hints, unverified candidates and negative delivery ledger; reviewer admission uses selected anchors instead of replaying the scout bundle.
 - `web/context-inspector.js`: source-attributed input inspection, exact client-request export and explicit historical-record limitations; embedded through `src/web.rs`.
 
 ## Memory ownership and retirement
 
 - `src/reflection/worker.rs`: conversation-driven topic/hypothesis review, recurrence evidence and autonomous retention decisions. `src/context_maintenance.rs` maintains local working context; neither owns PCP library maintenance.
 - `src/continuity.rs` and `src/codex/tools.rs`: tenant recall, source resolution, autonomous ingest and exact-Revision feedback. Runtime owns PCP semantic projections and governance.
-- `src/continuity/retention.rs`: shared autonomous write preflight, exact-source/current-head review tokens, temporal attribution, and restart-safe deferred proposals/receipts. `GET /api/retention` exposes unsaved proposals; Reflection resumes them only after retrieval recovers.
+- `src/continuity/retention.rs`: shared autonomous write preflight, separate novelty/recall-value review, exact-source/current-head tokens, temporal attribution, and restart-safe deferred proposals/receipts. Weak material remains in local chat, not a periodic retry. `GET /api/retention` exposes unsaved proposals; Reflection resumes them only after retrieval recovers. `web/trace-ui.js` groups receipt-linked calls as one retention process and distinguishes precheck from an actual write.
 - `src/retired_memory.rs`: state-free HTTP 410 responses for retired reconciliation actions. The old UI, worker, Summary loop and episode-index sync are removed. Existing `reconciliation.json` and usage/trace records are not migrated, rewritten or deleted.
 - `src/bin/symbiont-pcp-worker.rs`: legacy command compatibility only; returns protocol `defer` locally without network/model calls. Operators should configure maintenance in PCP Runtime.
 

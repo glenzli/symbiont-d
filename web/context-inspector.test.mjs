@@ -1,7 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { JSDOM } from "jsdom";
-import { renderContextInspector, submittedContextExport } from "./context-inspector.js";
+import { automaticRecallCounts, automaticRecallSummary, renderContextInspector, submittedContextExport } from "./context-inspector.js";
 
 function context() {
   const content = "原始中文 $f^*$ <script>danger()</script>";
@@ -19,6 +19,33 @@ function context() {
     },
   };
 }
+
+test("automatic recall is visible even when the model made zero PCP tool calls", () => {
+  const value = context();
+  value.fragments.push({ source: "symbiont.pcp.rev_a", value: JSON.stringify({ detail: "payload", content: "原文" }) });
+  value.fragments.push({ source: "symbiont.pcp.rev_b", value: JSON.stringify({ detail: "reference" }) });
+  assert.deepEqual(automaticRecallCounts(value), { observed: true, pcpBodies: 1, pcpReferences: 1, transcript: 1 });
+  assert.equal(automaticRecallSummary({ pcpRecallCalls: 0, runs: [{ context: value }] }), "自动装入 3 条");
+  const { window } = new JSDOM("");
+  const view = renderContextInspector(value, window.document);
+  assert.match(view.textContent, /PCP 1 条正文＋1 条引用/);
+  assert.match(view.textContent, /旧轨迹只能核对实际装入/);
+});
+
+test("unavailable and missing historical observations are not zero-hit assertions", () => {
+  assert.equal(automaticRecallSummary({ runs: [{ context: null }] }), "自动召回未记录");
+  const value = context();
+  value.recall = { query: "q", pcp: { available: false, candidates: 0, durationMs: 100 },
+    transcript: { available: true, candidates: 4, durationMs: 20 }, ranker: "lexical_fallback_reranker_unavailable",
+    rankingDurationMs: 30, sourceReadCalls: 0, candidates: [{ source: "x", coveredBy: "pcp-y" }] };
+  const { window } = new JSDOM("");
+  const view = renderContextInspector(value, window.document);
+  assert.match(view.textContent, /不可用（不是未命中）/);
+  assert.match(view.textContent, /词法降级/);
+  const exported = JSON.parse(submittedContextExport(value));
+  assert.deepEqual(exported.diagnosticRecallNotSentToModel, value.recall);
+  assert.equal(exported.turnStart.additionalContext.recall, undefined);
+});
 
 test("source inspector distinguishes sent material, deferred background and opaque native context", () => {
   const { window } = new JSDOM("<main></main>");
