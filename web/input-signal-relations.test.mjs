@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { JSDOM } from "jsdom";
 import { annotationLabel, annotationsBySource, attachAnnotations, initInputSignalRelations } from "./input-signal-relations.js";
+import { initSignalPopovers } from "./input-signal-popovers.js";
 
 const source = { id: "a", kind: "external_input" };
 const dissent = { id: "d", kind: "attacker_challenge", relatedSignalIds: ["a"], content: "范围过强：论文仅证明局部结果。", sources: [{ url: "https://example.test/paper", detail: "论文" }] };
@@ -23,7 +24,8 @@ test("multiple review labels stay compact and keep individual evidence categorie
   const card = window.document.querySelector("article");
   attachAnnotations(card, [dissent, { content: "数据明显冲突。" }, { content: "证据不足。" }],
     (target, entry) => { target.textContent = entry.content; });
-  assert.equal(card.querySelector(".input-signal-review-badge").textContent, "△ 过度表述 · 来源冲突 等");
+  assert.equal(card.querySelectorAll(".input-signal-review-badge").length, 1);
+  assert.equal(card.querySelector(".input-signal-review-badge"), card.querySelector("summary"));
   assert.equal(card.querySelector("summary").textContent, "过度表述 · 来源冲突 等 · 3");
   assert.deepEqual([...card.querySelectorAll(".input-signal-review small")].map(el => el.textContent), ["过度表述", "来源冲突", "证据不足"]);
 });
@@ -48,7 +50,9 @@ test("annotation projection is idempotent, preserves expansion and removes stale
   const marker = main.querySelector("details");
   assert.equal(marker.open, false);
   assert.equal(main.querySelectorAll("article").length, 1);
-  assert.equal(main.querySelector(".input-signal-review-badge").textContent, "△ 过度表述");
+  assert.equal(main.querySelector(".message-actions").children.length, 0);
+  assert.equal(marker.nextElementSibling, main.querySelector(".message-body"));
+  assert.equal(main.querySelector(".message-body").textContent, "原文");
   assert.equal(marker.querySelector("summary").textContent, "过度表述");
   assert.equal(marker.querySelector("summary").getAttribute("aria-label"), "展开过度表述的具体依据");
   assert.match(marker.textContent, /范围过强/);
@@ -65,4 +69,40 @@ test("annotation projection is idempotent, preserves expansion and removes stale
   relations.refresh();
   assert.equal(main.querySelector("details"), null);
   assert.equal(main.querySelector(".input-signal-review-badge"), null);
+  assert.equal(main.querySelector(".has-dissent-response"), null);
+});
+
+test("floating badge works without footer and shares exclusive dismissal in both views", () => {
+  const { window } = new JSDOM(`<main>
+    <article class="input-signal"><div class="message-body">聊天原文</div></article>
+    <article class="input-briefing-card"><div class="input-briefing-card-body">简报原文</div></article>
+    <details data-signal-popover><summary>来源</summary><div class="signal-popover-panel">来源详情</div></details>
+    <button>空白区</button></main>`);
+  const doc = window.document;
+  const cards = [...doc.querySelectorAll("article")];
+  for (const card of cards) {
+    attachAnnotations(card, [dissent], (target, entry) => { target.textContent = entry.content; }, { body: card.firstElementChild });
+    assert.equal(card.querySelectorAll("summary").length, 1);
+    assert.equal(card.firstElementChild.nextElementSibling.textContent, card === cards[0] ? "聊天原文" : "简报原文");
+  }
+  const controller = initSignalPopovers(doc);
+  const badges = [...doc.querySelectorAll(".input-signal-review-badge")];
+  const openCount = () => doc.querySelectorAll("details[open]").length;
+  badges[0].click();
+  assert.equal(openCount(), 1);
+  badges[1].click();
+  assert.equal(cards[0].querySelector("details").open, false);
+  assert.equal(openCount(), 1);
+  doc.querySelector("main > details > summary").click();
+  assert.equal(cards[1].querySelector("details").open, false);
+  assert.equal(openCount(), 1);
+  badges[0].click();
+  badges[0].dispatchEvent(new window.KeyboardEvent("keydown", { key: "Escape", bubbles: true }));
+  assert.equal(openCount(), 0);
+  assert.equal(doc.activeElement, badges[0]);
+  badges[1].click();
+  doc.querySelector("button").click();
+  assert.equal(openCount(), 0);
+  controller.destroy();
+  window.close();
 });

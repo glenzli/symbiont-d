@@ -1165,33 +1165,55 @@ html[data-native-shell="macos"] .topbar {
 .input-signal-group-items > .input-signal.has-dissent-response .message-body,
 .input-briefing-card.has-dissent-response .input-briefing-card-body {
   position: relative;
-  padding-top: 32px;
+  padding-top: 14px;
   border-left-color: color-mix(in srgb, #916b29 60%, var(--border));
 }
 
-.input-signal-review-badge {
-  position: absolute;
-  top: 7px;
-  right: 10px;
-  color: color-mix(in srgb, #916b29 80%, var(--text-soft));
-  font-size: 10px;
-  line-height: 1.4;
-  user-select: none;
-}
-
 .input-signal-dissent-marker {
-  display: inline-block;
+  display: block;
   position: relative;
+  height: 0;
+  margin-top: 9px;
   color: color-mix(in srgb, #916b29 85%, var(--text-soft));
   font-size: 10px;
   font-weight: 500;
 }
 
-.input-signal-dissent-marker > summary { cursor: pointer; list-style: none; }
-.input-signal-dissent-marker > summary::after { content: " ⌄"; }
+.input-signal-dissent-marker > summary {
+  position: absolute;
+  top: 0;
+  right: 10px;
+  z-index: 1;
+  transform: translateY(-50%);
+  max-width: calc(100% - 20px);
+  box-sizing: border-box;
+  display: flex;
+  align-items: center;
+  padding: 2px 7px;
+  border: 1px solid color-mix(in srgb, #916b29 35%, var(--border));
+  border-radius: 999px;
+  background: color-mix(in srgb, #916b29 5%, var(--surface-raised));
+  line-height: 14px;
+  white-space: nowrap;
+  cursor: pointer;
+  list-style: none;
+  user-select: none;
+}
+.input-signal-dissent-marker > summary > span {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
 .input-signal-dissent-marker > summary::-webkit-details-marker { display: none; }
-.input-signal-dissent-marker[open] > summary::after { content: " ⌃"; }
-.input-signal-dissent-marker > summary:hover { color: var(--text); }
+.input-signal-dissent-marker[open] > summary,
+.input-signal-dissent-marker > summary:hover {
+  border-color: color-mix(in srgb, #916b29 65%, var(--border));
+  background: color-mix(in srgb, #916b29 10%, var(--surface-raised));
+}
+.input-signal-dissent-marker > summary:focus-visible {
+  outline: 2px solid currentColor;
+  outline-offset: 2px;
+}
 
 .input-signal-dissent-panel {
   display: grid;

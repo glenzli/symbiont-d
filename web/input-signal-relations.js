@@ -44,28 +44,25 @@ export function annotationsBySource(signals) {
 
 export function attachAnnotations(card, annotations, renderContent, {
   body = card.querySelector(".message-body"),
-  foot = card.querySelector(".message-actions"),
 } = {}) {
   const previous = card.querySelector(".input-signal-dissent-marker");
   const open = previous?.open || false;
   previous?.remove();
   card.querySelector(".input-signal-review-badge")?.remove();
   card.classList.toggle("has-dissent-response", annotations.length > 0);
-  if (!annotations.length || !body || !foot) return;
+  if (!annotations.length || !body) return;
   const doc = card.ownerDocument;
   const label = annotationLabels(annotations);
-  const badge = doc.createElement("span");
-  badge.className = "input-signal-review-badge";
-  badge.textContent = `△ ${label}`;
-  badge.title = "原文保留；部分主张受到质疑，不代表整条消息已被判错";
-  body.append(badge);
-
   const marker = doc.createElement("details");
   marker.className = "input-signal-dissent-marker";
   marker.dataset.signalPopover = "";
   marker.open = open;
   const summary = doc.createElement("summary");
-  summary.textContent = annotations.length > 1 ? `${label} · ${annotations.length}` : label;
+  summary.className = "input-signal-review-badge";
+  const caption = doc.createElement("span");
+  caption.textContent = annotations.length > 1 ? `${label} · ${annotations.length}` : label;
+  summary.append(caption);
+  summary.title = `${caption.textContent}：点击查看具体依据。原文保留，不代表整条消息已被判错。`;
   summary.setAttribute("aria-label", `展开${label}的具体依据`);
   const panel = doc.createElement("div");
   panel.className = "input-signal-dissent-panel signal-popover-panel";
@@ -93,7 +90,9 @@ export function attachAnnotations(card, annotations, renderContent, {
     panel.append(item);
   }
   marker.append(summary, panel);
-  foot.prepend(marker);
+  // Anchor on the body's top border without entering the rich-text/opacity
+  // boundary: the floating evidence panel must remain opaque and viewport-bound.
+  body.before(marker);
 }
 
 export function initInputSignalRelations(conversation, { getSignals, renderContent }) {
