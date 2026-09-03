@@ -21,6 +21,7 @@ import { initMessageSync } from "/message-sync.js";
 import { initMessageHistory } from "/message-history.js";
 import { initPermissionUi } from "/permission-ui.js";
 import { initQuoteUi, quoteDraft } from "/quote-ui.js";
+import { initSignalReplyUi } from "/signal-reply-ui.js";
 import { initSettings } from "/settings.js";
 import { initUsageUi } from "/usage-ui.js";
 import { initTopbarUi } from "/topbar-ui.js";
@@ -113,11 +114,17 @@ let composerNoticeTimer = null;
 let responseWaitTimer = null;
 let responseDelayTimer = null;
 let stoppingResponse = false;
-let selectedSignalId = null;
 let topicUi = null;
 let modelCouncilUi = null;
 const manualExplorationReceiptIds = new Set();
 const displayedSignalIds = new Set();
+const signalReplyUi = initSignalReplyUi({
+  focusComposer() {
+    input.focus();
+    resizeComposer();
+  },
+  notify: notifyComposer,
+});
 const inputSignalRelations = initInputSignalRelations(conversation, {
   getSignals: () => appState.signals || [],
   renderContent: renderMessageContent,
@@ -128,10 +135,8 @@ const inputBriefingUi = initInputBriefingUi({
   applyAvatar: applyInputRoleAvatar,
   renderIcons,
   onReply: (signal) => {
-    selectedSignalId = signal.id;
     document.querySelector("#input-briefing-dialog")?.close();
-    input.focus();
-    composerState.textContent = "已附上这条观察、发生时间和来源";
+    signalReplyUi.select(signal);
   },
   refreshRuntime: () => messageSync.refresh(),
   notify: notifyComposer,
@@ -475,9 +480,7 @@ function appendInputSignal(signal, options = {}) {
   reply.title = signal.promotedRevisionId ? "继续讨论" : "回应这条输入";
   reply.setAttribute("aria-label", reply.title);
   reply.addEventListener("click", () => {
-    selectedSignalId = signal.id;
-    input.focus();
-    composerState.textContent = "已附上这条观察、发生时间和来源";
+    signalReplyUi.select(signal);
   });
   const dismiss = document.createElement("button");
   dismiss.type = "button";
@@ -498,10 +501,7 @@ function appendInputSignal(signal, options = {}) {
         const payload = await response.json().catch(() => ({}));
         throw new Error(payload.error || "无法移除这条外部输入");
       }
-      if (selectedSignalId === signal.id) {
-        selectedSignalId = null;
-        composerState.textContent = "";
-      }
+      signalReplyUi.clear(signal.id);
       appState.signals = appState.signals.filter((item) => item.id !== signal.id);
       messageSync.remove([`signal:${signal.id}`]);
       article.remove();
@@ -1096,12 +1096,12 @@ async function sendMessage(
   quotes = [],
   topic = null,
   codexTaskIds = [],
-  signalId = selectedSignalId,
+  signalId = null,
   councilParticipantIds = [],
 ) {
-  if (!text.trim() && !images.length && !quotes.length && !codexTaskIds.length) return;
+  if (!text.trim() && !images.length && !quotes.length && !codexTaskIds.length) return false;
   if (busy) {
-    await appendToActiveResponse(
+    return appendToActiveResponse(
       text,
       images,
       minimumLane,
@@ -1111,7 +1111,6 @@ async function sendMessage(
       signalId,
       councilParticipantIds,
     );
-    return;
   }
   const signal = appState.signals.find((item) => item.id === signalId) || null;
   const localEntry = localUserEntry(text, images, quotes, topic, signal);
@@ -1186,7 +1185,8 @@ async function sendMessage(
         if (entry?.revisionId) await retractMessage(message, entry);
         else message.remove();
       }
-      await sendMessage(
+      const replyDraft = signalId ? signalReplyUi.consume(signalId) : null;
+      const accepted = await sendMessage(
         first.content || "",
         await recoverImages(first),
         minimumLane,
@@ -1196,15 +1196,17 @@ async function sendMessage(
         signalId,
         councilParticipantIds,
       );
+      if (!accepted) signalReplyUi.restore(replyDraft);
     });
+    return Boolean(messageActions.entryFor(outgoing)?.revisionId);
   } finally {
     activeOutgoing = [];
     activePending = null;
     signalTyping(false);
     setBusy(false);
     if (!composer.hidden) input.focus();
-    if (selectedSignalId === signalId) selectedSignalId = null;
   }
+  return true;
 }
 
 function clearTemporaryDiscussionMessages() {
@@ -1296,7 +1298,7 @@ async function appendToActiveResponse(
   quotes,
   topic,
   codexTaskIds = [],
-  signalId = selectedSignalId,
+  signalId = null,
   councilParticipantIds = [],
 ) {
   const signal = appState.signals.find((item) => item.id === signalId) || null;
@@ -1325,12 +1327,14 @@ async function appendToActiveResponse(
         composerState.textContent = "";
       }
     }, 1200);
+    return true;
   } catch (error) {
     void modelCouncilUi.refreshActivation();
     messageActions.update(outgoing, null, {
       deliveryState: "failed",
       failureReason: error.message,
     });
+    return false;
   }
 }
 
@@ -1367,6 +1371,7 @@ function localUserEntry(text, images, quotes, topic, signal = null) {
             {
               type: "externalInput",
               input: {
+                signalId: signal.id,
                 sourceRevisionId: signal.promotedRevisionId || "",
                 actorName: signal.actor?.name || "外部输入",
                 title: signal.title || "外部输入",
@@ -1494,6 +1499,9 @@ async function performMessageAction(action, message, entry) {
     input.value = entry.content || "";
     selectedImages = images;
     quoteUi.set(extractQuotes(entry));
+    const signal = signalForEntry(entry);
+    if (signal) signalReplyUi.select(signal);
+    else signalReplyUi.clear();
     const topic = extractTopic(entry);
     if (topic) topicUi.set(topic);
     else topicUi.clear();
@@ -1504,13 +1512,18 @@ async function performMessageAction(action, message, entry) {
   }
   if (action === "retry") {
     await retractMessage(message, entry);
-    await sendMessage(
+    const signalId = signalForEntry(entry)?.id || null;
+    const replyDraft = signalId ? signalReplyUi.consume(signalId) : null;
+    const accepted = await sendMessage(
       entry.content || "",
       images,
       "auto",
       extractQuotes(entry),
       extractTopic(entry),
+      [],
+      signalId,
     );
+    if (!accepted) signalReplyUi.restore(replyDraft);
   }
 }
 
@@ -1597,6 +1610,15 @@ function extractTopic(entry) {
     : null;
 }
 
+function signalForEntry(entry) {
+  const source = (entry.parts || []).find((part) => part.type === "externalInput")?.input;
+  if (!source) return null;
+  return appState.signals.find((signal) =>
+    signal.id === source.signalId ||
+    (source.sourceRevisionId && signal.promotedRevisionId === source.sourceRevisionId),
+  ) || null;
+}
+
 composer.addEventListener("submit", (event) => {
   event.preventDefault();
   if (stoppingResponse) {
@@ -1612,7 +1634,8 @@ composer.addEventListener("submit", (event) => {
   if (councilParticipantIds === null) return;
   const codexTaskIds = composerContextUi.consume();
   if (codexTaskIds === null) return;
-  if (!text && !images.length && !quotes.length && !codexTaskIds.length) return;
+  if (!signalReplyUi.validateSubmission(Boolean(text || images.length || quotes.length || codexTaskIds.length))) return;
+  const replyDraft = signalReplyUi.consume();
   modelCouncilUi.commit(councilParticipantIds);
   input.value = "";
   selectedImages = [];
@@ -1622,7 +1645,10 @@ composer.addEventListener("submit", (event) => {
   renderAttachmentTray();
   resizeComposer();
   signalTyping(false);
-  sendMessage(text, images, minimumLane, quotes, topic, codexTaskIds, selectedSignalId, councilParticipantIds);
+  sendMessage(text, images, minimumLane, quotes, topic, codexTaskIds, replyDraft?.signal.id || null, councilParticipantIds)
+    .then((accepted) => {
+      if (!accepted) signalReplyUi.restore(replyDraft);
+    });
 });
 
 input.addEventListener("input", () => {

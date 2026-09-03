@@ -54,6 +54,8 @@ pub struct TranscriptMessageLinks {
     #[serde(default)]
     pub input_revision_ids: Vec<String>,
     #[serde(default)]
+    pub input_signal_ids: Vec<String>,
+    #[serde(default)]
     pub surfaced_hunch_revision_ids: Vec<String>,
 }
 

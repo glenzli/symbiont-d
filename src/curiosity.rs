@@ -896,6 +896,8 @@ mod tests {
                     responds_to: None,
                     continues_from: None,
                     input_revision_ids: Vec::new(),
+                    input_signal_ids: Vec::new(),
+                    external_inputs: Vec::new(),
                     surfaced_hunch_revision_ids: vec![created.revision_id.clone()],
                     quotes: Vec::new(),
                     topic: None,

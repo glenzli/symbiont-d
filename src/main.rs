@@ -199,11 +199,6 @@ async fn main() -> Result<()> {
         ContinuityHost::open_at_with_infer(
             pcp,
             Arc::clone(&transcript),
-            resolve_data_path(
-                &workspace,
-                "SYMBIONT_PCP_SOURCE_SEQUENCE_PATH",
-                "pcp-source-sequence.json",
-            ),
             Arc::clone(&infer_runtime),
         )
         .await?,

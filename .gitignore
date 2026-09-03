@@ -46,6 +46,7 @@
 /data/context.sqlite3-wal
 /data/context-maintenance.json
 /data/pcp-maintenance-state.json
+/data/pcp-source-sequence.json
 /data/reconciliation.json
 /data/assets
 /data/logs

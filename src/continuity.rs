@@ -1,6 +1,5 @@
 use std::{
     collections::{HashMap, HashSet},
-    path::PathBuf,
     sync::Arc,
 };
 
@@ -13,19 +12,17 @@ use pcp_client::PcpTenantApi;
 use pcp_core::CreateScopeRequest;
 use pcp_core::{
     AccessPermission, AccessPrincipal, AccessPrincipalType, AccessSession, Actor, ActorType,
-    BrowseIndexOrder, FeedbackSubmission, IngestPageRequest, InitialRelation, PagePayload,
-    Projection, QueryContextRequest, QueryContextResponse, ReadPage, ReadPagesRequest, Scope,
-    SearchFilters, SearchMode, SearchPagesRequest, SearchResult, SourceRef, SourceSpan,
-    SubmitFeedbackRequest, WriteResult,
+    BrowseIndexOrder, FeedbackSubmission, InitialRelation, Projection, QueryContextRequest,
+    QueryContextResponse, ReadPage, ReadPagesRequest, Scope, SearchFilters, SearchMode,
+    SearchPagesRequest, SearchResult, SourceRef, SubmitFeedbackRequest, WriteResult,
 };
+#[cfg(test)]
+use pcp_core::{IngestPageRequest, PagePayload};
 #[cfg(test)]
 use pcp_store::PcpStore;
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
-use tokio::{
-    fs,
-    sync::{Mutex, RwLock},
-};
+use tokio::sync::RwLock;
 
 use crate::{
     asset::{ImageAttachment, SavedImage},
@@ -35,7 +32,6 @@ use crate::{
         MessageMetadata, MessagePart, MessageQuote, MessageQuoteDraft, MessageTopicReference,
     },
     profile::ProfileSnapshot,
-    signals::SignalEvent,
     transcript::{
         TranscriptMessageLinks, TranscriptRecall, TranscriptSearchOptions, TranscriptSearchResult,
         TranscriptStore,
@@ -44,6 +40,7 @@ use crate::{
 };
 
 mod compound;
+mod context_inbox;
 mod recall_selection;
 mod recall_sources;
 pub(crate) mod retention;
@@ -71,74 +68,6 @@ const INDEX_EXCLUDED_PAGE_KINDS: &[&str] = &[
     "image_asset",
     "tombstone",
 ];
-/// One producer-local stream for all durable host events.  The sequence is
-/// persisted before the ingest RPC, so retries reuse the same external event
-/// identity and Runtime can namespace it as `host:symbiont-d:symbiont-main`.
-const CONVERSATION_SOURCE_STREAM: &str = "symbiont-main";
-
-#[derive(Clone, Debug, serde::Deserialize, serde::Serialize)]
-struct SourceSequenceState {
-    next: u64,
-}
-
-struct SourceSequence {
-    path: Option<PathBuf>,
-    next: Mutex<u64>,
-}
-
-impl SourceSequence {
-    async fn open(path: PathBuf) -> Result<Self> {
-        if let Some(parent) = path.parent() {
-            fs::create_dir_all(parent).await.with_context(|| {
-                format!("create source sequence directory {}", parent.display())
-            })?;
-        }
-        let next = match fs::read(&path).await {
-            Ok(bytes) => {
-                serde_json::from_slice::<SourceSequenceState>(&bytes)
-                    .context("decode durable PCP source sequence")?
-                    .next
-            }
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => 1,
-            Err(error) => {
-                return Err(error)
-                    .with_context(|| format!("read source sequence {}", path.display()));
-            }
-        };
-        anyhow::ensure!(next > 0, "durable PCP source sequence must start at one");
-        Ok(Self {
-            path: Some(path),
-            next: Mutex::new(next),
-        })
-    }
-
-    fn in_memory() -> Self {
-        Self {
-            path: None,
-            next: Mutex::new(1),
-        }
-    }
-
-    async fn reserve(&self) -> Result<u64> {
-        let mut next = self.next.lock().await;
-        let sequence = *next;
-        *next = next
-            .checked_add(1)
-            .context("PCP source sequence exhausted")?;
-        if let Some(path) = &self.path {
-            let state = serde_json::to_vec(&SourceSequenceState { next: *next })?;
-            let temporary = path.with_extension("tmp");
-            fs::write(&temporary, state)
-                .await
-                .with_context(|| format!("write source sequence {}", temporary.display()))?;
-            fs::rename(&temporary, path)
-                .await
-                .with_context(|| format!("commit source sequence {}", path.display()))?;
-        }
-        Ok(sequence)
-    }
-}
-
 #[derive(Clone, Debug)]
 pub struct ScopePolicy {
     pub namespace: String,
@@ -182,7 +111,6 @@ pub struct ContinuityHost {
     recall_runtime: Option<Arc<crate::infer_runtime::InferRuntimeAccess>>,
     retention: retention::RetentionQueue,
     scopes: ScopePolicy,
-    source_sequence: SourceSequence,
     orientation: RwLock<Option<WriteResult>>,
     live_conversation: ConversationProjection,
 }
@@ -192,6 +120,8 @@ pub struct MessageLinks {
     pub responds_to: Option<String>,
     pub continues_from: Option<String>,
     pub input_revision_ids: Vec<String>,
+    pub input_signal_ids: Vec<String>,
+    pub external_inputs: Vec<MessageExternalInputReference>,
     pub surfaced_hunch_revision_ids: Vec<String>,
     pub quotes: Vec<MessageQuote>,
     pub topic: Option<MessageTopicReference>,
@@ -249,66 +179,6 @@ pub struct LocalMessageImage {
 }
 
 impl ContinuityHost {
-    /// Makes a user-addressed input signal durable only after the user chooses to reply to it.
-    ///
-    /// The source remains an immutable external record, separate from the assistant's later
-    /// interpretation and from the transient signal timeline.
-    pub async fn ingest_external_signal(&self, signal: &SignalEvent) -> Result<WriteResult> {
-        let observed_at = now();
-        let payload = serde_json::to_string_pretty(&json!({
-            "title": signal.title,
-            "content": signal.content,
-            "received_text": signal.received_text,
-            "presentation": signal.presentation,
-            "qualification_note": signal.qualification_note,
-            "summary": signal.summary,
-            "actor": signal.actor,
-            "event_at": signal.event_at,
-            "observed_at": signal.observed_at,
-            "source_class": signal.source_class,
-            "review_reason": signal.review_reason,
-            "signal_kind": signal.kind,
-            "related_signal_ids": signal.related_signal_ids,
-        }))?;
-        let sequence = self.source_sequence.reserve().await?;
-        self.store
-            .ingest_page(IngestPageRequest {
-                namespace: self.scopes.namespace.clone(),
-                kind: "external_signal".to_owned(),
-                observed_at: Some(observed_at.clone()),
-                source_span: Some(SourceSpan {
-                    stream_id: CONVERSATION_SOURCE_STREAM.to_owned(),
-                    start: sequence,
-                    end: sequence,
-                }),
-                payload: Some(PagePayload {
-                    media_type: "application/vnd.symbiont.external-signal+json".to_owned(),
-                    content: payload,
-                }),
-                source_refs: signal
-                    .sources
-                    .iter()
-                    .map(|source| SourceRef {
-                        provider_id: "web".to_owned(),
-                        locator: source.url.clone(),
-                        media_type: Some("text/html".to_owned()),
-                        content_digest: None,
-                    })
-                    .collect(),
-                based_on_revision_ids: Vec::new(),
-                facets: Some(json!({
-                    "kind": "external_signal",
-                    "signal_id": signal.id,
-                    "candidate_id": signal.candidate_id,
-                    "source_class": signal.source_class,
-                    "actor_id": signal.actor.id,
-                    "actor_name": signal.actor.name,
-                })),
-                external_event_id: Some(format!("external-signal:{}", signal.id)),
-            })
-            .await
-    }
-
     async fn external_input_references(
         &self,
         revision_ids: &[String],
@@ -350,54 +220,25 @@ impl ContinuityHost {
         transcript: Arc<TranscriptStore>,
     ) -> Result<Self> {
         let transcript_recall = TranscriptRecall::new(Arc::clone(&transcript));
-        Self::open_with_sequence(
-            store,
-            transcript,
-            transcript_recall,
-            SourceSequence::in_memory(),
-        )
-        .await
-    }
-
-    pub async fn open_at(
-        store: Arc<dyn PcpTenantApi>,
-        transcript: Arc<TranscriptStore>,
-        sequence_path: PathBuf,
-    ) -> Result<Self> {
-        let transcript_recall = TranscriptRecall::new(Arc::clone(&transcript));
-        Self::open_with_sequence(
-            store,
-            transcript,
-            transcript_recall,
-            SourceSequence::open(sequence_path).await?,
-        )
-        .await
+        Self::open_with_recall(store, transcript, transcript_recall).await
     }
 
     pub(crate) async fn open_at_with_infer(
         store: Arc<dyn PcpTenantApi>,
         transcript: Arc<TranscriptStore>,
-        sequence_path: PathBuf,
         runtime: Arc<crate::infer_runtime::InferRuntimeAccess>,
     ) -> Result<Self> {
         let transcript_recall =
             TranscriptRecall::with_infer(Arc::clone(&transcript), Arc::clone(&runtime));
-        let mut host = Self::open_with_sequence(
-            store,
-            transcript,
-            transcript_recall,
-            SourceSequence::open(sequence_path).await?,
-        )
-        .await?;
+        let mut host = Self::open_with_recall(store, transcript, transcript_recall).await?;
         host.recall_runtime = Some(runtime);
         Ok(host)
     }
 
-    async fn open_with_sequence(
+    async fn open_with_recall(
         store: Arc<dyn PcpTenantApi>,
         transcript: Arc<TranscriptStore>,
         transcript_recall: TranscriptRecall,
-        source_sequence: SourceSequence,
     ) -> Result<Self> {
         let scopes = ScopePolicy::for_access(store.access())?;
         let retention = retention::RetentionQueue::open(retention::RetentionQueue::path_for(
@@ -412,7 +253,6 @@ impl ContinuityHost {
             retention,
             recall_runtime: None,
             scopes,
-            source_sequence,
             orientation: RwLock::new(None),
             live_conversation: ConversationProjection::new(),
         })
@@ -568,10 +408,12 @@ impl ContinuityHost {
         // selected source into PCP without making the transcript dependent on
         // that decision.
         let attachment_revision_ids = Vec::new();
-        let external_inputs = if role == MemoryRole::User {
+        let external_inputs = if role == MemoryRole::User && links.external_inputs.is_empty() {
             self.external_input_references(&links.input_revision_ids)
                 .await
-                .context("resolve external input references")?
+                .context("resolve legacy external input references")?
+        } else if role == MemoryRole::User {
+            links.external_inputs.clone()
         } else {
             Vec::new()
         };
@@ -623,6 +465,7 @@ impl ContinuityHost {
                     responds_to: links.responds_to,
                     continues_from: links.continues_from,
                     input_revision_ids: links.input_revision_ids,
+                    input_signal_ids: links.input_signal_ids,
                     surfaced_hunch_revision_ids: links.surfaced_hunch_revision_ids,
                 },
             )
@@ -636,52 +479,6 @@ impl ContinuityHost {
             },
             attachment_revision_ids,
         })
-    }
-
-    async fn ingest_image_assets(
-        &self,
-        images: &[SavedImage],
-        observed_at: &str,
-        _actor: &Actor,
-        _tool_or_model: Option<&str>,
-    ) -> Result<Vec<String>> {
-        let mut revision_ids = Vec::with_capacity(images.len());
-        for image in images {
-            let payload = serde_json::to_string_pretty(&image.attachment)?;
-            let sequence = self.source_sequence.reserve().await?;
-            let result = self
-                .store
-                .ingest_page(IngestPageRequest {
-                    namespace: self.scopes.namespace.clone(),
-                    kind: "image_asset".to_owned(),
-                    observed_at: Some(observed_at.to_owned()),
-                    source_span: Some(SourceSpan {
-                        stream_id: CONVERSATION_SOURCE_STREAM.to_owned(),
-                        start: sequence,
-                        end: sequence,
-                    }),
-                    payload: Some(PagePayload {
-                        media_type: "application/vnd.symbiont.image+json".to_owned(),
-                        content: payload,
-                    }),
-                    source_refs: vec![SourceRef {
-                        provider_id: image.source_type().to_owned(),
-                        locator: image.source_uri().to_owned(),
-                        media_type: Some("application/vnd.symbiont.image+json".to_owned()),
-                        content_digest: Some(image.attachment.sha256.clone()),
-                    }],
-                    based_on_revision_ids: Vec::new(),
-                    facets: Some(json!({
-                        "kind": "image_asset",
-                        "sha256": image.attachment.sha256,
-                        "origin": image.source_type()
-                    })),
-                    external_event_id: Some(format!("image-asset:{}", image.attachment.sha256)),
-                })
-                .await?;
-            revision_ids.push(result.revision_id);
-        }
-        Ok(revision_ids)
     }
 
     pub async fn recent_image_assets(&self, limit: usize) -> Result<Vec<ImageAssetPage>> {
@@ -1516,11 +1313,21 @@ fn external_input_reference_from_page(page: ReadPage) -> Option<MessageExternalI
         .or_else(|| page.revision.observed_at.clone())
         .unwrap_or_else(|| page.revision.created_at.clone());
     Some(MessageExternalInputReference {
-        source_revision_id: page.revision.revision_id,
+        signal_id: facets
+            .get("signal_id")
+            .and_then(Value::as_str)
+            .map(str::to_owned),
+        source_revision_id: Some(page.revision.revision_id),
         actor_name,
         title,
         observed_at,
         excerpt,
+        content: None,
+        qualification_note: value
+            .get("qualification_note")
+            .and_then(Value::as_str)
+            .map(str::to_owned),
+        sources: Vec::new(),
         source_count: page.revision.source_refs.len(),
     })
 }

@@ -12,6 +12,7 @@ use std::{
 use anyhow::{Context, Result};
 use pcp_client::{
     ContentLibraryFilter, ContentLibraryResult, ContentLibrarySummary, PcpApi, PcpTenantApi,
+    context_hub::ContextHubRequest as ContextInboxRequest,
 };
 use pcp_core::{
     AccessSession, BrowseIndexOrder, Capabilities, FeedbackSubmission, IngestPageRequest,
@@ -304,6 +305,42 @@ impl PcpTenantApi for ManagedPcpClient {
 
     fn access(&self) -> &AccessSession {
         &self.access
+    }
+
+    async fn context_hub(&self, request: ContextInboxRequest) -> Result<serde_json::Value> {
+        let retry_safe = matches!(
+            &request,
+            ContextInboxRequest::ReadActivity(_) | ContextInboxRequest::Inspect
+        );
+        let first = self.current();
+        match first.api.context_hub(request.clone()).await {
+            Ok(value) => Ok(value),
+            Err(error) if transport_failure(&error) && retry_safe => {
+                self.recover_after_transport_failure(&first).await?;
+                self.current().api.context_hub(request).await
+            }
+            Err(error) if transport_failure(&error) => {
+                let _ = self.recover_after_transport_failure(&first).await;
+                let guidance = match request {
+                    ContextInboxRequest::SubmitCandidate(_) => {
+                        "PCP transport recovered after an ambiguous Context Inbox candidate submission; retry only the exact unchanged candidate request with its stable event identity"
+                    }
+                    ContextInboxRequest::PublishActivity(_) => {
+                        "PCP transport recovered after an ambiguous Context Inbox activity update; read the current card before deciding whether to retry the exact update"
+                    }
+                    ContextInboxRequest::SetPolicy(_)
+                    | ContextInboxRequest::Review(_)
+                    | ContextInboxRequest::RemoveActivity { .. } => {
+                        "PCP transport recovered after an ambiguous Context Inbox mutation; inspect current Runtime state before deciding whether to retry the exact unchanged request"
+                    }
+                    ContextInboxRequest::ReadActivity(_) | ContextInboxRequest::Inspect => {
+                        unreachable!("read-only Context Inbox requests are retried above")
+                    }
+                };
+                Err(error).context(guidance)
+            }
+            Err(error) => Err(error),
+        }
     }
 
     retrying_read!(list_scopes(

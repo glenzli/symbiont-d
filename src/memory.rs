@@ -77,13 +77,32 @@ pub enum MessagePart {
 #[derive(Clone, Debug, Deserialize, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct MessageExternalInputReference {
-    pub source_revision_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub signal_id: Option<String>,
+    /// Legacy PCP Revision for replies recorded before external inputs became
+    /// local-first. New replies keep the source packet in the transcript and
+    /// therefore do not require a durable PCP Page.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_revision_id: Option<String>,
     pub actor_name: String,
     pub title: String,
     pub observed_at: String,
     pub excerpt: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub content: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub qualification_note: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub sources: Vec<MessageExternalInputSource>,
     #[serde(default)]
     pub source_count: usize,
+}
+
+#[derive(Clone, Debug, Deserialize, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MessageExternalInputSource {
+    pub url: String,
+    pub detail: String,
 }
 
 #[derive(Clone, Debug, Deserialize, PartialEq, Eq, Serialize)]

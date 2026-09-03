@@ -347,6 +347,8 @@ async fn run_continuation(
                     responds_to: None,
                     continues_from: Some(job.source_assistant_revision_id.clone()),
                     input_revision_ids,
+                    input_signal_ids: Vec::new(),
+                    external_inputs: Vec::new(),
                     surfaced_hunch_revision_ids: Vec::new(),
                     quotes: Vec::new(),
                     topic: job.topic.clone(),

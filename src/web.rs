@@ -69,8 +69,9 @@ use crate::{
     input_roles::{InputRoleSettingsSnapshot, InputRoleSettingsUpdate, InputRoleStore},
     mail_input::{MailInputConfig, MailInputConnectionTest, MailInputSnapshot, MailInputStore},
     memory::{
-        MemoryEntry, MemoryRole, MessageDeliveryState, MessageMetadata, MessageQuote,
-        MessageQuoteDraft, MessageRunMetadata,
+        MemoryEntry, MemoryRole, MessageDeliveryState, MessageExternalInputReference,
+        MessageExternalInputSource, MessageMetadata, MessageQuote, MessageQuoteDraft,
+        MessageRunMetadata,
     },
     model_council::{
         CouncilScope, MAX_SELECTED_PARTICIPANTS, ModelCouncilActivationSnapshot,
@@ -128,6 +129,7 @@ const MESSAGE_HISTORY_JS: &str = include_str!("../web/message-history.js");
 const MESSAGE_ACTIONS_JS: &str = include_str!("../web/message-actions.js");
 const TURN_DISPOSITION_UI_JS: &str = include_str!("../web/turn-disposition-ui.js");
 const QUOTE_UI_JS: &str = include_str!("../web/quote-ui.js");
+const SIGNAL_REPLY_UI_JS: &str = include_str!("../web/signal-reply-ui.js");
 const PERMISSION_UI_JS: &str = include_str!("../web/permission-ui.js");
 const TRACE_UI_JS: &str = include_str!("../web/trace-ui.js");
 const CONTEXT_INSPECTOR_JS: &str = include_str!("../web/context-inspector.js");
@@ -271,7 +273,7 @@ struct ChatRequest {
     quotes: Vec<MessageQuote>,
     topic: Option<TopicContext>,
     external_contexts: Vec<ExternalContext>,
-    signal_revision_id: Option<String>,
+    input_signal: Option<SignalEvent>,
     minimum_lane: Option<crate::compute::ComputeLane>,
     council_participant_ids: Vec<String>,
 }
@@ -653,6 +655,7 @@ pub fn router(state: AppState) -> Router {
         .route("/message-actions.js", get(message_actions_js))
         .route("/turn-disposition-ui.js", get(turn_disposition_ui_js))
         .route("/quote-ui.js", get(quote_ui_js))
+        .route("/signal-reply-ui.js", get(signal_reply_ui_js))
         .route("/permission-ui.js", get(permission_ui_js))
         .route("/trace-ui.js", get(trace_ui_js))
         .route("/context-inspector.js", get(context_inspector_js))
@@ -1056,6 +1059,13 @@ async fn quote_ui_js() -> impl IntoResponse {
     (
         [(header::CONTENT_TYPE, "text/javascript; charset=utf-8")],
         QUOTE_UI_JS,
+    )
+}
+
+async fn signal_reply_ui_js() -> impl IntoResponse {
+    (
+        [(header::CONTENT_TYPE, "text/javascript; charset=utf-8")],
+        SIGNAL_REPLY_UI_JS,
     )
 }
 
@@ -2176,6 +2186,8 @@ async fn redeliver_exploration(
                 responds_to: None,
                 continues_from: None,
                 input_revision_ids: delivery.context_revision_ids,
+                input_signal_ids: Vec::new(),
+                external_inputs: Vec::new(),
                 surfaced_hunch_revision_ids: Vec::new(),
                 quotes: Vec::new(),
                 topic: None,
@@ -2936,7 +2948,7 @@ async fn prepare_chat_request(
             external_contexts.push(codex_task_context(detail));
         }
     }
-    let signal_revision_id = match incoming.signal_id {
+    let input_signal = match incoming.signal_id {
         Some(signal_id) => {
             let mut signal = state
                 .signals
@@ -2951,24 +2963,8 @@ async fn prepare_chat_request(
                 .input_roles
                 .apply(&mut signal.actor, &display_name)
                 .await;
-            let revision_id = match signal.promoted_revision_id.as_deref() {
-                Some(revision_id) => revision_id.to_owned(),
-                None => {
-                    state
-                        .continuity
-                        .ingest_external_signal(&signal)
-                        .await
-                        .map_err(ApiError::internal)?
-                        .revision_id
-                }
-            };
-            state
-                .signals
-                .mark_promoted(&signal_id, revision_id.clone())
-                .await
-                .map_err(ApiError::internal)?;
             external_contexts.push(signal_context(&signal));
-            Some(revision_id)
+            Some(signal)
         }
         None => None,
     };
@@ -2978,7 +2974,7 @@ async fn prepare_chat_request(
         quotes,
         topic,
         external_contexts,
-        signal_revision_id,
+        input_signal,
         minimum_lane,
         council_participant_ids,
     })
@@ -3006,6 +3002,17 @@ async fn store_user_message(
             .await
             .map_err(ApiError::internal)?,
     };
+    let input_signal_ids = request
+        .input_signal
+        .as_ref()
+        .map(|signal| vec![signal.id.clone()])
+        .unwrap_or_default();
+    let external_inputs = request
+        .input_signal
+        .as_ref()
+        .map(external_input_reference)
+        .into_iter()
+        .collect();
     let stored = state
         .continuity
         .ingest_message(
@@ -3016,7 +3023,9 @@ async fn store_user_message(
             MessageLinks {
                 responds_to: None,
                 continues_from: None,
-                input_revision_ids: request.signal_revision_id.into_iter().collect(),
+                input_revision_ids: Vec::new(),
+                input_signal_ids,
+                external_inputs,
                 surfaced_hunch_revision_ids: Vec::new(),
                 quotes: request.quotes.clone(),
                 topic: request.topic.as_ref().map(TopicContext::message_reference),
@@ -3388,6 +3397,8 @@ async fn run_chat(
                 responds_to: Some(last_user_revision_id.clone()),
                 continues_from: None,
                 input_revision_ids,
+                input_signal_ids: Vec::new(),
+                external_inputs: Vec::new(),
                 surfaced_hunch_revision_ids: Vec::new(),
                 quotes: Vec::new(),
                 topic: primary_topic.as_ref().map(TopicContext::message_reference),
@@ -3760,6 +3771,39 @@ fn signal_context(signal: &SignalEvent) -> ExternalContext {
                 .collect::<Vec<_>>()
                 .join("\n")
         ),
+    }
+}
+
+fn external_input_reference(signal: &SignalEvent) -> MessageExternalInputReference {
+    let displayed = signal.content.trim();
+    let excerpt = if displayed.chars().count() > 360 {
+        format!("{}…", displayed.chars().take(359).collect::<String>())
+    } else {
+        displayed.to_owned()
+    };
+    let content = if signal.received_text.trim().is_empty() {
+        signal.content.trim()
+    } else {
+        signal.received_text.trim()
+    };
+    MessageExternalInputReference {
+        signal_id: Some(signal.id.clone()),
+        source_revision_id: signal.promoted_revision_id.clone(),
+        actor_name: signal.actor.name.clone(),
+        title: signal.title.clone(),
+        observed_at: signal.observed_at.clone(),
+        excerpt,
+        content: Some(content.to_owned()),
+        qualification_note: signal.qualification_note.clone(),
+        sources: signal
+            .sources
+            .iter()
+            .map(|source| MessageExternalInputSource {
+                url: source.url.clone(),
+                detail: source.detail.clone(),
+            })
+            .collect(),
+        source_count: signal.sources.len(),
     }
 }
 

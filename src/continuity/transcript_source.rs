@@ -4,7 +4,7 @@ use anyhow::{Context, Result};
 use serde::Serialize;
 
 use crate::{
-    memory::MemoryRole,
+    memory::{MemoryRole, MessageExternalInputReference, MessagePart},
     transcript::{
         TranscriptRecall, TranscriptSourceOptions,
         TranscriptSourceResolution as LocalTranscriptSourceResolution, TranscriptSourceStatus,
@@ -20,6 +20,7 @@ const MAX_TARGET_CONTENT_CHARS: usize = 6_000;
 const MAX_CONTEXT_CONTENT_CHARS: usize = 1_500;
 const MAX_TOTAL_CONTENT_CHARS: usize = 12_000;
 const MAX_MESSAGE_ID_CHARS: usize = 128;
+const MAX_EXTERNAL_INPUT_CHARS: usize = 6_000;
 
 #[derive(Clone, Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -41,6 +42,8 @@ pub(crate) struct TranscriptSourceResolution {
     source_message_id: String,
     status: TranscriptSourceStatus,
     messages: Vec<HostedTranscriptMessage>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    external_inputs: Vec<MessageExternalInputReference>,
     #[serde(default, skip_serializing_if = "is_false")]
     truncated: bool,
 }
@@ -76,10 +79,18 @@ pub(super) async fn resolve(
             source_message_id: source.message_id,
             status: TranscriptSourceStatus::Unavailable,
             messages: Vec::new(),
+            external_inputs: Vec::new(),
             truncated: false,
         });
     }
-    let local = TranscriptRecall::new(transcript)
+    let external_inputs = transcript
+        .by_ids(std::slice::from_ref(&source.message_id))
+        .await?
+        .into_iter()
+        .next()
+        .map(|entry| bounded_external_inputs(entry.parts))
+        .unwrap_or_default();
+    let mut local = TranscriptRecall::new(transcript)
         .resolve_source(
             &source.message_id,
             TranscriptSourceOptions {
@@ -92,6 +103,8 @@ pub(super) async fn resolve(
             },
         )
         .await?;
+    local.external_inputs = external_inputs.0;
+    local.truncated |= external_inputs.1;
     Ok(host_resolution(source, local))
 }
 
@@ -156,8 +169,32 @@ fn host_resolution(
                 truncated: message.truncated,
             })
             .collect(),
+        external_inputs: local.external_inputs,
         truncated: local.truncated,
     }
+}
+
+fn bounded_external_inputs(parts: Vec<MessagePart>) -> (Vec<MessageExternalInputReference>, bool) {
+    let mut remaining = MAX_EXTERNAL_INPUT_CHARS;
+    let mut truncated = false;
+    let mut inputs = Vec::new();
+    for part in parts {
+        let MessagePart::ExternalInput { mut input } = part else {
+            continue;
+        };
+        if let Some(content) = input.content.take() {
+            let chars = content.chars().count();
+            let selected = content.chars().take(remaining).collect::<String>();
+            remaining = remaining.saturating_sub(selected.chars().count());
+            truncated |= selected.chars().count() < chars;
+            input.content = Some(selected);
+        }
+        inputs.push(input);
+        if remaining == 0 {
+            break;
+        }
+    }
+    (inputs, truncated)
 }
 
 fn is_false(value: &bool) -> bool {
@@ -173,7 +210,10 @@ mod tests {
         resolve,
     };
     use crate::{
-        memory::{MemoryEntry, MemoryRole, MessagePart},
+        memory::{
+            MemoryEntry, MemoryRole, MessageExternalInputReference, MessageExternalInputSource,
+            MessagePart,
+        },
         transcript::{TranscriptMessageLinks, TranscriptStore},
     };
 
@@ -275,6 +315,75 @@ mod tests {
         assert_eq!(resolution.messages[2].message_id, third.message_id);
         assert_eq!(resolution.messages[2].content.chars().count(), 1_500);
         assert!(resolution.messages[2].truncated);
+    }
+
+    #[tokio::test]
+    async fn exact_source_resolution_includes_bounded_external_reply_provenance() {
+        let temporary = tempfile::tempdir().expect("temporary directory");
+        let (store, _) = TranscriptStore::open(temporary.path().join("transcript.sqlite3"), None)
+            .await
+            .expect("open transcript");
+        let store = Arc::new(store);
+        let mut source = entry(
+            MemoryRole::User,
+            "2026-09-04T00:00:00Z",
+            "Why does this external result matter?",
+        );
+        source.parts.insert(
+            0,
+            MessagePart::ExternalInput {
+                input: MessageExternalInputReference {
+                    signal_id: Some("signal_local".into()),
+                    source_revision_id: None,
+                    actor_name: "Gemini Spark".into(),
+                    title: "A result".into(),
+                    observed_at: "2026-09-04T00:00:00Z".into(),
+                    excerpt: "bounded display excerpt".into(),
+                    content: Some("source body".repeat(1_000)),
+                    qualification_note: Some("unverified external input".into()),
+                    sources: vec![MessageExternalInputSource {
+                        url: "https://example.test/paper".into(),
+                        detail: "paper".into(),
+                    }],
+                    source_count: 1,
+                },
+            },
+        );
+        let written = store
+            .append(source, TranscriptMessageLinks::default())
+            .await
+            .expect("append source");
+
+        let resolution = resolve(
+            store,
+            "symbiont:transcript",
+            &format!("message/{}", written.message_id),
+            0,
+            0,
+        )
+        .await
+        .expect("resolve source");
+
+        assert_eq!(resolution.external_inputs.len(), 1);
+        assert_eq!(
+            resolution.external_inputs[0].signal_id.as_deref(),
+            Some("signal_local")
+        );
+        assert_eq!(resolution.external_inputs[0].source_revision_id, None);
+        assert_eq!(
+            resolution.external_inputs[0].sources[0].url,
+            "https://example.test/paper"
+        );
+        assert_eq!(
+            resolution.external_inputs[0]
+                .content
+                .as_deref()
+                .unwrap()
+                .chars()
+                .count(),
+            6_000
+        );
+        assert!(resolution.truncated);
     }
 
     #[tokio::test]

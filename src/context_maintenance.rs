@@ -388,6 +388,8 @@ async fn review_profile(
                     responds_to: None,
                     continues_from: None,
                     input_revision_ids,
+                    input_signal_ids: Vec::new(),
+                    external_inputs: Vec::new(),
                     surfaced_hunch_revision_ids: Vec::new(),
                     quotes: Vec::new(),
                     topic: None,

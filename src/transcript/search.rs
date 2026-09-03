@@ -22,7 +22,7 @@ use super::{
     semantic::{SemanticMatch, TranscriptSemanticIndex},
 };
 use crate::infer_runtime::InferRuntimeAccess;
-use crate::memory::MemoryRole;
+use crate::memory::{MemoryRole, MessageExternalInputReference};
 
 const MAX_QUERY_CHARS: usize = 512;
 const MAX_TERMS: usize = 96;
@@ -145,6 +145,10 @@ pub struct TranscriptSourceResolution {
     pub status: TranscriptSourceStatus,
     /// Chronological same-episode context. The target has `matched=true`.
     pub messages: Vec<TranscriptSearchMessage>,
+    /// Exact source packets attached to the target message. This is populated
+    /// only by the host's explicit SourceRef resolver, never broad search.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub external_inputs: Vec<MessageExternalInputReference>,
     pub truncated: bool,
 }
 
@@ -458,6 +462,7 @@ pub(super) fn resolve_source(
             source_message_id: message_id.to_owned(),
             status: TranscriptSourceStatus::Unavailable,
             messages: Vec::new(),
+            external_inputs: Vec::new(),
             truncated: false,
         });
     };
@@ -466,6 +471,7 @@ pub(super) fn resolve_source(
             source_message_id: message_id.to_owned(),
             status: TranscriptSourceStatus::Retracted,
             messages: Vec::new(),
+            external_inputs: Vec::new(),
             truncated: false,
         });
     }
@@ -545,6 +551,7 @@ pub(super) fn resolve_source(
         source_message_id: message_id.to_owned(),
         status: TranscriptSourceStatus::Active,
         messages,
+        external_inputs: Vec::new(),
         truncated,
     })
 }

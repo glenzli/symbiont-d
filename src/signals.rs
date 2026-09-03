@@ -40,8 +40,9 @@ impl SignalExpirySummary {
 
 /// A visible but non-durable input from an auxiliary model role.
 ///
-/// Signals deliberately live outside PCP. They become durable source material only
-/// when the user explicitly replies to one.
+/// Signals deliberately live outside PCP. A reply copies a bounded, traceable
+/// source packet into the local transcript; formal PCP retention remains an
+/// independent model decision.
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SignalEvent {
@@ -81,7 +82,7 @@ pub struct SignalEvent {
     #[serde(alias = "review_reason")]
     pub review_reason: String,
     /// Exact transient inputs this event examines. Relations remain local to
-    /// the chat stream until the user explicitly replies to the event.
+    /// the chat stream even when the user replies to the event.
     #[serde(default, alias = "related_signal_ids")]
     pub related_signal_ids: Vec<String>,
     #[serde(default, alias = "promoted_revision_id")]
@@ -531,9 +532,9 @@ impl SignalStore {
         Ok(changed)
     }
 
-    /// Removes unadopted external inputs after the user-selected lifetime.
-    /// Signals promoted into PCP are kept outside this transient cleanup; their
-    /// visible source is already represented by the durable conversation.
+    /// Removes transient external inputs after the user-selected lifetime.
+    /// A reply already carries its own local transcript source packet. Legacy
+    /// signals once promoted into PCP remain excluded for compatibility.
     pub async fn expire_unadopted(&self, retention_days: u16) -> Result<SignalExpirySummary> {
         if retention_days == 0 {
             return Ok(SignalExpirySummary::default());

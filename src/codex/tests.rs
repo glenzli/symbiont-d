@@ -266,7 +266,8 @@ fn foreground_tools_keep_autonomous_memory_but_not_background_bookkeeping() {
         "without user approval",
         "retention_basis and recall_value",
         "status=written",
-        "never derive a write across Scopes",
+        "Cross-Scope derivation requires permission",
+        "defer instead of deleting evidence",
         "SourceRefs",
         "old wishes are not renewed",
     ] {
@@ -425,11 +426,12 @@ fn persistent_instructions_define_a_short_unambiguous_pcp_boundary() {
     assert!(instructions.contains("PCP is a compound context system"));
     assert!(instructions.contains("Host-local source plane owns raw user and assistant"));
     assert!(instructions.contains("PCP Runtime owns retained cross-Host Pages"));
-    assert!(instructions.contains("a future recall use as well as the actual new information"));
+    assert!(instructions.contains("actual new information with a named future recall use"));
     assert!(instructions.contains("certainty, polish and recurrence are not prerequisites"));
     assert!(instructions.contains("before asking the user to repeat known history"));
     assert!(instructions.contains("Autonomously call `pcp.write_page`"));
     assert!(instructions.contains("Mere assent/praise"));
+    assert!(instructions.contains("permission denial means defer, never strip evidence"));
     assert!(instructions.contains("Do not repeat an identical PCP search or read"));
     assert!(instructions.contains("Rarely use `symbiont.reserve_continuation`"));
     assert!(instructions.contains("PCP memory operations remain available"));

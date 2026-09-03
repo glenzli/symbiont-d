@@ -16,6 +16,7 @@ const READ_PCP: &[&str] = &[
     "match_intent",
     "read_pages",
 ];
+const CONTEXT_INBOX: &[&str] = &["submit_candidate", "publish_activity", "read_activity"];
 const HISTORY: &[&str] = &[
     "resolve_source_ref",
     "search_transcript",
@@ -26,10 +27,19 @@ const HUNCH: &[&str] = &["open_hunch", "revise_hunch", "retire_hunch"];
 pub(super) fn allowed(origin: &str, namespace: &str, tool: &str, calibrating: bool) -> bool {
     if namespace == "pcp" {
         return match origin {
-            "interactive" | "reflection" => {
-                READ_PCP.contains(&tool) || matches!(tool, "write_page" | "submit_feedback")
+            "interactive" => {
+                READ_PCP.contains(&tool)
+                    || CONTEXT_INBOX.contains(&tool)
+                    || matches!(tool, "write_page" | "submit_feedback")
             }
-            "autonomous" | "continuation" | "maintenance" | "pcp_transcript_migration" => {
+            "reflection" => {
+                READ_PCP.contains(&tool)
+                    || matches!(tool, "write_page" | "submit_feedback" | "submit_candidate")
+            }
+            "autonomous" => {
+                READ_PCP.contains(&tool) || matches!(tool, "write_page" | "submit_candidate")
+            }
+            "continuation" | "maintenance" | "pcp_transcript_migration" => {
                 READ_PCP.contains(&tool) || tool == "write_page"
             }
             "autonomous_scout" => READ_PCP.contains(&tool),
@@ -90,7 +100,9 @@ pub(super) fn allowed(origin: &str, namespace: &str, tool: &str, calibrating: bo
 
 fn group(namespace: &str, tool: &str) -> &'static str {
     if namespace == "pcp" {
-        return if READ_PCP.contains(&tool) {
+        return if CONTEXT_INBOX.contains(&tool) {
+            "inbox"
+        } else if READ_PCP.contains(&tool) {
             "recall"
         } else {
             "memory"
@@ -131,9 +143,9 @@ fn group(namespace: &str, tool: &str) -> &'static str {
 fn gateways() -> Vec<Value> {
     vec![
         json!({"type":"function", "name":"discover_tools",
-        "description":"Find permitted additional capabilities. group lists names only; tool (namespace.name) returns one exact schema. Groups: recall=PCP search/read, history=raw chat/local state, memory=durable write/correction, attention=hunch/follow-up, preferences=user settings, maintenance, reflection, utilities.",
+        "description":"Find permitted additional capabilities. group lists names only; tool (namespace.name) returns one exact schema. Groups: recall=PCP search/read, inbox=optional PCP candidate/activity staging, history=raw chat/local state, memory=durable write/correction, attention=hunch/follow-up, preferences=user settings, maintenance, reflection, utilities.",
         "inputSchema":{"type":"object","properties":{
-            "group":{"type":"string","enum":["recall","history","memory","attention","preferences","maintenance","reflection","utilities"]},
+            "group":{"type":"string","enum":["recall","inbox","history","memory","attention","preferences","maintenance","reflection","utilities"]},
             "tool":{"type":"string"}},"additionalProperties":false}}),
         json!({"type":"function","name":"invoke_tool",
         "description":"Execute a tool discovered by discover_tools. Copy its namespace/name and satisfy its exact inputSchema. The host enforces stage permissions and existing approval/evidence boundaries; this does not expand access.",
@@ -362,6 +374,55 @@ mod tests {
         );
         assert!(discover(&json!({"tool":"pcp.write_page"}), "interactive", false).is_ok());
         assert!(discover(&json!({"tool":"pcp.write_page"}), "reflection", false).is_ok());
+        let context = discover(&json!({"group":"inbox"}), "interactive", false).unwrap();
+        assert_eq!(
+            context["tools"],
+            json!([
+                "pcp.submit_candidate",
+                "pcp.publish_activity",
+                "pcp.read_activity"
+            ])
+        );
+        assert!(discover(&json!({"tool":"pcp.submit_candidate"}), "autonomous", false).is_ok());
+        assert!(discover(&json!({"tool":"pcp.publish_activity"}), "reflection", false).is_err());
+
+        let candidate = discover(
+            &json!({"tool":"pcp.submit_candidate"}),
+            "interactive",
+            false,
+        )
+        .unwrap();
+        let candidate_description = candidate["description"].as_str().unwrap();
+        assert!(candidate_description.contains("self-contained"));
+        assert!(candidate_description.contains("exact same arguments"));
+        assert!(candidate_description.contains("never proves truth or promotes"));
+        assert!(
+            candidate["inputSchema"]["properties"]["based_on_revision_ids"]["description"]
+                .as_str()
+                .unwrap()
+                .contains("other readable Scopes")
+        );
+
+        let activity = discover(
+            &json!({"tool":"pcp.publish_activity"}),
+            "interactive",
+            false,
+        )
+        .unwrap();
+        let activity_description = activity["description"].as_str().unwrap();
+        for boundary in [
+            "concrete cross-client context gap",
+            "stable topic key",
+            "at most three",
+            "end-of-session",
+            "must not be republished",
+            "never Page recall",
+        ] {
+            assert!(
+                activity_description.contains(boundary),
+                "missing {boundary}"
+            );
+        }
     }
     #[test]
     fn deferred_calls_resolve_to_canonical_identity_and_reject_bad_shapes() {

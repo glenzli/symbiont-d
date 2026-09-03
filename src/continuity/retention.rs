@@ -20,7 +20,7 @@ use std::collections::BTreeSet;
 use tokio::time::{Duration, timeout};
 
 use super::ContinuityHost;
-use crate::memory::{MemoryEntry, MemoryRole};
+use crate::memory::{MemoryEntry, MemoryRole, MessagePart};
 use store::Record;
 pub(super) use store::RetentionQueue;
 
@@ -365,7 +365,35 @@ fn review_packet(
 }
 
 fn source_evidence(sources: &[MemoryEntry]) -> Vec<Value> {
-    sources.iter().map(|source|json!({"id":source.revision_id,"role":source.role,"at":source.at,"content":source.content})).collect()
+    sources
+        .iter()
+        .map(|source| {
+            let external_inputs = source
+                .parts
+                .iter()
+                .filter_map(|part| {
+                    let MessagePart::ExternalInput { input } = part else {
+                        return None;
+                    };
+                    Some(json!({
+                        "signalId": input.signal_id,
+                        "title": input.title,
+                        "actorName": input.actor_name,
+                        "excerpt": input.excerpt,
+                        "qualification": input.qualification_note,
+                        "sourceUrls": input.sources.iter().map(|source| &source.url).collect::<Vec<_>>()
+                    }))
+                })
+                .collect::<Vec<_>>();
+            json!({
+                "id": source.revision_id,
+                "role": source.role,
+                "at": source.at,
+                "content": source.content,
+                "externalInputs": external_inputs,
+            })
+        })
+        .collect()
 }
 
 fn validate_review(
