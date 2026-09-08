@@ -19,6 +19,8 @@ pub struct RecallAudit {
     pub query: String,
     pub pcp: RetrievalAudit,
     pub transcript: RetrievalAudit,
+    #[serde(default)]
+    pub profile: RetrievalAudit,
     pub ranker: String,
     pub ranking_error: Option<String>,
     pub ranking_duration_ms: u64,

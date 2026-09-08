@@ -1062,6 +1062,22 @@ async fn run_once(
                 || sensing_outcomes
                     .iter()
                     .any(|outcome| outcome.channel_failure.is_some()));
+        // Channel failures are non-fatal to other inputs, but must remain
+        // visible when this pass settles as silent or review-deferred.
+        for (source, failure) in [
+            ("Google Drive", drive_outcome.channel_failure.as_deref()),
+            ("邮箱", mailbox_outcome.inbox_failure.as_deref()),
+        ]
+        .into_iter()
+        .chain(
+            sensing_outcomes
+                .iter()
+                .map(|outcome| ("广域输入", outcome.channel_failure.as_deref())),
+        ) {
+            if let Some(failure) = failure {
+                append_run_error(&state, &format!("{source}：{failure}")).await;
+            }
+        }
         if !interrupted {
             let ambient_batches = sensing_outcomes
                 .into_iter()
@@ -1307,6 +1323,9 @@ async fn run_once(
                         }
                     }
                 };
+            if let Some(reason) = review_deferred_reason.as_deref() {
+                append_run_error(&state, &format!("候选复核未完成，候选已保留：{reason}")).await;
+            }
             sensing_trace_id =
                 link_sensing_invocations(&mut review_invocations, sensing_trace_id.as_deref());
             if let Err(error) = usage.record_all(&review_invocations).await {
@@ -1749,7 +1768,6 @@ async fn run_once(
         );
         snapshot.last_skipped_attempt = None;
     }
-    snapshot.last_error = None;
     snapshot.current_activity = None;
     snapshot.current_trigger = None;
     snapshot.current_review_candidate_count = 0;
@@ -2009,7 +2027,6 @@ async fn settle_sensing_only(
     if let Some(skipped_attempt) = skipped_attempt {
         snapshot.last_skipped_attempt = Some(skipped_attempt);
     }
-    snapshot.last_error = None;
     snapshot.current_activity = None;
     snapshot.current_trigger = None;
     snapshot.current_review_candidate_count = 0;
@@ -2136,6 +2153,15 @@ async fn refresh_manual_projection(
     let mut snapshot = state.write().await;
     snapshot.manual_run = projection.latest;
     snapshot.manual_receipts = projection.unpresented;
+}
+
+async fn append_run_error(state: &RwLock<ExplorationSnapshot>, error: &str) {
+    let mut snapshot = state.write().await;
+    let combined = match snapshot.last_error.as_deref() {
+        Some(previous) => format!("{previous}；{error}"),
+        None => error.to_owned(),
+    };
+    snapshot.last_error = Some(combined.chars().take(1_600).collect());
 }
 
 async fn set_error(
@@ -2404,6 +2430,45 @@ mod tests {
             ),
             Gate::Run
         ));
+    }
+
+    #[tokio::test]
+    async fn degraded_inputs_remain_visible_after_silent_settlement_and_waiting() {
+        let dir = tempfile::tempdir().unwrap();
+        let manual_runs = ManualExplorationStore::open(dir.path().join("manual.json"))
+            .await
+            .unwrap();
+        let attempts = ExplorationAttemptStore::open(dir.path().join("attempts.json"))
+            .await
+            .unwrap();
+        let state = tokio::sync::RwLock::new(ExplorationSnapshot::default());
+        super::append_run_error(&state, "广域输入：模型不可用").await;
+        super::append_run_error(
+            &state,
+            "候选复核未完成，候选已保留：infer-runtime discovery is unavailable",
+        )
+        .await;
+        settle_sensing_only(
+            &state,
+            &manual_runs,
+            &attempts,
+            None,
+            ExplorationIntentStatus::Silent,
+            "ambient_review_deferred",
+            10,
+            Some("infer_runtime_unavailable"),
+            true,
+        )
+        .await
+        .unwrap();
+        super::update_waiting_state(&state, ExplorationPhase::Waiting, Some(Utc::now()), None)
+            .await;
+        let snapshot = state.read().await;
+        let error = snapshot.last_error.as_deref().unwrap();
+        assert!(error.contains("广域输入：模型不可用"));
+        assert!(error.contains("候选复核未完成"));
+        assert_eq!(snapshot.pending_candidate_count, 10);
+        assert!(matches!(snapshot.phase, ExplorationPhase::Waiting));
     }
 
     #[tokio::test]

@@ -322,6 +322,7 @@ pub struct CodexClient {
     continuity: Arc<ContinuityHost>,
     tools: SymbiontTools,
     models: Vec<ModelInfo>,
+    model_catalog: watch::Sender<Vec<ModelInfo>>,
     thread_usage: HashMap<String, TokenBreakdown>,
     thread_turns: HashMap<String, u64>,
     thread_compactions: HashMap<String, u64>,
@@ -474,6 +475,7 @@ impl CodexClient {
                 Arc::clone(&dependencies.exploration_intents),
             ),
             models: Vec::new(),
+            model_catalog: watch::channel(Vec::new()).0,
             thread_usage: HashMap::new(),
             thread_turns: HashMap::new(),
             thread_compactions: HashMap::new(),
@@ -485,6 +487,7 @@ impl CodexClient {
         };
         client.initialize().await?;
         client.models = client.load_models().await?;
+        client.model_catalog.send_replace(client.models.clone());
         client.refresh_rate_limits().await;
         let interactive_thread_id = client
             .start_thread(&config.workspace, ToolSurface::Conversation)
@@ -524,7 +527,11 @@ impl CodexClient {
         );
         stop_app_server_child(&mut self._child).await;
 
-        let replacement = Self::start_with_retries(config, dependencies, rate_limits).await?;
+        let mut replacement = Self::start_with_retries(config, dependencies, rate_limits).await?;
+        // Preserve existing subscribers across transport generations. Settings
+        // and validation must observe the same catalog as the executing client.
+        self.model_catalog.send_replace(replacement.models.clone());
+        replacement.model_catalog = self.model_catalog.clone();
         *self = replacement;
         tracing::info!(
             target: crate::runtime_log::TARGET,
@@ -534,8 +541,8 @@ impl CodexClient {
         Ok(())
     }
 
-    pub fn models(&self) -> &[ModelInfo] {
-        &self.models
+    pub fn model_catalog(&self) -> watch::Receiver<Vec<ModelInfo>> {
+        self.model_catalog.subscribe()
     }
 
     pub fn rate_limits(&self) -> Arc<RwLock<Option<RateLimitInfo>>> {
@@ -1681,6 +1688,8 @@ impl CodexClient {
                 lane,
                 allow_escalation,
                 profile,
+                !matches!(origin, "interactive" | "continuation")
+                    || profile.status != crate::profile::SetupStatus::Ready,
                 continuity_context,
                 working_context,
                 rollover,

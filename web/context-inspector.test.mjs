@@ -24,7 +24,7 @@ test("automatic recall is visible even when the model made zero PCP tool calls",
   const value = context();
   value.fragments.push({ source: "symbiont.pcp.rev_a", value: JSON.stringify({ detail: "payload", content: "原文" }) });
   value.fragments.push({ source: "symbiont.pcp.rev_b", value: JSON.stringify({ detail: "reference" }) });
-  assert.deepEqual(automaticRecallCounts(value), { observed: true, pcpBodies: 1, pcpReferences: 1, transcript: 1 });
+  assert.deepEqual(automaticRecallCounts(value), { observed: true, pcpBodies: 1, pcpReferences: 1, transcript: 1, profile: 0 });
   assert.equal(automaticRecallSummary({ pcpRecallCalls: 0, runs: [{ context: value }] }), "自动装入 3 条");
   const { window } = new JSDOM("");
   const view = renderContextInspector(value, window.document);
@@ -43,7 +43,7 @@ test("unavailable and missing historical observations are not zero-hit assertion
   assert.match(view.textContent, /不可用（不是未命中）/);
   assert.match(view.textContent, /词法降级/);
   const exported = JSON.parse(submittedContextExport(value));
-  assert.deepEqual(exported.diagnosticRecallNotSentToModel, value.recall);
+  assert.equal(exported.diagnosticRecallNotSentToModel, undefined);
   assert.equal(exported.turnStart.additionalContext.recall, undefined);
 });
 
@@ -53,7 +53,9 @@ test("source inspector distinguishes sent material, deferred background and opaq
   window.document.querySelector("main").append(view);
   assert.match(view.textContent, /本地聊天记录/);
   assert.match(view.textContent, /本轮未装入/);
-  assert.match(view.textContent, /不能称为模型的完整最终提示词/);
+  assert.match(view.textContent, /最终 token 序列未暴露/);
+  assert.match(view.textContent, /实际提交原文/);
+  assert.equal(view.querySelector(".trace-context > .trace-context-body > .trace-raw").open, true);
   const raw = view.querySelector(".context-source details");
   assert.equal(raw.querySelector("pre"), null);
   raw.open = true;
@@ -68,7 +70,7 @@ test("complete export preserves exact request, tool definitions and long input w
   const exported = JSON.parse(submittedContextExport(value));
   assert.deepEqual(exported.turnStart, value.submitted.turnStart);
   assert.deepEqual(exported.threadStart, value.submitted.threadStart);
-  assert.equal(exported.diagnosticSelectionNotSentToModel.length, 2);
+  assert.equal(exported.diagnosticSelectionNotSentToModel, undefined);
   assert.equal(exported.turnStart.additionalContext["symbiont.background.reflection"], undefined);
 });
 

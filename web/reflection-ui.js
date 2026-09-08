@@ -7,7 +7,6 @@ import {
 import { renderRichText } from "/rich-text.js";
 
 export function initReflectionUi(state) {
-  const form = document.querySelector("#reflection-form");
   const enabled = document.querySelector("#reflection-enabled");
   const settle = document.querySelector("#reflection-settle");
   const retention = document.querySelector("#reflection-retention");
@@ -29,7 +28,8 @@ export function initReflectionUi(state) {
     '[data-archive-tab="reflection"]',
   );
 
-  function renderConfig() {
+  function renderConfig({ force = false } = {}) {
+    if (!force && enabled.closest('[data-settings-panel]')?.dataset.settingsDirty === "true") return;
     const config = state.reflection?.config;
     if (!config) return;
     enabled.checked = config.enabled;
@@ -79,7 +79,7 @@ export function initReflectionUi(state) {
       );
       state.reflection = { ...(state.reflection || {}), config };
       setSaveState("已保存");
-      renderConfig();
+      renderConfig({ force: true });
       renderRuntime();
       return true;
     } catch (error) {
@@ -239,14 +239,11 @@ export function initReflectionUi(state) {
     return item;
   }
 
-  form.addEventListener("submit", save);
-  window.addEventListener("symbiont:save-reflection-settings", () => {
-    void save();
-  });
   runButton.addEventListener("click", run);
   archiveTab.addEventListener("click", loadArchive);
 
   return {
+    save,
     render() {
       renderConfig();
       renderRuntime();

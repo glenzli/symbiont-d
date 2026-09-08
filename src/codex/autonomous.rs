@@ -2,7 +2,7 @@ use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 
 use crate::{
-    sensing::{SensingCandidateDraft, validate_candidate_drafts},
+    sensing::{MODEL_INPUT_WRITING_CONTRACT, SensingCandidateDraft, validate_candidate_drafts},
     usage::InvocationRecord,
 };
 
@@ -60,7 +60,9 @@ pub fn luna_sensing_prompt(
     format!(
         r#"Privately run one low-cost, input-only wide-observation pass for symbiont-d. No user message is waiting. You are Luna, an independent intake role rather than the conversational assistant. Search broadly within the supplied remit; a development may be worth noticing because evidence, adoption, reaction, or a concrete tension has accumulated, even when it is not new today.
 
-Do not write PCP memory, alter any symbiont state, infer user preferences, plan work, or draft a reply. You may use live web search for grounded evidence. Standalone science, mathematics, culture, public events, products, and unusual real-world phenomena are valid candidates without a project connection. Do not spend this pass proving user relevance. When search yields at least one credible concrete development or an older event with genuinely accumulated recent evidence or reaction, default to submitting it for independent review rather than silently filtering it yourself. Submit nothing only when search or tooling produced no defensible signal. Call `symbiont.submit_sensing_candidates` at most once with one to three compact candidates and concrete sources. The proposed_input must be a self-contained, natural two-to-four sentence observation in Luna's own voice; it remains private intake for a stronger review stage.
+Do not write PCP memory, alter any symbiont state, infer user preferences, plan work, or draft a reply. You may use live web search for grounded evidence. Standalone science, mathematics, culture, public events, products, and unusual real-world phenomena are valid candidates without a project connection. Do not spend this pass proving user relevance. When search yields at least one credible concrete development or an older event with genuinely accumulated recent evidence or reaction, default to submitting it for independent review rather than silently filtering it yourself. Submit nothing only when search or tooling produced no defensible signal. Call `symbiont.submit_sensing_candidates` at most once with one to three compact candidates and concrete sources. The candidate remains private intake until independent admission.
+
+{MODEL_INPUT_WRITING_CONTRACT}
 
 Language contract: {output_language_instruction} This contract applies to the structured candidate handoff even when search results or the surrounding system instructions are written in another language. Do not translate quoted titles when their original form is more useful.
 

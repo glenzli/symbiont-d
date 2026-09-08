@@ -156,6 +156,7 @@ const settingsUi = initSettings(appState, {
   saveIdentity: identityUi.save,
   saveInputRoles: inputRoleUi.save,
   refreshInputRoles: inputRoleUi.refresh,
+  saveReflection: () => reflectionUi.save(),
 });
 const permissionUi = initPermissionUi(appState);
 const composerContextUi = initComposerContextUi({
@@ -855,6 +856,7 @@ function runtimeValueChanged(name, value) {
 }
 
 function applyRuntime(payload) {
+  const modelsChanged = Array.isArray(payload.models) && runtimeValueChanged("models", payload.models);
   const identityChanged = runtimeValueChanged("identity", payload.identity);
   const usageChanged = runtimeValueChanged("usage", payload.usage);
   const inputRolesChanged = runtimeValueChanged("inputRoles", payload.inputRoles);
@@ -875,6 +877,7 @@ function applyRuntime(payload) {
   const signalsChanged = Array.isArray(payload.signals);
 
   appState.identity = payload.identity || appState.identity;
+  if (Array.isArray(payload.models)) appState.models = payload.models;
   appState.usage = payload.usage || appState.usage;
   appState.ambient = payload.ambient || appState.ambient;
   appState.driveInput = payload.driveInput || appState.driveInput;
@@ -917,6 +920,7 @@ function applyRuntime(payload) {
   }
   if (signalsChanged || inputRolesChanged) inputBriefingUi.render();
   if (usageChanged) renderUsage();
+  if (modelsChanged) settingsUi.renderCompute();
   if (explorationChanged || attackerChanged || reflectionChanged || conversationChanged) {
     renderRuntimeStatus();
   }

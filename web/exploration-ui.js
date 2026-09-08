@@ -543,7 +543,7 @@ function intentStatusLabel(status) {
   );
 }
 
-function currentStatus(exploration) {
+export function currentStatus(exploration) {
   if (!exploration) return "状态未知";
   if (manualRunPending(exploration)) {
     return manualRunLabel(exploration.manualRun);
@@ -559,6 +559,12 @@ function currentStatus(exploration) {
   }
   if (exploration.phase === "error") {
     return "最近一次探索运行异常";
+  }
+  if (exploration.lastError) {
+    const pending = exploration.pendingCandidateCount
+      ? ` · ${exploration.pendingCandidateCount} 条候选已保留`
+      : "";
+    return `最近一轮存在异常，详见下方原因${pending}`;
   }
   if (exploration.lastSkippedAttempt) {
     const attempt = exploration.lastSkippedAttempt;

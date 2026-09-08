@@ -76,11 +76,13 @@
             <div class="top-overflow-menu">
               <button
                 id="open-explorations"
+                aria-label="主动探索记录"
                 type="button"
                 data-top-menu-action
               ><i data-lucide="history" aria-hidden="true"></i><span>主动探索记录</span></button>
               <button
                 id="open-settings"
+                aria-label="设置"
                 type="button"
                 data-top-menu-action
               ><i data-lucide="settings" aria-hidden="true"></i><span>设置</span></button>
@@ -539,7 +541,7 @@
       <section class="tab-panel" data-settings-panel="general" hidden>
         <header class="settings-panel-intro">
           <h3>外观与身份</h3>
-          <p>调整聊天中使用的名字和头像。其他运行策略在主动探索、对话整理与系统中配置。</p>
+            <p>调整聊天中使用的名字和头像。头像图片选择后立即保存；昵称与输入角色外观由“保存当前页”保存。</p>
         </header>
         <div class="avatar-settings">
           <img
@@ -897,7 +899,7 @@
         <form id="compute-form">
           <header class="settings-panel-intro">
             <h3>模型与路由</h3>
-            <p>为对话、整理与主动探索配置计算级别和话题规则。</p>
+            <p>为采集、对话与后台任务配置模型，最低使用 Luna；各阶段可分别设置。</p>
           </header>
           <label class="field routing-field">
             <span>路由方式</span>
@@ -908,6 +910,11 @@
           </label>
 
           <div class="lane-list">
+            <div class="lane-row" data-lane="sense">
+              <div class="lane-name"><strong>采集</strong><span>Luna 广域输入</span></div>
+              <label class="field"><span>模型</span><select data-field="model"></select></label>
+              <label class="field"><span>思考</span><select data-field="effort"></select></label>
+            </div>
             <div class="lane-row" data-lane="observe">
               <div class="lane-name"><strong>观察</strong><span>后台轻量任务</span></div>
               <label class="field"><span>模型</span><select data-field="model"></select></label>
@@ -993,7 +1000,7 @@
         <section id="audio-transcription-form">
           <header class="settings-panel-intro compact-intro">
             <h3>语音输入</h3>
-            <p>本地转写服务会自动连接；录音先变为可编辑文字，只有发送后的文字会进入对话与 PCP。</p>
+            <p>本地转写服务会自动连接；录音先变为可编辑文字，发送后才进入本地对话。是否写入长期上下文另由保留策略判断，录音本身不写入 PCP。</p>
           </header>
           <div class="setting-section">
             <div class="ambient-config-row-head"><strong>本地转写</strong><span id="audio-transcription-availability" class="ambient-row-status">正在连接</span></div>
@@ -1003,6 +1010,12 @@
             </div>
             <small id="audio-transcription-runtime-note" class="ambient-credential-note"></small>
           </div>
+        </section>
+        <section class="setting-section permission-boundary-note" aria-labelledby="permission-boundary-title">
+          <h3 id="permission-boundary-title">权限如何生效</h3>
+          <p>Codex 从文件只读环境开始；额外命令、文件修改或访问权限会显示具体请求，由你决定。后台任务不会弹出授权请求，未获授权时会拒绝操作。</p>
+          <p>邮箱与 Google Drive 只读取配置的输入，不发送邮件、不修改云端文件。输入内容会按配置交给模型采集或复核。</p>
+          <p>长期上下文的读写范围以 PCP Console 的实际授权为准。普通记录由保留策略判断；跨范围读取仍受授权限制，历史修复需要独立授权。</p>
         </section>
       </section>
       <footer class="dialog-actions settings-dialog-actions">

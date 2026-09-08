@@ -67,9 +67,10 @@ export function initIdentityUi(state) {
     );
   }
 
-  function render() {
+  function render({ force = false } = {}) {
     const name = displayName();
-    if (displayNameInput && document.activeElement !== displayNameInput) {
+    if (displayNameInput && document.activeElement !== displayNameInput
+      && (force || displayNameInput.closest('[data-settings-panel]')?.dataset.settingsDirty !== "true")) {
       displayNameInput.value = name;
     }
     if (displayNameHeading) displayNameHeading.textContent = name;
@@ -100,7 +101,7 @@ export function initIdentityUi(state) {
         }),
         "无法保存昵称",
       );
-      render();
+      render({ force: true });
       window.dispatchEvent(
         new CustomEvent("identity-updated", { detail: state.identity }),
       );

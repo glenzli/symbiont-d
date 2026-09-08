@@ -183,3 +183,15 @@ test("a completed bounded pass still reports candidates left for later rounds", 
     },
   );
 });
+
+test("waiting after failed intake is visibly degraded, not a successful completion", async () => {
+  const { readFile } = await import("node:fs/promises");
+  const source = (await readFile(new URL("./exploration-ui.js", import.meta.url), "utf8"))
+    .replace(/from "\/([^\"]+)"/g, (_, path) => `from ${JSON.stringify(new URL(path, import.meta.url).href)}`);
+  const { currentStatus } = await import(`data:text/javascript;base64,${Buffer.from(source).toString("base64")}`);
+  const message = currentStatus({ phase: "waiting", lastError: "广域输入：模型不可用",
+    lastRunAt: "2026-09-07T04:48:23Z", pendingCandidateCount: 10 });
+  assert.match(message, /异常/);
+  assert.match(message, /10 条候选已保留/);
+  assert.doesNotMatch(message, /上次完成于/);
+});

@@ -315,6 +315,7 @@ fn context_provenance_matches_sent_fragments_and_deduplicates_the_bridge() {
         ComputeLane::Conversation,
         false,
         &profile,
+        true,
         &bundle,
         Some(&bridge),
         None,
@@ -332,6 +333,21 @@ fn context_provenance_matches_sent_fragments_and_deduplicates_the_bridge() {
     for row in audit {
         assert_eq!(row.included, sent.get(&row.source).is_some());
     }
+
+    let foreground = context_fragments(
+        ComputeLane::Conversation,
+        false,
+        &profile,
+        false,
+        &bundle,
+        Some(&bridge),
+        None,
+    );
+    assert!(
+        foreground
+            .iter()
+            .all(|fragment| fragment.source != "symbiont.profile")
+    );
 }
 
 #[test]
@@ -386,6 +402,7 @@ fn ambient_sensing_does_not_receive_the_user_orientation() {
         ComputeLane::Sense,
         false,
         &profile,
+        true,
         &crate::context_assembly::ContextBundle::single(
             "symbiont.intake",
             "intake",
@@ -399,6 +416,7 @@ fn ambient_sensing_does_not_receive_the_user_orientation() {
         ComputeLane::Observe,
         false,
         &profile,
+        true,
         &crate::context_assembly::ContextBundle::single(
             "symbiont.exploration",
             "exploration",

@@ -3,6 +3,7 @@ import {
   responseJson,
   tokensToMillions,
 } from "/presentation.js";
+import { initSettingsSession } from "/settings-session.js";
 
 export function initSettings(state, actions = {}) {
   const dialog = document.querySelector("#settings-dialog");
@@ -102,6 +103,16 @@ export function initSettings(state, actions = {}) {
   let driveInputTestController = null;
   let driveInputOAuthPollTimer = null;
   let mailInputTestController = null;
+  const session = initSettingsSession({
+    dialog,
+    button: settingsSave,
+    status: settingsSaveState,
+    currentPage: () => dialog.querySelector(activeSettingsTab === "sources"
+      ? `[data-source-settings-panel="${activeSourceSettingsTab}"]`
+      : `[data-settings-panel="${activeSettingsTab}"]`),
+    persist: saveCurrentSettings,
+    mutationSelector: "#add-compute-policy, .remove-compute-policy, #add-model-participant, .remove-model-participant, #add-ambient-provider, .remove-ambient-provider, #add-ambient-channel, .remove-ambient-channel, .input-role-avatar-option",
+  });
 
   function modelBySlug(slug) {
     return state.models.find(
@@ -281,9 +292,10 @@ export function initSettings(state, actions = {}) {
     if (waiting) {
       driveInputCredentialNote.textContent = "正在等待你在浏览器中完成 Google 授权。";
     } else if (connected) {
-      driveInputCredentialNote.textContent = oauth.account
-        ? `已连接个人账号：${oauth.account}`
-        : "个人 Google Drive 已连接。";
+      const account = oauth.account ? `账号已保存：${oauth.account}` : "已保存 Google Drive 账号";
+      driveInputCredentialNote.textContent = drive.lastError
+        ? `${account}；上次读取失败，请测试或重新连接。`
+        : `${account}；可通过测试检查当前读取是否正常。`;
     } else if (oauth.status === "failed" || oauth.status === "invalid") {
       driveInputCredentialNote.textContent = `授权失败：${oauth.error || "请重新连接 Google Drive"}`;
     } else {
@@ -533,6 +545,7 @@ export function initSettings(state, actions = {}) {
   async function saveCompute(event) {
     event?.preventDefault();
     computeSaveState.textContent = "保存中";
+    const savedSections = [];
     try {
       state.compute = await responseJson(
         await fetch("/api/compute", {
@@ -542,6 +555,7 @@ export function initSettings(state, actions = {}) {
         }),
         "保存失败",
       );
+      savedSections.push("计算路由");
       state.computePolicies = await responseJson(
         await fetch("/api/compute/policies", {
           method: "POST",
@@ -550,6 +564,7 @@ export function initSettings(state, actions = {}) {
         }),
         "话题规则保存失败",
       );
+      savedSections.push("话题规则");
       state.modelCouncil = await responseJson(
         await fetch("/api/model-council", {
           method: "POST",
@@ -563,7 +578,7 @@ export function initSettings(state, actions = {}) {
       computeSaveState.textContent = "已保存";
       return true;
     } catch (error) {
-      computeSaveState.textContent = error.message;
+      computeSaveState.textContent = `${savedSections.length ? `${savedSections.join("、")}已保存；` : ""}${error.message}`;
       return false;
     }
   }
@@ -882,6 +897,7 @@ export function initSettings(state, actions = {}) {
   async function saveAutonomy(event) {
     event?.preventDefault();
     autonomySaveState.textContent = "保存中";
+    let autonomySaved = false;
     const config = {
       enabled: autonomyEnabled.checked,
       attackerEnabled: attackerEnabled.checked,
@@ -898,35 +914,30 @@ export function initSettings(state, actions = {}) {
       },
     };
     try {
-      const [autonomy, signalRetention] = await Promise.all([
-        responseJson(
-          await fetch("/api/autonomy", {
-            method: "POST",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify(config),
-          }),
-          "保存失败",
-        ),
-        responseJson(
-          await fetch("/api/signal-retention", {
-            method: "POST",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({
-              retentionDays: Number(signalRetentionDays.value),
-            }),
-          }),
-          "保存外部输入保留期失败",
-        ),
-      ]);
-      state.autonomy = autonomy;
-      state.signalRetention = signalRetention;
+      state.autonomy = await responseJson(
+        await fetch("/api/autonomy", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(config),
+        }),
+        "保存主动探索设置失败",
+      );
       state.autonomyPermitted =
         state.profile.status === "ready" && state.autonomy.enabled;
+      autonomySaved = true;
+      state.signalRetention = await responseJson(
+        await fetch("/api/signal-retention", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ retentionDays: Number(signalRetentionDays.value) }),
+        }),
+        "外部输入保留期保存失败",
+      );
       autonomySaveState.textContent = "已保存";
       renderAutonomy();
       return true;
     } catch (error) {
-      autonomySaveState.textContent = error.message;
+      autonomySaveState.textContent = `${autonomySaved ? "主动探索设置已保存；" : ""}${error.message}`;
       return false;
     }
   }
@@ -956,57 +967,61 @@ export function initSettings(state, actions = {}) {
 
   async function saveCurrentSettings() {
     if (activeSettingsTab === "general") {
-      settingsSave.disabled = true;
       const identitySaved = await actions.saveIdentity?.();
       const rolesSaved = identitySaved === false
         ? false
         : await actions.saveInputRoles?.();
-      settingsSave.disabled = false;
       settingsSaveState.textContent = rolesSaved === false ? "保存失败" : "已保存";
-      return;
+      return rolesSaved !== false;
     }
     if (activeSettingsTab === "exploration") {
-      await saveAutonomy();
-      return;
+      return saveAutonomy();
     }
     if (activeSettingsTab === "sources") {
-      if (activeSourceSettingsTab === "ambient") await saveAmbient();
-      if (activeSourceSettingsTab === "drive") await saveDriveInput();
-      if (activeSourceSettingsTab === "mail") await saveMailInput();
-      return;
+      if (activeSourceSettingsTab === "ambient") return saveAmbient();
+      if (activeSourceSettingsTab === "drive") {
+        const saved = await saveDriveInput();
+        settingsSaveState.textContent = driveInputSaveState.textContent;
+        return saved;
+      }
+      if (activeSourceSettingsTab === "mail") return saveMailInput();
     }
     if (activeSettingsTab === "reflection") {
-      window.dispatchEvent(new Event("symbiont:save-reflection-settings"));
-      return;
+      return actions.saveReflection();
     }
     if (activeSettingsTab === "models") {
-      await saveCompute();
-      return;
+      return saveCompute();
     }
     if (activeSettingsTab === "system") {
-      if (await saveBridge()) await saveAudioTranscription();
+      if (!await saveBridge()) return false;
+      const saved = await saveAudioTranscription();
+      if (!saved) settingsSaveState.textContent = `Codex 任务访问设置已保存；${settingsSaveState.textContent}`;
+      return saved;
     }
   }
 
   function activateTab(name) {
-    activeSettingsTab = name;
-    settingsSave.disabled = false;
-    settingsSave.textContent = "保存当前页";
+    if (session.busy) return;
+    activeSettingsTab = tabPanels.some((panel) => panel.dataset.settingsPanel === name) ? name : "exploration";
     for (const button of tabButtons) {
+      const selected = button.dataset.settingsTab === activeSettingsTab;
       button.setAttribute(
         "aria-selected",
-        String(button.dataset.settingsTab === name),
+        String(selected),
       );
+      button.tabIndex = selected ? 0 : -1;
     }
     for (const panel of tabPanels) {
-      panel.hidden = panel.dataset.settingsPanel !== name;
+      panel.hidden = panel.dataset.settingsPanel !== activeSettingsTab;
     }
-    if (name === "general") {
-      void actions.refreshInputRoles?.();
+    if (activeSettingsTab === "general" && !session.isDirty(currentPanel("general"))) {
+      Promise.resolve(actions.refreshInputRoles?.()).then(() => session.captureClean());
     }
+    session.refresh();
   }
 
   function activateSourceTab(name) {
+    if (session.busy) return;
     activeSourceSettingsTab = sourceTabPanels.some(
       (panel) => panel.dataset.sourceSettingsPanel === name,
     )
@@ -1020,20 +1035,32 @@ export function initSettings(state, actions = {}) {
     for (const panel of sourceTabPanels) {
       panel.hidden = panel.dataset.sourceSettingsPanel !== activeSourceSettingsTab;
     }
+    session.refresh();
+  }
+
+  function currentPanel(name) {
+    return dialog.querySelector(`[data-settings-panel="${name}"], [data-source-settings-panel="${name}"]`);
+  }
+
+  function renderSettings() {
+    if (session.busy) return;
+    const renderers = {
+      models: renderCompute, ambient: renderAmbient, drive: renderDriveInput,
+      mail: renderMailInput, exploration: renderAutonomy,
+      system: () => { renderAudioTranscription(); renderBridge(); },
+    };
+    for (const [name, render] of Object.entries(renderers)) {
+      if (!session.isDirty(currentPanel(name))) render();
+    }
+    session.captureClean();
+    session.refresh();
   }
 
   function openSettings(tab = "exploration") {
-    renderCompute();
-    renderAmbient();
-    renderDriveInput();
-    renderMailInput();
-    renderAudioTranscription();
-    renderAutonomy();
-    renderBridge();
-    settingsSaveState.textContent = "";
+    renderSettings();
     activateTab(normalizeSettingsTab(tab));
     activateSourceTab(activeSourceSettingsTab);
-    dialog.showModal();
+    if (!dialog.open) dialog.showModal();
   }
 
   computeForm.addEventListener("change", (event) => {
@@ -1042,26 +1069,13 @@ export function initSettings(state, actions = {}) {
       configureEffortSelect(row);
     }
   });
-  computeForm.addEventListener("submit", saveCompute);
-  ambientForm.addEventListener("submit", saveAmbient);
-  driveInputForm.addEventListener("submit", saveDriveInput);
   driveInputConnectOAuth.addEventListener("click", connectDriveInputOAuth);
   driveInputDisconnectOAuth.addEventListener("click", disconnectDriveInputOAuth);
   driveInputTestConnection.addEventListener("click", testDriveInputConnection);
   driveInputFileSelection.addEventListener("change", () => {
     driveInputFileNamePattern.disabled = driveInputFileSelection.value === "all";
   });
-  mailInputForm.addEventListener("submit", saveMailInput);
   mailInputTestConnection.addEventListener("click", testMailInputConnection);
-  settingsSave.addEventListener("click", saveCurrentSettings);
-  dialog.addEventListener("input", (event) => {
-    if (event.target.matches("input, select, textarea")) {
-      settingsSaveState.textContent = "有未保存的更改";
-    }
-  });
-  lunaEnabled.addEventListener("change", () => {
-    settingsSaveState.textContent = "有未保存的更改";
-  });
   addComputePolicy.addEventListener("click", () => appendComputePolicy({}, true));
   computePolicyList.addEventListener("click", (event) => {
     const button = event.target.closest(".remove-compute-policy");
@@ -1123,15 +1137,20 @@ export function initSettings(state, actions = {}) {
     const button = event.target.closest(".remove-ambient-channel");
     if (button) button.closest("[data-ambient-channel]").remove();
   });
-  autonomyForm.addEventListener("submit", saveAutonomy);
-  bridgeForm.addEventListener("submit", saveBridge);
-  codexTaskAccess.addEventListener("change", () => {
-  });
   quietHoursEnabled.addEventListener("change", toggleQuietInputs);
   for (const button of tabButtons) {
     button.addEventListener("click", () =>
       activateTab(button.dataset.settingsTab),
     );
+    button.addEventListener("keydown", (event) => {
+      if (!["ArrowLeft", "ArrowRight", "Home", "End"].includes(event.key) || session.busy) return;
+      event.preventDefault();
+      const index = tabButtons.indexOf(button);
+      const next = event.key === "Home" ? 0 : event.key === "End" ? tabButtons.length - 1
+        : (index + (event.key === "ArrowLeft" ? -1 : 1) + tabButtons.length) % tabButtons.length;
+      activateTab(tabButtons[next].dataset.settingsTab);
+      tabButtons[next].focus();
+    });
   }
   for (const button of sourceTabButtons) {
     button.addEventListener("click", () =>
@@ -1158,18 +1177,19 @@ export function initSettings(state, actions = {}) {
   });
 
   return {
-    render() {
-      renderCompute();
-      renderAmbient();
-      renderDriveInput();
-      renderMailInput();
-      renderAudioTranscription();
-      renderAutonomy();
-      renderBridge();
+    render: renderSettings,
+    renderCompute() {
+      if (!session.busy && !session.isDirty(currentPanel("models"))) {
+        renderCompute();
+        session.captureClean();
+      }
     },
-    renderAutonomy,
-    renderAmbient,
-    renderDriveInput,
+    renderAutonomy() {
+      if (!session.busy && !session.isDirty(currentPanel("exploration"))) {
+        renderAutonomy();
+        session.captureClean();
+      }
+    },
     open: openSettings,
   };
 }

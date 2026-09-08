@@ -2,12 +2,13 @@ export function initPermissionUi(state) {
   const center = document.querySelector("#permission-center");
   const list = document.querySelector("#permission-list");
   const status = document.querySelector("#permission-status");
+  const pending = new Set();
 
   function render() {
     const requests = state.permissions || [];
     center.hidden = requests.length === 0;
     list.replaceChildren(...requests.map(renderRequest));
-    status.textContent = requests.length
+    status.textContent = pending.size ? "正在提交决定" : requests.length
       ? `${requests.length} 项操作等待确认`
       : "";
   }
@@ -79,7 +80,14 @@ export function initPermissionUi(state) {
       );
     }
     if (request.allowAccept && request.allowSession) {
-      actions.append(actionButton("本次会话允许", "acceptForSession"));
+      const localGrant = request.source === "symbiont";
+      actions.append(actionButton(localGrant ? "允许至服务重启" : "本次 Codex 会话允许", "acceptForSession"));
+      const scope = document.createElement("p");
+      scope.className = "permission-reason";
+      scope.textContent = localGrant
+        ? "持续允许后，同一站点的后续读取（包括后台读取）可复用授权；重启 symbiont-d 后失效。"
+        : "会话授权的范围由本次 Codex 请求决定；请在完整请求中核对目标与权限。";
+      article.append(scope);
     }
     actions.append(actionButton("拒绝", "decline"));
     if (request.allowCancel) {
@@ -93,6 +101,7 @@ export function initPermissionUi(state) {
       button.type = "button";
       button.className = className;
       button.textContent = label;
+      button.disabled = pending.has(request.id);
       button.addEventListener("click", () =>
         resolve(request.id, decision, article),
       );
@@ -101,6 +110,8 @@ export function initPermissionUi(state) {
   }
 
   async function resolve(id, decision, article) {
+    if (pending.has(id)) return;
+    pending.add(id);
     const buttons = [...article.querySelectorAll("button")];
     buttons.forEach((button) => {
       button.disabled = true;
@@ -115,19 +126,19 @@ export function initPermissionUi(state) {
           body: JSON.stringify({ decision }),
         },
       );
-      const payload = await response.json();
+      const payload = await response.json().catch(() => null);
       if (!response.ok) {
-        throw new Error(payload.error || "权限请求已经失效");
+        throw new Error(payload?.error || "权限请求已经失效");
       }
       state.permissions = (state.permissions || []).filter(
         (request) => request.id !== id,
       );
+      pending.delete(id);
       render();
     } catch (error) {
+      pending.delete(id);
+      render();
       status.textContent = error.message;
-      buttons.forEach((button) => {
-        button.disabled = false;
-      });
     }
   }
 
@@ -138,9 +149,14 @@ function appendFact(list, label, value, href = null) {
   const term = document.createElement("dt");
   const detail = document.createElement("dd");
   term.textContent = label;
-  if (href) {
+  let safeUrl;
+  try {
+    const url = new URL(href);
+    if (["https:", "http:"].includes(url.protocol)) safeUrl = url.href;
+  } catch { /* Unsupported targets remain visible as text. */ }
+  if (safeUrl) {
     const link = document.createElement("a");
-    link.href = href;
+    link.href = safeUrl;
     link.target = "_blank";
     link.rel = "noreferrer";
     link.textContent = value;

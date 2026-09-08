@@ -5,6 +5,7 @@ import {
   formatTokens,
   millionsToTokens,
   tokensToMillions,
+  responseJson,
 } from "./presentation.js";
 
 test("token counts use familiar Chinese quantity units", () => {
@@ -24,4 +25,11 @@ test("token counts use familiar Chinese quantity units", () => {
 test("token settings keep their existing M-token conversion contract", () => {
   assert.equal(tokensToMillions(1_250_000), "1.25");
   assert.equal(millionsToTokens("1.25"), 1_250_000);
+});
+
+test("request failures keep a useful message when the server returns plain text or no body", async () => {
+  await assert.rejects(responseJson(new Response("Starting up", { status: 503 }), "保存失败"), /保存失败（HTTP 503）/);
+  await assert.rejects(responseJson(new Response(JSON.stringify({ error: "输入无效" }), { status: 400 }), "保存失败"), /输入无效/);
+  assert.equal(await responseJson(new Response(null, { status: 204 })), null);
+  await assert.rejects(responseJson(new Response("broken"), "无法读取状态"), /无法读取状态/);
 });

@@ -19,7 +19,7 @@ impl InvocationActivity {
             "continuation" => Self::conversation("continuation"),
             "ambient_sense" => Self::sensing("external"),
             "luna_sense" => Self::sensing("luna"),
-            "ambient_dedup" => Self::exploration("deduplicate"),
+            "ambient_dedup" | "ambient_dedup_escalation" => Self::exploration("deduplicate"),
             "ambient_review" => Self::exploration("review"),
             "autonomous_scout" => Self::exploration("scout"),
             "autonomous" => Self::exploration("review"),
@@ -92,8 +92,10 @@ mod tests {
     #[test]
     fn classifies_local_duplicate_work_as_an_exploration_stage() {
         let duplicate = InvocationActivity::from_origin("ambient_dedup");
+        let escalation = InvocationActivity::from_origin("ambient_dedup_escalation");
         assert_eq!(duplicate.activity, "exploration");
         assert_eq!(duplicate.stage, "deduplicate");
         assert_eq!(duplicate.input_source, None);
+        assert_eq!(escalation, duplicate);
     }
 }

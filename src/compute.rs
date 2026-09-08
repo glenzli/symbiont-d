@@ -3,7 +3,10 @@ use std::{collections::HashSet, io::ErrorKind, path::PathBuf};
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use tokio::{fs, sync::RwLock};
+use tokio::{
+    fs,
+    sync::{RwLock, watch},
+};
 use tracing::warn;
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -90,7 +93,7 @@ pub struct ComputeConfig {
 
 pub struct ComputeStore {
     path: PathBuf,
-    catalog: Vec<ModelInfo>,
+    catalog: watch::Receiver<Vec<ModelInfo>>,
     config: RwLock<ComputeConfig>,
 }
 
@@ -193,14 +196,15 @@ impl ComputeConfig {
     }
 
     fn defaults(catalog: &[ModelInfo]) -> Result<Self> {
+        let eligible = eligible_models(catalog);
+        let catalog = eligible.as_slice();
         let fallback = catalog
             .iter()
             .find(|model| model.is_default)
             .or_else(|| catalog.first())
             .context("Codex returned an empty model catalog")?;
-        let sense = preferred_model(catalog, &["gpt-5.4-mini", "gpt-5.6-luna"]).unwrap_or(fallback);
-        let observe =
-            preferred_model(catalog, &["gpt-5.6-luna", "gpt-5.4-mini"]).unwrap_or(fallback);
+        let sense = preferred_model(catalog, &["gpt-5.6-luna"]).unwrap_or(fallback);
+        let observe = preferred_model(catalog, &["gpt-5.6-luna"]).unwrap_or(fallback);
         let conversation =
             preferred_model(catalog, &["gpt-5.6-terra", "gpt-5.4"]).unwrap_or(fallback);
         let deep = preferred_model(catalog, &["gpt-5.6-sol", "gpt-5.5"]).unwrap_or(fallback);
@@ -220,16 +224,18 @@ impl ComputeConfig {
 }
 
 impl ComputeStore {
-    pub async fn open(path: PathBuf, catalog: Vec<ModelInfo>) -> Result<Self> {
-        if catalog.is_empty() {
-            anyhow::bail!("Codex returned no available models");
+    pub async fn open(path: PathBuf, catalog: watch::Receiver<Vec<ModelInfo>>) -> Result<Self> {
+        let available = eligible_models(&catalog.borrow());
+        if available.is_empty() {
+            anyhow::bail!("Codex returned no models meeting the Luna minimum");
         }
-        let defaults = ComputeConfig::defaults(&catalog)?;
+        let defaults = ComputeConfig::defaults(&available)?;
         let config = match fs::read_to_string(&path).await {
             Ok(content) => match toml::from_str::<ComputeConfig>(&content) {
                 Ok(config) => {
-                    let config = hydrate_legacy_sense(config, &defaults);
-                    if validate(&config, &catalog).is_ok() {
+                    let mut config = hydrate_legacy_sense(config, &defaults);
+                    migrate_legacy_lightweight_models(&mut config, &defaults);
+                    if validate(&config, &available).is_ok() {
                         config
                     } else {
                         warn!(
@@ -258,8 +264,8 @@ impl ComputeStore {
         })
     }
 
-    pub fn catalog(&self) -> &[ModelInfo] {
-        &self.catalog
+    pub fn catalog(&self) -> Vec<ModelInfo> {
+        eligible_models(&self.catalog.borrow())
     }
 
     pub async fn snapshot(&self) -> ComputeConfig {
@@ -267,12 +273,42 @@ impl ComputeStore {
     }
 
     pub async fn update(&self, config: ComputeConfig) -> Result<ComputeConfig> {
-        let defaults = ComputeConfig::defaults(&self.catalog)?;
+        let catalog = self.catalog();
+        let defaults = ComputeConfig::defaults(&catalog)?;
         let config = hydrate_legacy_sense(config, &defaults);
-        validate(&config, &self.catalog)?;
+        validate(&config, &catalog)?;
         persist(&self.path, &config).await?;
         *self.config.write().await = config.clone();
         Ok(config)
+    }
+}
+
+// These legacy lightweight routes are below Symbiont's Luna minimum. Keep
+// them out of both settings choices and persisted lane validation.
+fn below_model_floor(slug: &str) -> bool {
+    matches!(slug, "gpt-5.4-mini" | "gpt-5.3-codex-spark")
+}
+
+fn eligible_models(catalog: &[ModelInfo]) -> Vec<ModelInfo> {
+    catalog
+        .iter()
+        .filter(|model| !below_model_floor(&model.model))
+        .cloned()
+        .collect()
+}
+
+fn migrate_legacy_lightweight_models(config: &mut ComputeConfig, defaults: &ComputeConfig) {
+    for (settings, replacement) in [
+        (&mut config.lanes.sense, &defaults.lanes.sense),
+        (&mut config.lanes.observe, &defaults.lanes.observe),
+        (&mut config.lanes.conversation, &defaults.lanes.conversation),
+        (&mut config.lanes.investigate, &defaults.lanes.investigate),
+        (&mut config.lanes.critical, &defaults.lanes.critical),
+    ] {
+        if below_model_floor(&settings.model) {
+            warn!(old_model = %settings.model, model = %replacement.model, "migrating legacy lightweight compute lane");
+            *settings = replacement.clone();
+        }
     }
 }
 
@@ -285,6 +321,9 @@ fn validate(config: &ComputeConfig, catalog: &[ModelInfo]) -> Result<()> {
         ComputeLane::Critical,
     ] {
         let settings = config.lane(lane);
+        if below_model_floor(&settings.model) {
+            anyhow::bail!("{} lane must use Luna or a larger model", lane.as_str());
+        }
         let model = catalog
             .iter()
             .find(|model| model.model == settings.model || model.id == settings.model)

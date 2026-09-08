@@ -115,6 +115,7 @@ const INPUT_SIGNAL_CONTENT_JS: &str = include_str!("../web/input-signal-content.
 const INPUT_SIGNAL_POPOVERS_JS: &str = include_str!("../web/input-signal-popovers.js");
 const CONVERSATION_FOCUS_UI_JS: &str = include_str!("../web/conversation-focus-ui.js");
 const SETTINGS_JS: &str = include_str!("../web/settings.js");
+const SETTINGS_SESSION_JS: &str = include_str!("../web/settings-session.js");
 const USAGE_UI_JS: &str = include_str!("../web/usage-ui.js");
 const COMPOSER_CONTEXT_UI_JS: &str = include_str!("../web/composer-context-ui.js");
 const VOICE_INPUT_JS: &str = include_str!("../web/voice-input.js");
@@ -355,6 +356,7 @@ struct StatsResponse {
 #[serde(rename_all = "camelCase")]
 struct RuntimeResponse {
     identity: IdentitySnapshot,
+    models: Vec<ModelInfo>,
     usage: UsageHeadline,
     ambient: AmbientSnapshot,
     drive_input: DriveInputSnapshot,
@@ -641,6 +643,7 @@ pub fn router(state: AppState) -> Router {
         .route("/input-signal-popovers.js", get(input_signal_popovers_js))
         .route("/conversation-focus-ui.js", get(conversation_focus_ui_js))
         .route("/settings.js", get(settings_js))
+        .route("/settings-session.js", get(settings_session_js))
         .route("/usage-ui.js", get(usage_ui_js))
         .route("/composer-context-ui.js", get(composer_context_ui_js))
         .route("/voice-input.js", get(voice_input_js))
@@ -964,6 +967,13 @@ async fn settings_js() -> impl IntoResponse {
     )
 }
 
+async fn settings_session_js() -> impl IntoResponse {
+    (
+        [(header::CONTENT_TYPE, "text/javascript; charset=utf-8")],
+        SETTINGS_SESSION_JS,
+    )
+}
+
 async fn usage_ui_js() -> impl IntoResponse {
     (
         [(header::CONTENT_TYPE, "text/javascript; charset=utf-8")],
@@ -1192,7 +1202,7 @@ async fn bootstrap(State(state): State<AppState>) -> Result<Json<BootstrapRespon
         autonomy,
         signal_retention,
         autonomy_permitted,
-        models: state.compute.catalog().to_vec(),
+        models: state.compute.catalog(),
         compute: state.compute.snapshot().await,
         ambient,
         model_council,
@@ -1860,6 +1870,7 @@ async fn runtime(
         .await;
     Ok(Json(RuntimeResponse {
         identity,
+        models: state.compute.catalog(),
         usage,
         ambient,
         drive_input,
@@ -3173,7 +3184,7 @@ async fn run_chat(
             route.context.clone(),
         );
         if let Some(packet) = compound.as_ref() {
-            continuity_context.extend(packet.selected_context(&state.continuity).await);
+            continuity_context.extend(packet.selected_context(&state.continuity, &profile).await);
         }
         continuity_context.include(
             "symbiont.bridge",

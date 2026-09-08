@@ -36,7 +36,12 @@ export function formatDate(value) {
 }
 
 export async function responseJson(response, fallback) {
-  const payload = await response.json();
-  if (!response.ok) throw new Error(payload.error || fallback);
+  if (response.status === 204 && response.ok) return null;
+  const payload = await response.json().catch(() => undefined);
+  if (!response.ok) {
+    const detail = typeof payload?.error === "string" ? payload.error : payload?.error?.message;
+    throw new Error(detail || `${fallback || "请求失败"}（HTTP ${response.status}）`);
+  }
+  if (payload === undefined) throw new Error(fallback || "服务返回了无法读取的数据，请重试");
   return payload;
 }

@@ -36,6 +36,7 @@ export function initMessageActions({ conversation, isBusy, perform }) {
   const entries = new WeakMap();
   const states = new WeakMap();
   const failures = new WeakMap();
+  const actionFailures = new WeakMap();
 
   conversation.addEventListener("click", async (event) => {
     const button = event.target.closest("[data-message-action]");
@@ -46,11 +47,14 @@ export function initMessageActions({ conversation, isBusy, perform }) {
     if (!message || !entry || message.dataset.actionBusy === "true") return;
 
     message.dataset.actionBusy = "true";
+    actionFailures.delete(message);
     refresh();
     try {
       await perform(action, message, entry);
     } catch (error) {
-      setState(message, "failed", error.message);
+      // A clipboard/quote/edit failure says nothing about whether the original
+      // message was delivered. Do not offer to resend an already answered turn.
+      actionFailures.set(message, `操作失败：${error.message || "请重试"}`);
     } finally {
       delete message.dataset.actionBusy;
       refresh();
@@ -107,7 +111,7 @@ export function initMessageActions({ conversation, isBusy, perform }) {
     const state = states.get(message) || "delivered";
     const entry = entries.get(message);
     const actionBusy = message.dataset.actionBusy === "true";
-    stateLabel.textContent =
+    stateLabel.textContent = actionFailures.get(message) || (
       state === "pending"
         ? "等待回复"
         : state === "failed"
@@ -118,8 +122,8 @@ export function initMessageActions({ conversation, isBusy, perform }) {
               ? "已读 · 对话已收束"
               : state === "reacted"
                 ? "已回应"
-                : "";
-    stateLabel.title = failures.get(message) || "";
+                : "");
+    stateLabel.title = actionFailures.get(message) || failures.get(message) || "";
     message.classList.toggle("message-failed", state === "failed");
     actions.replaceChildren();
     for (const action of availableMessageActions({

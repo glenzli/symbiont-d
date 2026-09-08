@@ -36,14 +36,15 @@ pub(crate) struct CompoundContext {
 impl CompoundContext {
     #[cfg(test)]
     pub(crate) fn context(&self) -> crate::context_assembly::ContextBundle {
-        super::recall_selection::fallback(self)
+        super::recall_selection::fallback(self, None)
     }
 
     pub(crate) async fn selected_context(
         &self,
         continuity: &ContinuityHost,
+        profile: &crate::profile::ProfileSnapshot,
     ) -> crate::context_assembly::ContextBundle {
-        super::recall_selection::select(self, continuity).await
+        super::recall_selection::select(self, continuity, profile).await
     }
 
     pub(crate) fn prompt(&self) -> String {

@@ -305,7 +305,7 @@ async fn main() -> Result<()> {
                 let compute = Arc::new(
                     ComputeStore::open(
                         resolve_data_path(&workspace, "SYMBIONT_COMPUTE_PATH", "compute.toml"),
-                        codex.models().to_vec(),
+                        codex.model_catalog(),
                     )
                     .await?,
                 );
@@ -404,7 +404,7 @@ async fn main() -> Result<()> {
     let compute = Arc::new(
         ComputeStore::open(
             resolve_data_path(&workspace, "SYMBIONT_COMPUTE_PATH", "compute.toml"),
-            codex.models().to_vec(),
+            codex.model_catalog(),
         )
         .await?,
     );

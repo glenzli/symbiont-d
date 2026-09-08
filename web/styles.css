@@ -5450,6 +5450,41 @@ button:disabled {
   border-top: 1px solid var(--border);
 }
 
+.context-group {
+  margin-top: 8px;
+  border-top: 1px solid var(--border);
+}
+
+[data-settings-tab][data-dirty="true"]::after,
+[data-source-settings-tab][data-dirty="true"]::after {
+  content: " ·";
+  color: var(--accent);
+}
+
+.permission-boundary-note p {
+  color: var(--text-soft);
+  font-size: 12px;
+  line-height: 1.65;
+}
+
+.context-group > summary {
+  padding: 9px 0;
+  color: var(--text);
+  font-size: 12px;
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.context-group-body {
+  padding-bottom: 4px;
+}
+
+.context-audit > summary,
+.context-native > summary {
+  color: var(--text-soft);
+  font-weight: 500;
+}
+
 .context-source { min-width: 0; padding: 8px 0; border-top: 1px solid var(--border); }
 .trace-context > summary, .trace-context .trace-raw > summary { font-size: 12px; }
 .trace-context .trace-context-notice { font-size: 12px; line-height: 1.6; }
