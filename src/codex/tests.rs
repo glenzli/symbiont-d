@@ -270,6 +270,9 @@ fn foreground_tools_keep_autonomous_memory_but_not_background_bookkeeping() {
         "defer instead of deleting evidence",
         "SourceRefs",
         "old wishes are not renewed",
+        "beginning/resuming a non-trivial topic",
+        "ordinary progress qualifies",
+        "no message log, polling or unchanged refresh",
     ] {
         assert!(instructions.contains(boundary), "missing {boundary}");
     }
@@ -453,6 +456,8 @@ fn persistent_instructions_define_a_short_unambiguous_pcp_boundary() {
     assert!(instructions.contains("Do not repeat an identical PCP search or read"));
     assert!(instructions.contains("Rarely use `symbiont.reserve_continuation`"));
     assert!(instructions.contains("PCP memory operations remain available"));
+    assert!(instructions.contains("read once when beginning/resuming a non-trivial topic"));
+    assert!(instructions.contains("ordinary progress qualifies"));
     assert!(!instructions.contains("do not modify files or attempt side effects"));
     assert!(instructions.chars().count() < 4_500);
 }
@@ -583,6 +588,8 @@ fn autonomous_exploration_separates_reconnaissance_from_conversation() {
     assert!(review.contains("user may already know it"));
     assert!(review.contains("Unanswered prior initiations suppress repetition"));
     assert!(review.contains("If a claimed connection remains forced"));
+    assert!(review.contains("Activity cards are operational"));
+    assert!(review.contains("Do not turn every external finding into a card"));
 
     let tools = SymbiontTools::specifications();
     let proactive = tools[0]["tools"]
@@ -618,6 +625,8 @@ fn reflection_prompt_preserves_facts_uncertainty_and_profile_boundaries() {
     assert!(prompt.contains("never promote temporary behavior directly"));
     assert!(prompt.contains("publication gate will still decide whether to speak"));
     assert!(prompt.contains("propose_proactive_message"));
+    assert!(prompt.contains("Activity updates are operational"));
+    assert!(prompt.contains("not proactive user-visible acts"));
     assert!(prompt.contains("`intervention` changes"));
     assert!(prompt.contains("`note` adds"));
     assert!(prompt.contains("`discussion` opens"));

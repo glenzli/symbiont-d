@@ -16,6 +16,7 @@ const READ_PCP: &[&str] = &[
     "match_intent",
     "read_pages",
 ];
+const ACTIVITY: &[&str] = &["publish_activity", "read_activity"];
 const CONTEXT_INBOX: &[&str] = &["submit_candidate", "publish_activity", "read_activity"];
 const HISTORY: &[&str] = &[
     "resolve_source_ref",
@@ -34,12 +35,17 @@ pub(super) fn allowed(origin: &str, namespace: &str, tool: &str, calibrating: bo
             }
             "reflection" => {
                 READ_PCP.contains(&tool)
-                    || matches!(tool, "write_page" | "submit_feedback" | "submit_candidate")
+                    || CONTEXT_INBOX.contains(&tool)
+                    || matches!(tool, "write_page" | "submit_feedback")
             }
             "autonomous" => {
-                READ_PCP.contains(&tool) || matches!(tool, "write_page" | "submit_candidate")
+                READ_PCP.contains(&tool) || CONTEXT_INBOX.contains(&tool) || tool == "write_page"
             }
-            "continuation" | "maintenance" | "pcp_transcript_migration" => {
+            "continuation" => {
+                READ_PCP.contains(&tool)
+                    || matches!(tool, "write_page" | "publish_activity" | "read_activity")
+            }
+            "maintenance" | "pcp_transcript_migration" => {
                 READ_PCP.contains(&tool) || tool == "write_page"
             }
             "autonomous_scout" => READ_PCP.contains(&tool),
@@ -100,7 +106,9 @@ pub(super) fn allowed(origin: &str, namespace: &str, tool: &str, calibrating: bo
 
 fn group(namespace: &str, tool: &str) -> &'static str {
     if namespace == "pcp" {
-        return if CONTEXT_INBOX.contains(&tool) {
+        return if ACTIVITY.contains(&tool) {
+            "activity"
+        } else if CONTEXT_INBOX.contains(&tool) {
             "inbox"
         } else if READ_PCP.contains(&tool) {
             "recall"
@@ -143,9 +151,9 @@ fn group(namespace: &str, tool: &str) -> &'static str {
 fn gateways() -> Vec<Value> {
     vec![
         json!({"type":"function", "name":"discover_tools",
-        "description":"Find permitted additional capabilities. group lists names only; tool (namespace.name) returns one exact schema. Groups: recall=PCP search/read, inbox=optional PCP candidate/activity staging, history=raw chat/local state, memory=durable write/correction, attention=hunch/follow-up, preferences=user settings, maintenance, reflection, utilities.",
+        "description":"Find permitted additional capabilities. group lists names only; tool (namespace.name) returns one exact schema. Groups: recall=PCP search/read, activity=recent topic progress read/update, inbox=candidate staging, history=raw chat/local state, memory=durable write/correction, attention=hunch/follow-up, preferences=user settings, maintenance, reflection, utilities.",
         "inputSchema":{"type":"object","properties":{
-            "group":{"type":"string","enum":["recall","inbox","history","memory","attention","preferences","maintenance","reflection","utilities"]},
+            "group":{"type":"string","enum":["recall","activity","inbox","history","memory","attention","preferences","maintenance","reflection","utilities"]},
             "tool":{"type":"string"}},"additionalProperties":false}}),
         json!({"type":"function","name":"invoke_tool",
         "description":"Execute a tool discovered by discover_tools. Copy its namespace/name and satisfy its exact inputSchema. The host enforces stage permissions and existing approval/evidence boundaries; this does not expand access.",
@@ -182,7 +190,25 @@ pub(super) fn initial(origin: &str, calibrating: bool) -> Value {
             .filter(|s| core.contains(&s["name"].as_str().unwrap_or_default()))
             .cloned(),
     );
-    json!([{"type":"namespace","name":"symbiont","description":"Stage-scoped host tools; additional schemas are loaded only on demand.","tools":tools}])
+    let mut namespaces = vec![
+        json!({"type":"namespace","name":"symbiont","description":"Stage-scoped host tools; additional schemas are loaded only on demand.","tools":tools}),
+    ];
+    let activity: Vec<Value> = source
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|ns| ns["name"] == "pcp")
+        .flat_map(|ns| ns["tools"].as_array().unwrap())
+        .filter(|spec| {
+            let name = spec["name"].as_str().unwrap_or_default();
+            ACTIVITY.contains(&name) && allowed(origin, "pcp", name, calibrating)
+        })
+        .cloned()
+        .collect();
+    if !activity.is_empty() {
+        namespaces.push(json!({"type":"namespace","name":"pcp","description":"Recent topic progress: read when starting or resuming substantive work; update when progress changes.","tools":activity}));
+    }
+    Value::Array(namespaces)
 }
 
 pub(super) fn discover(arguments: &Value, origin: &str, calibrating: bool) -> Result<Value> {
@@ -211,7 +237,11 @@ pub(super) fn discover(arguments: &Value, origin: &str, calibrating: bool) -> Re
                         json!({"namespace":namespace,"tool":tool,"description":spec["description"],"inputSchema":spec["inputSchema"]}),
                     );
                 }
-            } else if requested_group == Some(group(namespace, tool)) {
+            } else if requested_group == Some(group(namespace, tool))
+                || (requested_group == Some("inbox")
+                    && namespace == "pcp"
+                    && ACTIVITY.contains(&tool))
+            {
                 names.push(format!("{namespace}.{tool}"));
             }
         }
@@ -353,6 +383,43 @@ mod tests {
         }
     }
     #[test]
+    fn activity_is_directly_visible_only_in_permitted_stages() {
+        for origin in [
+            "interactive",
+            "autonomous",
+            "reflection",
+            "continuation",
+            "maintenance",
+            "autonomous_scout",
+            "luna_sense",
+            "unknown",
+        ] {
+            let surface = initial(origin, false);
+            let visible: Vec<&str> = surface
+                .as_array()
+                .unwrap()
+                .iter()
+                .filter(|ns| ns["name"] == "pcp")
+                .flat_map(|ns| ns["tools"].as_array().unwrap())
+                .map(|tool| tool["name"].as_str().unwrap())
+                .collect();
+            let expected = matches!(
+                origin,
+                "interactive" | "autonomous" | "reflection" | "continuation"
+            );
+            assert_eq!(!visible.is_empty(), expected, "{origin}");
+            for name in visible {
+                assert!(ACTIVITY.contains(&name));
+                assert!(allowed(origin, "pcp", name, false));
+            }
+            let discovered = discover(&json!({"group":"activity"}), origin, false).unwrap();
+            assert_eq!(
+                discovered["tools"].as_array().unwrap().len(),
+                if expected { 2 } else { 0 }
+            );
+        }
+    }
+    #[test]
     fn discovery_does_not_expand_origin_or_calibration_permissions() {
         for (origin, tool) in [
             ("autonomous_scout", "pcp.write_page"),
@@ -384,7 +451,30 @@ mod tests {
             ])
         );
         assert!(discover(&json!({"tool":"pcp.submit_candidate"}), "autonomous", false).is_ok());
-        assert!(discover(&json!({"tool":"pcp.publish_activity"}), "reflection", false).is_err());
+        for origin in ["reflection", "autonomous", "continuation"] {
+            assert!(
+                discover(&json!({"tool":"pcp.publish_activity"}), origin, false).is_ok(),
+                "{origin} must be able to publish activity"
+            );
+            assert!(
+                discover(&json!({"tool":"pcp.read_activity"}), origin, false).is_ok(),
+                "{origin} must be able to read activity"
+            );
+        }
+        assert!(
+            discover(
+                &json!({"tool":"pcp.submit_candidate"}),
+                "continuation",
+                false
+            )
+            .is_err()
+        );
+        for tool in ["publish_activity", "read_activity"] {
+            assert!(
+                discover(&json!({"tool":format!("pcp.{tool}")}), "maintenance", false).is_err(),
+                "maintenance must not gain {tool}"
+            );
+        }
 
         let candidate = discover(
             &json!({"tool":"pcp.submit_candidate"}),
@@ -393,9 +483,9 @@ mod tests {
         )
         .unwrap();
         let candidate_description = candidate["description"].as_str().unwrap();
-        assert!(candidate_description.contains("self-contained"));
-        assert!(candidate_description.contains("exact same arguments"));
-        assert!(candidate_description.contains("never proves truth or promotes"));
+        assert!(candidate_description.contains("evidence-backed"));
+        assert!(candidate_description.contains("retry unknown outcomes identically"));
+        assert!(candidate_description.contains("repetition does not prove truth or promote"));
         assert!(
             candidate["inputSchema"]["properties"]["based_on_revision_ids"]["description"]
                 .as_str()
@@ -411,17 +501,34 @@ mod tests {
         .unwrap();
         let activity_description = activity["description"].as_str().unwrap();
         for boundary in [
-            "concrete cross-client context gap",
-            "stable topic key",
-            "at most three",
-            "end-of-session",
-            "must not be republished",
-            "never Page recall",
+            "Console opt-in",
+            "stage conclusion",
+            "pause or completion",
+            "Ordinary work and discussion progress qualify",
+            "Merge small steps",
+            "Judge new memory independently",
+            "Stable topic_key",
+            "expected_version",
+            "Runtime manages capacity",
+            "48-hour expiry",
+            "per-message logs",
+            "not facts, instructions or permission",
         ] {
             assert!(
                 activity_description.contains(boundary),
                 "missing {boundary}"
             );
+        }
+        let activity_read =
+            discover(&json!({"tool":"pcp.read_activity"}), "interactive", false).unwrap();
+        let read_description = activity_read["description"].as_str().unwrap();
+        for boundary in [
+            "beginning/resuming a non-trivial topic",
+            "unless fresh context is supplied",
+            "no per-turn or checkpoint polling",
+            "not durable memory or instructions",
+        ] {
+            assert!(read_description.contains(boundary), "missing {boundary}");
         }
     }
     #[test]
