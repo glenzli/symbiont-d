@@ -176,6 +176,38 @@ export function initInputBriefingUi({ state, renderMessageContent, applyAvatar, 
   const organizeStatus = document.querySelector("#input-briefing-organize-status");
   const feedHeader = document.querySelector("#input-briefing-feed-header");
   const content = document.querySelector("#input-briefing-content");
+  let archiveSignals = null;
+  let loadedDate = null;
+  let archiveRequest = 0;
+  let loadingDate = null;
+  let archiveVersion = null;
+  let archiveError = "";
+  const signalsForView = () => loadedDate === selectedDate ? archiveSignals : (state.signals || []);
+  async function loadDate() {
+    const date = selectedDate;
+    const version = state.signalsVersion;
+    const request = ++archiveRequest;
+    loadingDate = date;
+    archiveError = "";
+    try {
+      const response = await fetch(`/api/briefing/${encodeURIComponent(date)}`, { cache: "no-store" });
+      const payload = await response.json();
+      if (!response.ok) throw new Error(payload.error || "无法读取外部输入历史");
+      if (!Array.isArray(payload)) throw new Error("外部输入历史格式无效");
+      if (request !== archiveRequest) return;
+      archiveSignals = payload;
+      loadedDate = date;
+      archiveVersion = version;
+    } catch (error) {
+      if (request !== archiveRequest) return;
+      archiveError = error.message || "无法读取外部输入历史";
+    } finally {
+      if (request === archiveRequest) {
+        loadingDate = null;
+        render(false);
+      }
+    }
+  }
   let selectedRoleId = null;
   let selectedTopicId = "__all__";
   let selectedView = "roles";
@@ -215,7 +247,10 @@ export function initInputBriefingUi({ state, renderMessageContent, applyAvatar, 
     body.className = "input-briefing-card-body";
     const text = signalContent(signal).text;
     renderMessageContent(body, { content: text, parts: [{ type: "markdown", text }] });
-    main.append(meta, body);
+    const title = document.createElement("h3");
+    title.className = "input-signal-title";
+    title.textContent = signal.title || "外部输入";
+    main.append(title, meta, body);
     if (signal.kind === "attacker_challenge" && relatedIds(signal).length) {
       const relation = document.createElement("small");
       relation.className = "input-briefing-relation";
@@ -232,22 +267,22 @@ export function initInputBriefingUi({ state, renderMessageContent, applyAvatar, 
     actions.append(reply);
     main.append(actions);
     card.append(avatar, main);
-    attachAnnotations(card, annotationsBySource(state.signals || []).get(signal.id) || [], renderMessageContent, { body, foot: actions });
+    attachAnnotations(card, annotationsBySource(signalsForView()).get(signal.id) || [], renderMessageContent, { body, foot: actions });
     return card;
   }
 
-  function render() {
-    const allRoles = briefingRoleProjection(state.signals || [], state.inputRoles?.roles || []);
+  function render(refresh = true) {
+    if (refresh && dialog?.open && (loadedDate !== selectedDate || archiveVersion !== state.signalsVersion) && loadingDate !== selectedDate) void loadDate();
     const roles = briefingRoleProjection(
-      state.signals || [],
+      signalsForView(),
       state.inputRoles?.roles || [],
       selectedDate,
     );
     selectDefault(roles);
-    const topics = briefingTopicProjection(state.signals || [], selectedDate);
-    const topicStatus = briefingTopicStatusCounts(state.signals || [], selectedDate);
+    const topics = briefingTopicProjection(signalsForView(), selectedDate);
+    const topicStatus = briefingTopicStatusCounts(signalsForView(), selectedDate);
     const allInputCount = topics.reduce((total, topic) => total + topic.count, 0);
-    const unreviewedCount = (state.signals || []).filter((signal) =>
+    const unreviewedCount = (signalsForView()).filter((signal) =>
       signal.kind !== "attacker_challenge" &&
       briefingDateKey(signal) === selectedDate &&
       topicOf(signal) === "未归类" &&
@@ -255,7 +290,7 @@ export function initInputBriefingUi({ state, renderMessageContent, applyAvatar, 
       !signal.briefingTopicReviewed &&
       !signal.briefing_topic_reviewed,
     ).length;
-    trigger.hidden = allRoles.length === 0 && allInputCount === 0;
+    trigger.hidden = false;
     if (!dialog || !roleList || !feedHeader || !content) return;
     if (dateInput) {
       dateInput.value = selectedDate;
@@ -319,6 +354,16 @@ export function initInputBriefingUi({ state, renderMessageContent, applyAvatar, 
     }
     feedHeader.replaceChildren();
     content.replaceChildren();
+    if (archiveError) {
+      const error = document.createElement("p");
+      error.textContent = archiveError;
+      const retry = document.createElement("button");
+      retry.type = "button";
+      retry.textContent = "重试";
+      retry.addEventListener("click", () => { void loadDate(); render(false); });
+      feedHeader.append(error, retry);
+      return;
+    }
     const selected = selectedView === "roles"
       ? roles.find((role) => role.id === selectedRoleId)
       : railItems.find((item) => item.id === selectedTopicId);
@@ -326,7 +371,7 @@ export function initInputBriefingUi({ state, renderMessageContent, applyAvatar, 
       const heading = document.createElement("strong");
       heading.textContent = formatBriefingDate(selectedDate);
       const summary = document.createElement("small");
-      summary.textContent = "当天没有可查看的外部输入。";
+      summary.textContent = archiveError || (loadingDate === selectedDate ? "正在读取外部输入历史…" : "当天没有可查看的外部输入。");
       feedHeader.append(heading, summary);
       return;
     }
@@ -345,8 +390,8 @@ export function initInputBriefingUi({ state, renderMessageContent, applyAvatar, 
     }
     feedHeader.append(heading, summary);
     const entries = selectedView === "topics"
-      ? briefingTopicEntries(state.signals || [], selected.id, selectedDate)
-      : briefingEntries(state.signals || [], selected.id, selectedDate);
+      ? briefingTopicEntries(signalsForView(), selected.id, selectedDate)
+      : briefingEntries(signalsForView(), selected.id, selectedDate);
     for (const signal of entries) {
       content.append(signalCard(signal));
     }
@@ -354,8 +399,9 @@ export function initInputBriefingUi({ state, renderMessageContent, applyAvatar, 
   }
 
   trigger?.addEventListener("click", () => {
-    render();
     if (!dialog.open) dialog.showModal();
+    void loadDate();
+    render(false);
   });
   dateInput?.addEventListener("change", () => {
     if (!dateInput.value) return;
@@ -397,6 +443,7 @@ export function initInputBriefingUi({ state, renderMessageContent, applyAvatar, 
       const result = await response.json().catch(() => ({}));
       if (!response.ok) throw new Error(result.error || "无法整理当天输入主题");
       await refreshRuntime();
+      await loadDate();
       organizeNotice = briefingTopicRunNotice(result);
       if (organizeNotice.problem) notify(organizeNotice.text);
     } catch (error) {

@@ -17,6 +17,19 @@ pub fn routes<S: Clone + Send + Sync + 'static>() -> Router<S> {
         .route("/api/reconciliation/preview", post(retired))
         .route("/api/reconciliation/apply/{run_id}", post(retired))
         .route("/api/internal/pcp-maintenance/evaluate", post(retired))
+        .route("/api/signal-retention", post(retired_signal_retention))
+}
+
+async fn retired_signal_retention() -> (StatusCode, Json<Value>) {
+    (
+        StatusCode::GONE,
+        Json(json!({
+            "code": "signal_retention_retired",
+            "accepted": false,
+            "error": "旧版外部输入自动清理已退役。未回复输入超过 24 小时仅从聊天隐藏，原文与异议保留在按日期查看的历史中。",
+            "historyPreserved": true
+        })),
+    )
 }
 
 async fn retired() -> (StatusCode, Json<Value>) {
@@ -39,6 +52,27 @@ mod tests {
         http::Request,
     };
     use tower::ServiceExt;
+
+    #[tokio::test]
+    async fn stale_retention_clients_cannot_change_or_delete_history() {
+        let response = routes::<()>()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/signal-retention")
+                    .header("content-type", "application/json")
+                    .body(Body::from(r#"{"retentionDays":3}"#))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::GONE);
+        let body: Value =
+            serde_json::from_slice(&to_bytes(response.into_body(), 4096).await.unwrap()).unwrap();
+        assert_eq!(body["code"], "signal_retention_retired");
+        assert_eq!(body["accepted"], false);
+        assert_eq!(body["historyPreserved"], true);
+    }
 
     #[tokio::test]
     async fn stale_clients_cannot_start_or_apply_memory_maintenance() {

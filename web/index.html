@@ -46,7 +46,7 @@
             type="button"
             title="查看模型用量"
           >
-            <span>tokens</span>
+            <span>累计 tok</span>
             <strong id="token-total">0</strong>
           </button>
           <button
@@ -192,8 +192,8 @@
             id="toggle-conversation-focus"
             class="conversation-focus-toggle"
             type="button"
-            title="只看对话与已采用的来源"
-            aria-label="只看对话与已采用的来源"
+            title="只看对话与回复中引用的来源"
+            aria-label="只看对话与回复中引用的来源"
             aria-pressed="false"
             data-tooltip="聚焦对话"
             hidden
@@ -633,17 +633,10 @@
               <input id="max-input-parallelism" type="number" min="1" max="4" step="1">
               <small>按最久未使用优先；同一优先层会随机打散。</small>
             </label>
-            <label class="field">
-              <span>外部输入保留</span>
-              <select id="signal-retention-days">
-                <option value="3">3 天</option>
-                <option value="7">7 天</option>
-                <option value="14">14 天</option>
-                <option value="30">30 天</option>
-                <option value="0">不自动清理</option>
-              </select>
-              <small>未回应的外部输入到期后从聊天与简报清除。</small>
-            </label>
+            <div class="field">
+              <span>外部输入历史</span>
+              <small>未引用回复的外部输入在 24 小时后从聊天隐藏；已回复来源保留。原文仍可在外部输入窗口按日期查看。</small>
+            </div>
             <label class="field">
               <span>每日介入上限</span>
               <input id="daily-interrupt-limit" type="number" min="0" max="20" step="1">
@@ -1093,6 +1086,8 @@
 
       <section class="tab-panel archive-panel" data-archive-panel="orientation">
         <form id="orientation-form">
+          <div id="orientation-reading" class="context-reading pcp-rich-content"></div>
+          <details class="context-editor"><summary>编辑画像</summary>
           <label class="field orientation-field">
             <span>可见、可修改的初始理解</span>
             <textarea id="orientation-text" rows="18" maxlength="32000" disabled></textarea>
@@ -1101,41 +1096,48 @@
             <span id="orientation-save-state" role="status"></span>
             <button id="save-orientation" class="primary-button" type="submit">保存</button>
           </footer>
+          </details>
         </form>
       </section>
       <section class="tab-panel archive-panel context-panel" data-archive-panel="context" hidden>
         <form class="context-document-form" data-context-kind="current-map">
           <header>
             <div>
-              <h3>Current Map</h3>
+              <h3>当前脉络</h3>
               <p>近期主题、项目状态与注意力变化</p>
             </div>
             <time data-context-updated="current-map"></time>
           </header>
+          <div class="context-reading pcp-rich-content" data-context-reading="current-map"></div>
+          <details class="context-editor"><summary>编辑内容</summary>
           <textarea data-context-text="current-map" rows="10" maxlength="32000" placeholder="后台整理后会显示在这里。"></textarea>
           <footer>
             <span data-context-save-state="current-map" role="status"></span>
             <button class="secondary-button" type="submit">保存</button>
           </footer>
+          </details>
         </form>
         <form class="context-document-form" data-context-kind="open-loops">
           <header>
             <div>
-              <h3>Open Loops</h3>
+              <h3>未决问题</h3>
               <p>尚未解决的问题、判断与后续线索</p>
             </div>
             <time data-context-updated="open-loops"></time>
           </header>
+          <div class="context-reading pcp-rich-content" data-context-reading="open-loops"></div>
+          <details class="context-editor"><summary>编辑内容</summary>
           <textarea data-context-text="open-loops" rows="10" maxlength="32000" placeholder="后台整理后会显示在这里。"></textarea>
           <footer>
             <span data-context-save-state="open-loops" role="status"></span>
             <button class="secondary-button" type="submit">保存</button>
           </footer>
+          </details>
         </form>
         <section class="profile-review-document">
           <header>
             <div>
-              <h3>Profile Review</h3>
+              <h3>画像复核</h3>
               <p>谨慎检查长期画像是否仍然合适</p>
             </div>
             <span id="profile-review-status">尚未审查</span>

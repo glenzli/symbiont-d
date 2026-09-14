@@ -185,7 +185,6 @@ mod tests {
             observed_at: "2026-08-14T00:00:00Z".to_owned(),
             review_reason: "test".to_owned(),
             related_signal_ids: vec![],
-            promoted_revision_id: None,
             briefing_topic: topic.map(str::to_owned),
             briefing_topic_status: BriefingTopicStatus::Pending,
             briefing_topic_reviewed: false,

@@ -96,8 +96,13 @@ pub(super) fn permission_request(message: &Value, origin: &str) -> Option<Permis
                 .unwrap_or("外部服务");
             let mut request = common("mcpElicitation", format!("{server_name} 请求进一步确认"));
             request.allow_session = false;
-            request.allow_accept = mode == "url";
-            request.host = params.get("url").and_then(Value::as_str).map(str::to_owned);
+            request.allow_accept =
+                mode == "url" || (mode == "form" && empty_confirmation_form(&params));
+            request.host = params
+                .get("url")
+                .or_else(|| params.pointer("/_meta/origin"))
+                .and_then(Value::as_str)
+                .map(str::to_owned);
             Some(request)
         }
         _ => None,
@@ -134,16 +139,52 @@ pub(super) fn approval_response(message: &Value, decision: PermissionDecision) -
                 "scope": scope
             }))
         }
-        MCP_ELICITATION => Some(json!({
-            "action": match decision {
-                PermissionDecision::Accept | PermissionDecision::AcceptForSession => "accept",
-                PermissionDecision::Decline => "decline",
-                PermissionDecision::Cancel => "cancel",
-            },
-            "content": null
-        })),
+        MCP_ELICITATION => {
+            let mode = params.get("mode").and_then(Value::as_str).unwrap_or("form");
+            let (action, content) = match decision {
+                PermissionDecision::Accept if mode == "form" && empty_confirmation_form(params) => {
+                    ("accept", json!({}))
+                }
+                PermissionDecision::Accept if mode == "url" => ("accept", Value::Null),
+                PermissionDecision::Decline => ("decline", Value::Null),
+                PermissionDecision::Cancel => ("cancel", Value::Null),
+                _ => return None,
+            };
+            Some(json!({"action": action, "content": content}))
+        }
         _ => None,
     }
+}
+
+// Only confirmations with no input fields can be submitted without a form UI.
+// Unknown schema constraints must not be silently accepted with fabricated data.
+fn empty_confirmation_form(params: &Value) -> bool {
+    let Some(schema) = params.get("requestedSchema").and_then(Value::as_object) else {
+        return false;
+    };
+    schema.get("type").and_then(Value::as_str) == Some("object")
+        && schema
+            .get("properties")
+            .and_then(Value::as_object)
+            .is_some_and(|fields| fields.is_empty())
+        && schema
+            .get("required")
+            .is_none_or(|required| required.as_array().is_some_and(|items| items.is_empty()))
+        && schema.keys().all(|key| {
+            matches!(
+                key.as_str(),
+                "type"
+                    | "properties"
+                    | "required"
+                    | "title"
+                    | "description"
+                    | "$schema"
+                    | "additionalProperties"
+            )
+        })
+        && schema
+            .get("additionalProperties")
+            .is_none_or(Value::is_boolean)
 }
 
 pub(super) fn automatic_server_request_response(message: &Value) -> Option<Value> {
@@ -175,10 +216,80 @@ fn decision_name(decision: PermissionDecision) -> &'static str {
 
 #[cfg(test)]
 mod tests {
-    use serde_json::json;
+    use serde_json::{Value, json};
 
     use super::{approval_response, permission_request};
     use crate::permission::PermissionDecision;
+
+    #[test]
+    fn browser_origin_confirmation_can_be_explicitly_accepted() {
+        let message = json!({"method": "mcpServer/elicitation/request", "params": {
+            "serverName": "cua_repl", "mode": "form",
+            "message": "Allow Browser use to access https://huggingface.co?",
+            "requestedSchema": {"type": "object", "properties": {}},
+            "_meta": {"persist": "always", "origin": "https://huggingface.co"}
+        }});
+        let request = permission_request(&message, "interactive").unwrap();
+        assert!(request.allow_accept && request.allow_cancel);
+        assert!(!request.allow_session);
+        assert_eq!(request.host.as_deref(), Some("https://huggingface.co"));
+        assert_eq!(
+            approval_response(&message, PermissionDecision::Accept),
+            Some(json!({"action":"accept", "content":{}}))
+        );
+        assert_eq!(
+            super::automatic_server_request_response(&message),
+            Some(json!({"action":"decline", "content":null}))
+        );
+        assert!(approval_response(&message, PermissionDecision::AcceptForSession).is_none());
+    }
+
+    #[test]
+    fn forms_requiring_input_or_unknown_constraints_cannot_be_blindly_accepted() {
+        for schema in [
+            json!({"type":"object", "properties":{"answer":{"type":"string"}}}),
+            json!({"type":"object", "properties":{}, "required":["answer"]}),
+            json!({"type":"object", "properties":{}, "minProperties":1}),
+            json!({"type":"object", "properties":{}, "required":null}),
+            Value::Null,
+        ] {
+            let message = json!({"method":"mcpServer/elicitation/request", "params":{"requestedSchema":schema}});
+            assert!(
+                !permission_request(&message, "interactive")
+                    .unwrap()
+                    .allow_accept
+            );
+            assert!(approval_response(&message, PermissionDecision::Accept).is_none());
+            assert_eq!(
+                approval_response(&message, PermissionDecision::Cancel),
+                Some(json!({"action":"cancel", "content":null}))
+            );
+        }
+    }
+
+    #[test]
+    fn url_confirmation_and_implicit_form_mode_keep_distinct_payloads() {
+        let url = json!({"method":"mcpServer/elicitation/request", "params":{"mode":"url", "url":"https://example.test"}});
+        assert!(
+            permission_request(&url, "interactive")
+                .unwrap()
+                .allow_accept
+        );
+        assert_eq!(
+            approval_response(&url, PermissionDecision::Accept),
+            Some(json!({"action":"accept", "content":null}))
+        );
+        let form = json!({"method":"mcpServer/elicitation/request", "params":{"requestedSchema":{"type":"object", "properties":{}, "required":[]}}});
+        assert!(
+            permission_request(&form, "interactive")
+                .unwrap()
+                .allow_accept
+        );
+        assert_eq!(
+            approval_response(&form, PermissionDecision::Accept),
+            Some(json!({"action":"accept", "content":{}}))
+        );
+    }
 
     #[test]
     fn network_command_becomes_a_host_specific_prompt() {

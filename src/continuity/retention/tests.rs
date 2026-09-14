@@ -452,6 +452,7 @@ async fn current_revision_repairs_invalidate_issued_reviews() {
         })
         .await
         .unwrap();
+    let original_revision = old.revision_id.clone();
     let p = proposal(&source, "用户希望部署稳定且可复现。");
     let packet = f.host.retain_page(p.clone(), None).await.unwrap();
     let repaired = f
@@ -484,6 +485,16 @@ async fn current_revision_repairs_invalidate_issued_reviews() {
         refreshed["currentPages"][0]["revision"]["revisionId"],
         repaired.revision_id
     );
+    let mut stale_basis = proposal(&source, "A proposal still citing the superseded evidence.");
+    stale_basis.based_on_revision_ids = vec![original_revision];
+    let blocked = f.host.retain_page(stale_basis, None).await.unwrap();
+    assert_eq!(blocked["automaticRetry"], false);
+    assert!(
+        blocked["reason"]
+            .as_str()
+            .unwrap()
+            .contains("stale or inactive")
+    );
     assert_eq!(f.count().await, 1);
 }
 
@@ -512,10 +523,9 @@ async fn unavailable_query_after_review_and_retracted_sources_never_commit() {
     );
     f.available.store(true, Ordering::SeqCst);
     f.transcript.retract_from(&source).await.unwrap();
-    assert_eq!(
-        f.host.retain_page(p, None).await.unwrap()["status"],
-        "deferred"
-    );
+    let blocked = f.host.retain_page(p, None).await.unwrap();
+    assert_eq!(blocked["status"], "deferred");
+    assert_eq!(blocked["automaticRetry"], false);
     assert_eq!(f.count().await, 0);
 }
 
@@ -652,4 +662,151 @@ async fn source_time_compares_instants_not_offset_strings() {
         source_time(&sources, &[]).unwrap().0,
         "2026-08-05T13:00:00Z"
     );
+}
+
+#[tokio::test]
+async fn missing_receipt_hints_are_retired_once_without_losing_receipts_or_blocking_writes() {
+    let f = Fixture::new(true).await;
+    let source = f
+        .source(&timestamp(), MemoryRole::User, "Keep the project local.")
+        .await;
+    let p = proposal(&source, "The project must run locally.");
+    let receipt = json!({"status":"written", "pageId":"pg_removed", "revisionId":"rev_removed", "created":true});
+    {
+        let mut state = f.host.retention.state.lock().await;
+        let mut record = Record::new(proposal(&source, "Previously retained material."));
+        record.status = "written".to_owned();
+        record.result = Some(receipt.clone());
+        state.proposals.insert("old-receipt".to_owned(), record);
+        state
+            .proposals
+            .insert("pending-probe".to_owned(), Record::new(p.clone()));
+    }
+    // Background uses the same receipt checks as foreground and records the
+    // unavailable hint before waking a model. No proposal is auto-written.
+    assert!(f.host.retention_retry_bundle().await.unwrap().is_some());
+    assert_eq!(f.count().await, 0);
+    let reopened = RetentionQueue::open(RetentionQueue::path_for(
+        f.transcript.path(),
+        f.api.identity_id(),
+    ))
+    .await
+    .unwrap();
+    let state = reopened.state.lock().await;
+    assert!(state.unavailable_recent_pages.contains("pg_removed"));
+    assert!(state.recent_page_ids().is_empty());
+    assert_eq!(state.proposals["old-receipt"].result, Some(receipt));
+    drop(state);
+    let packet = f.host.retain_page(p.clone(), None).await.unwrap();
+    assert_eq!(packet["status"], "review_required");
+    let saved = f
+        .host
+        .retain_page(p, Some(decision(&packet, Disposition::NewSubject, vec![])))
+        .await
+        .unwrap();
+    assert_eq!(saved["status"], "written");
+    assert_eq!(f.count().await, 1);
+}
+
+#[tokio::test]
+async fn missing_required_revision_blocks_automatic_retry_but_preserves_proposal() {
+    let f = Fixture::new(false).await;
+    let source = f
+        .source(
+            &timestamp(),
+            MemoryRole::User,
+            "Use the exact supporting record.",
+        )
+        .await;
+    let mut p = proposal(&source, "The record requires exact support.");
+    p.based_on_revision_ids = vec!["rev_missing_required".to_owned()];
+    let result = f.host.retain_page(p.clone(), None).await.unwrap();
+    assert_eq!(result["status"], "deferred");
+    assert_eq!(result["automaticRetry"], false);
+    assert_eq!(f.count().await, 0);
+    let reopened = RetentionQueue::open(RetentionQueue::path_for(
+        f.transcript.path(),
+        f.api.identity_id(),
+    ))
+    .await
+    .unwrap();
+    let state = reopened.state.lock().await;
+    let record = state.proposals.values().next().unwrap();
+    assert_eq!(record.status, "blocked");
+    assert_eq!(
+        record.proposal.based_on_revision_ids,
+        p.based_on_revision_ids
+    );
+    assert!(record.reason.contains("required PCP Revision"));
+    assert!(record.result.is_none());
+    drop(state);
+    for record in f.host.retention.state.lock().await.proposals.values_mut() {
+        record.retry_after = "2000-01-01T00:00:00.000Z".to_owned();
+    }
+    assert!(f.host.retention_retry_bundle().await.unwrap().is_none());
+}
+
+#[tokio::test]
+async fn background_preflight_preserves_failure_and_backs_off_then_recovers() {
+    let f = Fixture::new(false).await;
+    let source = f
+        .source(&timestamp(), MemoryRole::User, "Keep this project local.")
+        .await;
+    let p = proposal(&source, "This project must stay local.");
+    f.available.store(false, Ordering::SeqCst);
+    f.host.retain_page(p, None).await.unwrap();
+    for record in f.host.retention.state.lock().await.proposals.values_mut() {
+        record.retry_after = "2000-01-01T00:00:00.000Z".to_owned();
+    }
+    let before = Utc::now();
+    assert!(f.host.retention_retry_bundle().await.unwrap().is_none());
+    let reopened = RetentionQueue::open(RetentionQueue::path_for(
+        f.transcript.path(),
+        f.api.identity_id(),
+    ))
+    .await
+    .unwrap();
+    let state = reopened.state.lock().await;
+    let record = state.proposals.values().next().unwrap();
+    assert_eq!(record.status, "pending");
+    assert_eq!(record.consecutive_failures, 2);
+    assert!(record.reason.contains("query provider unavailable"));
+    let retry = DateTime::parse_from_rfc3339(&record.retry_after).unwrap();
+    assert!(retry.signed_duration_since(before).num_minutes() >= 59);
+    drop(state);
+    assert!(f.host.retention_retry_bundle().await.unwrap().is_none());
+    f.available.store(true, Ordering::SeqCst);
+    for record in f.host.retention.state.lock().await.proposals.values_mut() {
+        record.retry_after = "2000-01-01T00:00:00.000Z".to_owned();
+    }
+    assert!(f.host.retention_retry_bundle().await.unwrap().is_some());
+    let state = f.host.retention.state.lock().await;
+    let record = state.proposals.values().next().unwrap();
+    assert_eq!(record.consecutive_failures, 0);
+    assert_eq!(record.reason, "scheduled_background_review");
+}
+
+#[test]
+fn old_queue_defaults_and_retry_backoff_are_bounded() {
+    let mut old =
+        serde_json::to_value(Record::new(proposal("msg_source", "A supported proposal."))).unwrap();
+    old.as_object_mut().unwrap().remove("consecutiveFailures");
+    let state: QueueState = serde_json::from_value(json!({"proposals":{"old":old}})).unwrap();
+    assert!(state.unavailable_recent_pages.is_empty());
+    let mut record = state.proposals["old"].clone();
+    assert_eq!(record.consecutive_failures, 0);
+    for _ in 0..20 {
+        record.fail(&anyhow::anyhow!("connection refused"));
+    }
+    let minutes = DateTime::parse_from_rfc3339(&record.retry_after)
+        .unwrap()
+        .signed_duration_since(Utc::now())
+        .num_minutes();
+    assert!((1439..=1440).contains(&minutes));
+    assert!(!page_unavailable(&anyhow::anyhow!(
+        "PCP runtime request timed out"
+    )));
+    assert!(!page_unavailable(&anyhow::anyhow!(
+        "provider endpoint is unavailable"
+    )));
 }

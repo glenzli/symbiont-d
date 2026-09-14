@@ -334,7 +334,6 @@ mod tests {
             MessagePart::ExternalInput {
                 input: MessageExternalInputReference {
                     signal_id: Some("signal_local".into()),
-                    source_revision_id: None,
                     actor_name: "Gemini Spark".into(),
                     title: "A result".into(),
                     observed_at: "2026-09-04T00:00:00Z".into(),
@@ -369,7 +368,12 @@ mod tests {
             resolution.external_inputs[0].signal_id.as_deref(),
             Some("signal_local")
         );
-        assert_eq!(resolution.external_inputs[0].source_revision_id, None);
+        assert!(
+            serde_json::to_value(&resolution.external_inputs[0])
+                .unwrap()
+                .get("sourceRevisionId")
+                .is_none()
+        );
         assert_eq!(
             resolution.external_inputs[0].sources[0].url,
             "https://example.test/paper"

@@ -68,9 +68,6 @@ export function renderMessageContent(target, entry, options = {}) {
     } else if (part.type === "externalInput" && part.input) {
       const reference = document.createElement("details");
       reference.className = "message-external-input-reference";
-      if (part.input.sourceRevisionId) {
-        reference.dataset.sourceRevisionId = part.input.sourceRevisionId;
-      }
       const summary = document.createElement("summary");
       const label = document.createElement("small");
       label.textContent = `来源 · ${part.input.actorName || "外部输入"}`;

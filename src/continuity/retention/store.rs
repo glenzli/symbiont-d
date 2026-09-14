@@ -1,6 +1,6 @@
 //! Local, restart-safe proposals and write receipts; never authoritative PCP data.
 use std::{
-    collections::BTreeMap,
+    collections::{BTreeMap, BTreeSet},
     io::Write,
     path::{Path, PathBuf},
 };
@@ -23,6 +23,8 @@ pub(in crate::continuity) struct RetentionQueue {
 pub(super) struct QueueState {
     #[serde(default)]
     pub(super) proposals: BTreeMap<String, Record>,
+    #[serde(default)]
+    pub(super) unavailable_recent_pages: BTreeSet<String>,
 }
 
 #[derive(Clone, Serialize, Deserialize)]
@@ -35,6 +37,8 @@ pub(super) struct Record {
     pub(super) reason: String,
     pub(super) review: Option<ReviewSnapshot>,
     pub(super) result: Option<Value>,
+    #[serde(default)]
+    pub(super) consecutive_failures: u32,
 }
 
 impl Record {
@@ -47,15 +51,49 @@ impl Record {
             reason: "awaiting_preflight".to_owned(),
             review: None,
             result: None,
+            consecutive_failures: 0,
         }
     }
 
     pub(super) fn defer(&mut self, reason: impl Into<String>) {
         self.status = "pending".to_owned();
+        self.consecutive_failures = 0;
         self.reason = reason.into();
         self.retry_after = (Utc::now() + Duration::minutes(30))
             .to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
         self.review = None;
+    }
+
+    pub(super) fn fail(&mut self, error: &anyhow::Error) {
+        let failures = self.consecutive_failures.saturating_add(1);
+        self.defer(format!("{error:#}"));
+        self.consecutive_failures = failures;
+        if error.is::<super::InvalidRetentionEvidence>() {
+            self.status = "blocked".to_owned();
+        } else {
+            let minutes = (30_i64 * (1_i64 << failures.saturating_sub(1).min(6))).min(1440);
+            self.retry_after = (Utc::now() + Duration::minutes(minutes))
+                .to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
+        }
+    }
+}
+
+impl QueueState {
+    pub(super) fn recent_page_ids(&self) -> Vec<String> {
+        let mut written = self
+            .proposals
+            .values()
+            .filter(|record| record.status == "written")
+            .collect::<Vec<_>>();
+        written.sort_by(|a, b| a.proposed_at.cmp(&b.proposed_at));
+        written
+            .into_iter()
+            .rev()
+            .take(12)
+            .filter_map(|record| record.result.as_ref()?.get("pageId")?.as_str())
+            .filter(|id| !self.unavailable_recent_pages.contains(*id))
+            .map(str::to_owned)
+            .collect()
     }
 }
 

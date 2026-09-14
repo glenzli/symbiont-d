@@ -330,6 +330,11 @@ impl PcpTenantApi for ManagedPcpClient {
                     }
                     ContextInboxRequest::SetPolicy(_)
                     | ContextInboxRequest::Review(_)
+                    | ContextInboxRequest::OrganizeCandidates
+                    | ContextInboxRequest::ReviewSynthesis(_)
+                    | ContextInboxRequest::StopSynthesis(_)
+                    | ContextInboxRequest::SetAutomaticReview { .. }
+                    | ContextInboxRequest::UndoAutomaticOutput { .. }
                     | ContextInboxRequest::RemoveActivity { .. } => {
                         "PCP transport recovered after an ambiguous Context Inbox mutation; inspect current Runtime state before deciding whether to retry the exact unchanged request"
                     }

@@ -101,6 +101,7 @@ export function initProfileUi(state, sendMessage) {
     const profile = archivePayload.profile;
     const ready = profile.status === "ready";
     orientationText.value = profile.orientation || "";
+    renderDocument(document.querySelector("#orientation-reading"), profile.orientation);
     orientationText.disabled = !ready;
     saveOrientation.disabled = !ready;
     orientationText.placeholder = ready
@@ -126,6 +127,7 @@ export function initProfileUi(state, sendMessage) {
         `[data-context-updated="${kind}"]`,
       );
       textarea.value = document?.content || "";
+      renderDocument(archiveDialog.querySelector(`[data-context-reading="${kind}"]`), document?.content);
       updated.textContent = document?.updatedAt
         ? formatDate(document.updatedAt)
         : "尚未整理";
@@ -292,4 +294,33 @@ function modeText(mode) {
       guided: "引导对话",
     }[mode] || "尚无"
   );
+}
+
+function renderDocument(container, text) {
+  container.replaceChildren();
+  renderRichText(container, text || "尚未整理。");
+  const walker = document.createTreeWalker(container, NodeFilter.SHOW_TEXT);
+  const nodes = [];
+  while (walker.nextNode()) nodes.push(walker.currentNode);
+  for (const node of nodes) {
+    const pattern = /[（(]Page IDs[：:]\s*([^）)]+)[）)]/g;
+    const matches = [...node.textContent.matchAll(pattern)];
+    if (!matches.length) continue;
+    const fragment = document.createDocumentFragment();
+    let offset = 0;
+    for (const match of matches) {
+      fragment.append(document.createTextNode(node.textContent.slice(offset, match.index)));
+      const details = document.createElement("details");
+      details.className = "context-evidence";
+      const summary = document.createElement("summary");
+      summary.textContent = "引用依据";
+      const evidence = document.createElement("code");
+      evidence.textContent = match[1];
+      details.append(summary, evidence);
+      fragment.append(details);
+      offset = match.index + match[0].length;
+    }
+    fragment.append(document.createTextNode(node.textContent.slice(offset)));
+    node.replaceWith(fragment);
+  }
 }

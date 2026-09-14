@@ -7,13 +7,13 @@ export function normalizeConversationFocus(value) {
 export function conversationFocusPresentation(focused, hiddenCount = 0) {
   return focused
     ? {
-        label: "显示全部外部输入与异议",
+        label: "显示聊天中的外部输入与异议",
         tooltip: "显示外部输入与异议",
         icon: "eye-off",
         visibleLabel: `聚焦中 · 隐藏 ${hiddenCount} 条`,
       }
     : {
-        label: "只看对话与已采用的来源",
+        label: "只看对话与回复中引用的来源",
         tooltip: "聚焦对话",
         icon: "eye",
         visibleLabel: "聚焦",
@@ -68,7 +68,7 @@ export function initConversationFocusUi({
       notify(
         focused
           ? `已隐藏 ${count} 条外部输入与异议`
-          : "已显示全部外部输入与异议",
+          : "已显示聊天中的外部输入与异议",
       );
     }
   }

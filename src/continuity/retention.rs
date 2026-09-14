@@ -21,8 +21,8 @@ use tokio::time::{Duration, timeout};
 
 use super::ContinuityHost;
 use crate::memory::{MemoryEntry, MemoryRole, MessagePart};
-use store::Record;
 pub(super) use store::RetentionQueue;
+use store::{QueueState, Record};
 
 const PREFLIGHT_TIMEOUT: Duration = Duration::from_secs(20);
 const MAX_REVIEW_CHARS: usize = 32_000;
@@ -139,39 +139,16 @@ impl ContinuityHost {
                 .insert(id.clone(), Record::new(proposal.clone()));
             self.retention.save(&state).await?;
         }
-        let mut written = state
-            .proposals
-            .values()
-            .filter(|record| record.status == "written")
-            .collect::<Vec<_>>();
-        written.sort_by(|left, right| left.proposed_at.cmp(&right.proposed_at));
-        let recent_pages = written
-            .into_iter()
-            .rev()
-            .take(12)
-            .filter_map(|record| {
-                record
-                    .result
-                    .as_ref()?
-                    .get("pageId")?
-                    .as_str()
-                    .map(str::to_owned)
-            })
-            .collect::<Vec<_>>();
-        let outcome = self
-            .retention_preflight(&id, &proposal, &recent_pages)
-            .await;
+        let outcome = self.retention_preflight(&id, &proposal, &mut state).await;
         let (sources, snapshot) = match outcome {
             Ok(value) => value,
             Err(error) => {
-                state
-                    .proposals
-                    .get_mut(&id)
-                    .unwrap()
-                    .defer(format!("{error:#}"));
+                let record = state.proposals.get_mut(&id).unwrap();
+                record.fail(&error);
+                let automatic_retry = record.status != "blocked";
                 self.retention.save(&state).await?;
                 return Ok(
-                    json!({"status":"deferred", "created":false, "proposalId":id, "reason":format!("{error:#}"), "retry":"Stored locally; background review retries after recovery. Do not treat query failure as an empty library."}),
+                    json!({"status":"deferred", "created":false, "proposalId":id, "reason":format!("{error:#}"), "automaticRetry":automatic_retry, "retry":if automatic_retry { "Stored locally; background review retries with backoff. Do not treat query failure as an empty library." } else { "Stored locally; automatic retry is paused until the supporting evidence is corrected or restored." }}),
                 );
             }
         };
@@ -272,11 +249,15 @@ impl ContinuityHost {
         &self,
         id: &str,
         proposal: &Proposal,
-        recent_pages: &[String],
+        state: &mut QueueState,
     ) -> Result<(Vec<MemoryEntry>, ReviewSnapshot)> {
         timeout(PREFLIGHT_TIMEOUT, async {
             // Calling this also checks missing and retracted source identities.
-            self.transcript_source_refs(&proposal.source_message_ids).await?;
+            self.transcript_source_refs(&proposal.source_message_ids).await.map_err(|error| {
+                if error.to_string().starts_with("transcript source messages were not found:") {
+                    invalid_evidence(error.to_string())
+                } else { error }
+            })?;
             let sources = self.transcript.by_ids(&proposal.source_message_ids).await?;
             let source_digest = format!("{:x}", Sha256::digest(serde_json::to_vec(&source_evidence(&sources))?));
             // Own-Scope only: cross-Scope recall is not permission to derive.
@@ -286,10 +267,15 @@ impl ContinuityHost {
                 result_limit: Some(8), context_budget_chars: Some(12_000),
             }).await.context("PCP semantic preflight unavailable")?;
             let mut page_ids = recalled.entries.into_iter().map(|entry| entry.page_id).collect::<Vec<_>>();
-            page_ids.extend(recent_pages.iter().rev().take(12).cloned());
             if !proposal.based_on_revision_ids.is_empty() {
-                let basis = self.read(ReadPagesRequest { page_ids: vec![], revision_ids: proposal.based_on_revision_ids.clone(), projections: vec![Projection::Manifest], max_chars: 1000 }).await?;
-                anyhow::ensure!(basis.len() == proposal.based_on_revision_ids.len() && basis.iter().all(|page| page.page.namespace == self.pcp_scope()), "retention cannot derive across Scopes");
+                let basis = self.read(ReadPagesRequest { page_ids: vec![], revision_ids: proposal.based_on_revision_ids.clone(), projections: vec![Projection::Manifest], max_chars: 1000 }).await.map_err(|error| {
+                    if revision_unavailable(&error) {
+                        invalid_evidence("required PCP Revision is unavailable; correct or restore the supporting evidence")
+                    } else { error }
+                })?;
+                if basis.len() != proposal.based_on_revision_ids.len() || basis.iter().any(|page| page.page.namespace != self.pcp_scope()) {
+                    return Err(invalid_evidence("retention requires every supporting Revision in its own Scope"));
+                }
                 page_ids.extend(basis.into_iter().map(|page| page.page.page_id));
             }
             canonical_ids(&mut page_ids);
@@ -305,8 +291,33 @@ impl ContinuityHost {
                 pages.extend(current.into_iter().filter(|page| page.page.namespace == self.pcp_scope() && page.page.lifecycle_status == pcp_core::LifecycleStatus::Active));
             }
             for revision in &proposal.based_on_revision_ids {
-                anyhow::ensure!(pages.iter().any(|page| &page.revision.revision_id == revision), "based_on_revision_ids contains a stale or inactive PCP Revision; read the current head");
+                if !pages.iter().any(|page| &page.revision.revision_id == revision) {
+                    return Err(invalid_evidence("based_on_revision_ids contains a stale or inactive PCP Revision; read the current head"));
+                }
             }
+            // Receipts bridge semantic-index lag, but are not mandatory sources.
+            // Resolve them independently so one retired Page cannot poison a batch.
+            for page_id in state.recent_page_ids() {
+                if page_ids.contains(&page_id) { continue; }
+                match self.read(ReadPagesRequest {
+                    page_ids: vec![page_id.clone()], revision_ids: vec![],
+                    projections: vec![Projection::Manifest,Projection::Payload,Projection::Sources,Projection::Provenance,Projection::Validity],
+                    max_chars: 64_000,
+                }).await {
+                    Ok(current) => {
+                        anyhow::ensure!(current.len() == 1, "could not read the retention receipt head");
+                        anyhow::ensure!(current.iter().all(|page| page.revision.payload.as_ref().is_none_or(|payload| !payload.content.contains("[projection truncated by host budget]"))), "retention candidate content was truncated; defer instead of reviewing partial evidence");
+                        pages.extend(current.into_iter().filter(|page| page.page.namespace == self.pcp_scope() && page.page.lifecycle_status == pcp_core::LifecycleStatus::Active));
+                    }
+                    Err(error) if page_unavailable(&error) => {
+                        // Keep the historical receipt. A later semantic hit can
+                        // still discover a restored Page; only this hint is retired.
+                        state.unavailable_recent_pages.insert(page_id);
+                    }
+                    Err(error) => return Err(error),
+                }
+            }
+            pages.sort_by(|a, b| a.page.page_id.cmp(&b.page.page_id));
             let bytes = serde_json::to_vec(&(id, &source_digest, &pages))?;
             let token = format!("review_{:x}", Sha256::digest(bytes));
             anyhow::ensure!(serde_json::to_string(&(source_evidence(&sources), &pages))?.chars().count() <= MAX_REVIEW_CHARS, "retention evidence exceeds bounded review; narrow the proposal and its sources");
@@ -316,7 +327,7 @@ impl ContinuityHost {
 
     pub(crate) async fn retention_snapshot(&self) -> Value {
         let state = self.retention.state.lock().await;
-        json!({"pending":state.proposals.iter().filter(|(_,p)|p.result.is_none()).map(|(id,p)|json!({"id":id,"proposal":p.proposal,"reason":p.reason,"proposedAt":p.proposed_at,"retryAfter":p.retry_after})).collect::<Vec<_>>(),
+        json!({"pending":state.proposals.iter().filter(|(_,p)|p.result.is_none()).map(|(id,p)|json!({"id":id,"proposal":p.proposal,"reason":p.reason,"status":p.status,"automaticRetry":p.status != "blocked","consecutiveFailures":p.consecutive_failures,"proposedAt":p.proposed_at,"retryAfter":p.retry_after})).collect::<Vec<_>>(),
             "recent":state.proposals.iter().filter_map(|(_,p)|p.result.clone()).rev().take(20).collect::<Vec<_>>()})
     }
 
@@ -326,7 +337,7 @@ impl ContinuityHost {
         let ids = state
             .proposals
             .iter()
-            .filter(|(_, p)| p.result.is_none() && p.retry_after <= now)
+            .filter(|(_, p)| p.result.is_none() && p.status != "blocked" && p.retry_after <= now)
             .take(2)
             .map(|(id, _)| id.clone())
             .collect::<Vec<_>>();
@@ -335,11 +346,15 @@ impl ContinuityHost {
         }
         let mut ready = Vec::new();
         for id in ids {
+            let proposal = state.proposals[&id].proposal.clone();
+            let probe = self.retention_preflight(&id, &proposal, &mut state).await;
             let record = state.proposals.get_mut(&id).unwrap();
-            let probe = self.retention_preflight(&id, &record.proposal, &[]).await;
-            record.defer("scheduled_background_review");
-            if probe.is_ok() {
-                ready.push(json!({"proposalId":id,"arguments":record.proposal}));
+            match probe {
+                Ok(_) => {
+                    record.defer("scheduled_background_review");
+                    ready.push(json!({"proposalId":id,"arguments":proposal}));
+                }
+                Err(error) => record.fail(&error),
             }
         }
         self.retention.save(&state).await?;
@@ -531,4 +546,34 @@ fn canonical_ids(ids: &mut Vec<String>) {
 }
 fn timestamp() -> String {
     Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true)
+}
+
+#[derive(Debug)]
+struct InvalidRetentionEvidence(String);
+
+impl std::fmt::Display for InvalidRetentionEvidence {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+impl std::error::Error for InvalidRetentionEvidence {}
+
+fn invalid_evidence(message: impl Into<String>) -> anyhow::Error {
+    InvalidRetentionEvidence(message.into()).into()
+}
+
+fn page_unavailable(error: &anyhow::Error) -> bool {
+    // PCP RPC currently carries error text, not a typed not-found code.
+    // Match only its exact unavailable response; connection/timeouts fail closed.
+    matches!(
+        error.to_string().as_str(),
+        "PCP runtime: PCP page is not available" | "PCP page is not available"
+    )
+}
+
+fn revision_unavailable(error: &anyhow::Error) -> bool {
+    matches!(
+        error.to_string().as_str(),
+        "PCP runtime: PCP revision is not available" | "PCP revision is not available"
+    )
 }

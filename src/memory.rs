@@ -79,11 +79,6 @@ pub enum MessagePart {
 pub struct MessageExternalInputReference {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub signal_id: Option<String>,
-    /// Legacy PCP Revision for replies recorded before external inputs became
-    /// local-first. New replies keep the source packet in the transcript and
-    /// therefore do not require a durable PCP Page.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub source_revision_id: Option<String>,
     pub actor_name: String,
     pub title: String,
     pub observed_at: String,

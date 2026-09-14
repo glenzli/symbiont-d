@@ -179,30 +179,6 @@ pub struct LocalMessageImage {
 }
 
 impl ContinuityHost {
-    async fn external_input_references(
-        &self,
-        revision_ids: &[String],
-    ) -> Result<Vec<MessageExternalInputReference>> {
-        if revision_ids.is_empty() {
-            return Ok(Vec::new());
-        }
-        let mut revision_ids = revision_ids.to_vec();
-        revision_ids.sort();
-        revision_ids.dedup();
-        let pages = self
-            .read(ReadPagesRequest {
-                page_ids: Vec::new(),
-                revision_ids,
-                projections: vec![Projection::Payload, Projection::Sources, Projection::Facets],
-                max_chars: 64_000,
-            })
-            .await?;
-        Ok(pages
-            .into_iter()
-            .filter_map(external_input_reference_from_page)
-            .collect())
-    }
-
     pub fn access_session(owner_id: &str) -> AccessSession {
         AccessSession::full_control(
             AccessPrincipal {
@@ -408,11 +384,7 @@ impl ContinuityHost {
         // selected source into PCP without making the transcript dependent on
         // that decision.
         let attachment_revision_ids = Vec::new();
-        let external_inputs = if role == MemoryRole::User && links.external_inputs.is_empty() {
-            self.external_input_references(&links.input_revision_ids)
-                .await
-                .context("resolve legacy external input references")?
-        } else if role == MemoryRole::User {
+        let external_inputs = if role == MemoryRole::User {
             links.external_inputs.clone()
         } else {
             Vec::new()
@@ -715,6 +687,10 @@ impl ContinuityHost {
 
     pub async fn recent_messages(&self, limit: usize) -> Result<Vec<MemoryEntry>> {
         self.transcript.recent(limit).await
+    }
+
+    pub async fn replied_signal_ids(&self) -> Result<Vec<String>> {
+        self.transcript.replied_signal_ids().await
     }
 
     pub async fn transcript_source_refs(&self, message_ids: &[String]) -> Result<Vec<SourceRef>> {
@@ -1248,15 +1224,6 @@ fn owned_page_kinds(kinds: &[&str]) -> Vec<String> {
     kinds.iter().map(|kind| (*kind).to_owned()).collect()
 }
 
-fn page_kind(facets: Option<&Value>, fallback: &str) -> String {
-    facets
-        .and_then(|facets| facets.get("kind"))
-        .and_then(Value::as_str)
-        .filter(|kind| !kind.trim().is_empty())
-        .unwrap_or(fallback)
-        .to_owned()
-}
-
 fn message_facets(entry: &MemoryEntry) -> Value {
     json!({
         "kind": "conversation_event",
@@ -1267,68 +1234,6 @@ fn message_facets(entry: &MemoryEntry) -> Value {
         },
         "messageMetadata": entry.metadata,
         "contentParts": entry.parts
-    })
-}
-
-fn external_input_reference_from_page(page: ReadPage) -> Option<MessageExternalInputReference> {
-    let facets = page.revision.facets.as_ref()?;
-    if page_kind(Some(facets), "") != "external_signal" {
-        return None;
-    }
-    let payload = page.revision.payload.as_ref()?;
-    if payload.media_type != "application/vnd.symbiont.external-signal+json" {
-        return None;
-    }
-    let value = serde_json::from_str::<Value>(&payload.content).ok()?;
-    let title = value
-        .get("title")
-        .and_then(Value::as_str)
-        .filter(|value| !value.trim().is_empty())
-        .unwrap_or("外部输入")
-        .to_owned();
-    let actor_name = facets
-        .get("actor_name")
-        .and_then(Value::as_str)
-        .or_else(|| value.pointer("/actor/name").and_then(Value::as_str))
-        .filter(|value| !value.trim().is_empty())
-        .unwrap_or("外部输入")
-        .to_owned();
-    let raw_excerpt = value
-        .get("content")
-        .and_then(Value::as_str)
-        .filter(|value| !value.trim().is_empty())
-        .or_else(|| {
-            value
-                .get("received_text")
-                .and_then(Value::as_str)
-                .filter(|value| !value.trim().is_empty())
-        })
-        .or_else(|| value.get("summary").and_then(Value::as_str))
-        .unwrap_or(&title);
-    let (excerpt, _) = truncate_with_flag(raw_excerpt.trim(), 360);
-    let observed_at = value
-        .get("observed_at")
-        .and_then(Value::as_str)
-        .map(str::to_owned)
-        .or_else(|| page.revision.observed_at.clone())
-        .unwrap_or_else(|| page.revision.created_at.clone());
-    Some(MessageExternalInputReference {
-        signal_id: facets
-            .get("signal_id")
-            .and_then(Value::as_str)
-            .map(str::to_owned),
-        source_revision_id: Some(page.revision.revision_id),
-        actor_name,
-        title,
-        observed_at,
-        excerpt,
-        content: None,
-        qualification_note: value
-            .get("qualification_note")
-            .and_then(Value::as_str)
-            .map(str::to_owned),
-        sources: Vec::new(),
-        source_count: page.revision.source_refs.len(),
     })
 }
 

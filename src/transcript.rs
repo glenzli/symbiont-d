@@ -262,6 +262,27 @@ impl TranscriptStore {
         Ok(TranscriptMessage { entry, message_id })
     }
 
+    /// Reply status comes from live user messages in the local transcript.
+    pub async fn replied_signal_ids(&self) -> Result<Vec<String>> {
+        let path = self.path.clone();
+        task::spawn_blocking(move || {
+            let connection = open_connection(&path)?;
+            let mut statement = connection.prepare(
+                "SELECT DISTINCT j.value FROM transcript_message_links l
+                 JOIN transcript_messages m ON m.message_id = l.message_id,
+                 json_each(l.links_json, '$.inputSignalIds') j
+                 WHERE m.role = 'user' AND m.retracted_at IS NULL
+                 AND j.type = 'text' AND j.value != '' ORDER BY j.value",
+            )?;
+            let ids = statement
+                .query_map([], |row| row.get::<_, String>(0))?
+                .collect::<rusqlite::Result<Vec<_>>>()?;
+            Ok(ids)
+        })
+        .await
+        .context("join transcript signal replies read")?
+    }
+
     pub async fn recent(&self, limit: usize) -> Result<Vec<MemoryEntry>> {
         let path = self.path.clone();
         task::spawn_blocking(move || read_recent(&path, limit, None))
@@ -730,6 +751,41 @@ mod tests {
             metadata: None,
             delivery_state: None,
         }
+    }
+
+    #[tokio::test]
+    async fn reply_sources_come_from_live_user_links_and_survive_reopen() {
+        let temporary = tempfile::tempdir().unwrap();
+        let path = temporary.path().join("reply-transcript.sqlite3");
+        let (store, _) = TranscriptStore::open(path.clone(), None).await.unwrap();
+        store
+            .append(
+                entry(
+                    MemoryRole::Assistant,
+                    "2026-09-09T00:00:00Z",
+                    "not a user reply",
+                ),
+                TranscriptMessageLinks {
+                    input_signal_ids: vec!["automatic".into()],
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap();
+        let reply = store
+            .append(
+                entry(MemoryRole::User, "2026-09-09T01:00:00Z", "discuss source"),
+                TranscriptMessageLinks {
+                    input_signal_ids: vec!["source".into(), "source".into()],
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap();
+        let (reopened, _) = TranscriptStore::open(path, None).await.unwrap();
+        assert_eq!(reopened.replied_signal_ids().await.unwrap(), vec!["source"]);
+        reopened.retract_from(&reply.message_id).await.unwrap();
+        assert!(reopened.replied_signal_ids().await.unwrap().is_empty());
     }
 
     #[tokio::test]

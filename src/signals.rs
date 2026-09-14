@@ -22,23 +22,9 @@ use crate::source_identity::{
     RecurringSectionIdentity, recurring_section_identities, stable_source_identities,
 };
 
-const RETENTION_DAYS: i64 = 30;
 const MAX_EVENT_AGE_DAYS: i64 = 45;
-const MAX_RETAINED_SIGNALS: usize = 100;
 
-#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
-pub struct SignalExpirySummary {
-    pub expired_external_inputs: usize,
-    pub expired_attacker_challenges: usize,
-}
-
-impl SignalExpirySummary {
-    pub const fn changed(self) -> bool {
-        self.expired_external_inputs != 0 || self.expired_attacker_challenges != 0
-    }
-}
-
-/// A visible but non-durable input from an auxiliary model role.
+/// An auxiliary model input retained in the local date archive.
 ///
 /// Signals deliberately live outside PCP. A reply copies a bounded, traceable
 /// source packet into the local transcript; formal PCP retention remains an
@@ -81,12 +67,10 @@ pub struct SignalEvent {
     pub observed_at: String,
     #[serde(alias = "review_reason")]
     pub review_reason: String,
-    /// Exact transient inputs this event examines. Relations remain local to
+    /// Exact local inputs this event examines. Relations remain local to
     /// the chat stream even when the user replies to the event.
     #[serde(default, alias = "related_signal_ids")]
     pub related_signal_ids: Vec<String>,
-    #[serde(default, alias = "promoted_revision_id")]
-    pub promoted_revision_id: Option<String>,
     /// A best-effort, local-only browsing label. It never affects routing,
     /// publication, or the durable PCP projection.
     #[serde(default, alias = "briefing_topic")]
@@ -100,8 +84,7 @@ pub struct SignalEvent {
     pub briefing_topic_reviewed: bool,
     #[serde(default)]
     pub hidden: bool,
-    /// Explicit user dismissal is distinct from the legacy promotion path,
-    /// which used `hidden` to suppress a source card after writing it to PCP.
+    /// Explicit user dismissal is distinct from duplicate suppression.
     #[serde(default)]
     pub dismissed: bool,
     /// Store-level duplicate suppression is not a user dismissal. Retain the
@@ -279,7 +262,6 @@ impl SignalStore {
             observed_at: timestamp(now),
             review_reason: review_reason.trim().to_owned(),
             related_signal_ids: Vec::new(),
-            promoted_revision_id: None,
             briefing_topic: None,
             briefing_topic_status: BriefingTopicStatus::Pending,
             briefing_topic_reviewed: false,
@@ -295,9 +277,8 @@ impl SignalStore {
         Ok(SignalPublishOutcome::Published)
     }
 
-    /// Publishes a restrained challenge as another transient conversation
-    /// event. It is deliberately not an assistant message and therefore does
-    /// not enter PCP unless the user chooses to reply to it.
+    /// Publishes a restrained challenge as an annotation attached to local
+    /// sources. It is not an assistant message; replying never writes it to PCP.
     pub async fn publish_attacker_challenge(
         &self,
         actor: InputRoleSnapshot,
@@ -354,7 +335,6 @@ impl SignalStore {
             observed_at: timestamp(now),
             review_reason: reason.trim().to_owned(),
             related_signal_ids: related,
-            promoted_revision_id: None,
             briefing_topic: None,
             briefing_topic_status: BriefingTopicStatus::Unclassified,
             briefing_topic_reviewed: false,
@@ -371,10 +351,18 @@ impl SignalStore {
     }
 
     pub async fn visible(&self, limit: usize) -> Result<Vec<SignalEvent>> {
+        self.visible_with_replies(limit, &[]).await
+    }
+
+    pub async fn visible_with_replies(
+        &self,
+        limit: usize,
+        replied_ids: &[String],
+    ) -> Result<Vec<SignalEvent>> {
         let now = Utc::now();
         let mut document = self.document.write().await;
         let changed = normalize_and_prune(&mut document, now);
-        let source_ids = document
+        let mut source_ids = document
             .signals
             .iter()
             .rev()
@@ -382,6 +370,7 @@ impl SignalStore {
             .take(limit)
             .map(|signal| signal.id.as_str())
             .collect::<HashSet<_>>();
+        source_ids.extend(replied_ids.iter().map(String::as_str));
         let signals = document
             .signals
             .iter()
@@ -401,6 +390,26 @@ impl SignalStore {
             self.persist().await?;
         }
         Ok(signals)
+    }
+
+    pub async fn briefing_for_local_day(&self, day: NaiveDate) -> Vec<SignalEvent> {
+        let inputs = self.briefing_inputs_for_local_day(day).await;
+        let ids: HashSet<_> = inputs.iter().map(|signal| signal.id.as_str()).collect();
+        let document = self.document.read().await;
+        document
+            .signals
+            .iter()
+            .filter(|signal| !signal.hidden && !signal.dismissed)
+            .filter(|signal| {
+                ids.contains(signal.id.as_str())
+                    || (signal.kind == SignalKind::AttackerChallenge
+                        && signal
+                            .related_signal_ids
+                            .iter()
+                            .any(|id| ids.contains(id.as_str())))
+            })
+            .cloned()
+            .collect()
     }
 
     /// Returns today's still-visible external inputs for the ephemeral briefing
@@ -532,61 +541,6 @@ impl SignalStore {
         Ok(changed)
     }
 
-    /// Removes transient external inputs after the user-selected lifetime.
-    /// A reply already carries its own local transcript source packet. Legacy
-    /// signals once promoted into PCP remain excluded for compatibility.
-    pub async fn expire_unadopted(&self, retention_days: u16) -> Result<SignalExpirySummary> {
-        if retention_days == 0 {
-            return Ok(SignalExpirySummary::default());
-        }
-        let now = Utc::now();
-        let cutoff = now - Duration::days(i64::from(retention_days));
-        let mut document = self.document.write().await;
-        let expired_ids = document
-            .signals
-            .iter()
-            .filter(|signal| {
-                signal.kind == SignalKind::ExternalInput
-                    && signal.promoted_revision_id.is_none()
-                    && observed_before(signal, cutoff)
-            })
-            .map(|signal| signal.id.clone())
-            .collect::<std::collections::HashSet<_>>();
-        if expired_ids.is_empty() {
-            return Ok(SignalExpirySummary::default());
-        }
-
-        let before = document.signals.len();
-        document
-            .signals
-            .retain(|signal| !expired_ids.contains(&signal.id));
-        let expired_external_inputs = before - document.signals.len();
-        let remaining_ids = document
-            .signals
-            .iter()
-            .map(|signal| signal.id.clone())
-            .collect::<std::collections::HashSet<_>>();
-        for signal in &mut document.signals {
-            if signal.kind == SignalKind::AttackerChallenge {
-                signal
-                    .related_signal_ids
-                    .retain(|id| remaining_ids.contains(id));
-            }
-        }
-        let before_challenges = document.signals.len();
-        document.signals.retain(|signal| {
-            signal.kind != SignalKind::AttackerChallenge || !signal.related_signal_ids.is_empty()
-        });
-        let summary = SignalExpirySummary {
-            expired_external_inputs,
-            expired_attacker_challenges: before_challenges - document.signals.len(),
-        };
-        drop(document);
-        self.persist().await?;
-        self.notify_changed();
-        Ok(summary)
-    }
-
     pub async fn get(&self, id: &str) -> Result<Option<SignalEvent>> {
         let document = self.document.read().await;
         Ok(document
@@ -600,12 +554,22 @@ impl SignalStore {
         let now = Utc::now();
         let mut document = self.document.write().await;
         let changed = normalize_and_prune(&mut document, now);
-        let signals = document
+        let mut signals: Vec<_> = document
             .signals
             .iter()
+            .rev()
             .filter(|signal| signal.kind == SignalKind::ExternalInput && !signal.hidden)
+            // Preserve the former background window independently of archive storage.
+            .filter(|signal| {
+                DateTime::parse_from_rfc3339(&signal.observed_at)
+                    .map(|at| at.with_timezone(&Utc) >= now - Duration::days(30))
+                    .unwrap_or(false)
+                    && !event_is_too_old(signal.event_at.as_deref(), now)
+            })
+            .take(100)
             .cloned()
             .collect();
+        signals.reverse();
         drop(document);
         if changed {
             self.persist().await?;
@@ -620,7 +584,7 @@ impl SignalStore {
     /// Monotonically changes when the visible signal projection can change.
     ///
     /// The web runtime uses this to avoid serializing and rebuilding the
-    /// transient signal timeline on every heartbeat.
+    /// local signal timeline on every heartbeat.
     pub fn revision(&self) -> u64 {
         *self.changes.borrow()
     }
@@ -658,35 +622,7 @@ impl SignalStore {
         Ok(dismissed)
     }
 
-    pub async fn mark_promoted(
-        &self,
-        id: &str,
-        revision_id: String,
-    ) -> Result<Option<SignalEvent>> {
-        let mut document = self.document.write().await;
-        let event = document
-            .signals
-            .iter_mut()
-            .find(|signal| signal.id == id)
-            .map(|signal| {
-                if signal.promoted_revision_id.is_none() {
-                    signal.promoted_revision_id = Some(revision_id);
-                }
-                // Promotion makes the source durable, but must not remove its
-                // visible card from the conversation. The card is the readable
-                // provenance anchor for the user's reply and any linked dissent;
-                // only an explicit dismissal may hide it.
-                signal.clone()
-            });
-        drop(document);
-        if event.is_some() {
-            self.persist().await?;
-            self.notify_changed();
-        }
-        Ok(event)
-    }
-
-    fn notify_changed(&self) {
+    pub(crate) fn notify_changed(&self) {
         let next = self.changes.borrow().wrapping_add(1);
         self.changes.send_replace(next);
     }
@@ -717,17 +653,6 @@ fn normalize_and_prune(document: &mut SignalDocument, now: DateTime<Utc>) -> boo
         if signal.source_document_at.is_none() {
             signal.source_document_at = crate::external_digest::source_document_at(&signal.sources);
             changed |= signal.source_document_at.is_some();
-        }
-        // Before source cards became the visible provenance anchor, promotion
-        // reused `hidden` to remove them from the chat stream. Recover those
-        // legacy records, but never override an explicit user dismissal.
-        if signal.promoted_revision_id.is_some()
-            && signal.hidden
-            && !signal.dismissed
-            && signal.duplicate_of_signal_id.is_none()
-        {
-            signal.hidden = false;
-            changed = true;
         }
         if signal.kind == SignalKind::ExternalInput {
             let fingerprint = signal_fingerprint(&signal.title, &signal.summary);
@@ -763,31 +688,11 @@ fn normalize_and_prune(document: &mut SignalDocument, now: DateTime<Utc>) -> boo
             changed = true;
         }
     }
-    let before = document.signals.len();
-    let oldest = now - Duration::days(RETENTION_DAYS);
+    // Archive lifetime is independent of the bounded live projection and
+    // source event age. Historical backfill must remain readable by date.
     changed |= dedup::remember(document, now);
-    document.signals.retain(|signal| {
-        DateTime::parse_from_rfc3339(&signal.observed_at)
-            .map(|observed_at| observed_at.with_timezone(&Utc) >= oldest)
-            .unwrap_or(false)
-            && !event_is_too_old(signal.event_at.as_deref(), now)
-    });
-    let source_ids = document
-        .signals
-        .iter()
-        .rev()
-        .filter(|signal| signal.kind == SignalKind::ExternalInput)
-        .take(MAX_RETAINED_SIGNALS)
-        .map(|signal| signal.id.clone())
-        .collect::<HashSet<_>>();
-    document.signals.retain(|signal| {
-        source_ids.contains(&signal.id)
-            // An orphaned historical annotation has no visible anchor, but a
-            // presentation change must not erase its original evidence.
-            || signal.kind == SignalKind::AttackerChallenge
-    });
     changed |= mark_duplicate_deliveries(&mut document.signals);
-    changed || before != document.signals.len()
+    changed
 }
 
 fn mark_duplicate_deliveries(signals: &mut [SignalEvent]) -> bool {
@@ -850,7 +755,7 @@ fn mark_duplicate_deliveries(signals: &mut [SignalEvent]) -> bool {
         if signal.duplicate_of_signal_id.take().is_some() {
             changed = true;
         }
-        if signal.hidden && !signal.dismissed && signal.promoted_revision_id.is_none() {
+        if signal.hidden && !signal.dismissed {
             signal.hidden = false;
             changed = true;
         }
@@ -1023,12 +928,6 @@ fn signal_delivery_identities(signal: &SignalEvent) -> HashSet<String> {
         urls.extend(source_urls(text));
     }
     stable_source_identities(urls.iter().map(String::as_str))
-}
-
-fn observed_before(signal: &SignalEvent, cutoff: DateTime<Utc>) -> bool {
-    DateTime::parse_from_rfc3339(&signal.observed_at)
-        .map(|observed_at| observed_at.with_timezone(&Utc) < cutoff)
-        .unwrap_or(true)
 }
 
 fn is_pending_briefing_input_on_day(signal: &SignalEvent, day: NaiveDate) -> bool {
@@ -1814,7 +1713,62 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn expiring_unadopted_sources_removes_orphaned_attacker_challenges() {
+    async fn archive_survives_age_live_limit_and_reopen() {
+        let temporary = tempfile::tempdir().unwrap();
+        let path = temporary.path().join("signals.json");
+        let store = SignalStore::open(path.clone()).await.unwrap();
+        let original = candidate("archive-source");
+        store
+            .publish_with_content(
+                &original,
+                original.proposed_input.clone(),
+                "credible".into(),
+            )
+            .await
+            .unwrap();
+        let source = store.visible(1).await.unwrap().remove(0);
+        let old_time = Utc::now() - Duration::days(60);
+        let day = old_time.with_timezone(&chrono::Local).date_naive();
+        {
+            let mut document = store.document.write().await;
+            document.signals[0].observed_at = timestamp(old_time);
+            document.signals[0].event_at = Some("2020-01-01".into());
+            for index in 0..105 {
+                let mut newer = source.clone();
+                newer.id = format!("newer-{index}");
+                newer.title = format!("newer unique source {index}");
+                newer.summary = format!("different research result {index}");
+                newer.sources.clear();
+                newer.content = newer.summary.clone();
+                newer.received_text = newer.summary.clone();
+                document.signals.push(newer);
+            }
+        }
+        store.persist().await.unwrap();
+        let reopened = SignalStore::open(path).await.unwrap();
+        let archive = reopened.briefing_for_local_day(day).await;
+        assert!(archive.iter().any(|signal| signal.id == source.id));
+        assert!(
+            !reopened
+                .visible(1)
+                .await
+                .unwrap()
+                .iter()
+                .any(|signal| signal.id == source.id)
+        );
+        assert!(
+            reopened
+                .visible_with_replies(1, &[source.id.clone()])
+                .await
+                .unwrap()
+                .iter()
+                .any(|signal| signal.id == source.id)
+        );
+        assert!(reopened.get(&source.id).await.unwrap().is_some());
+    }
+
+    #[tokio::test]
+    async fn archive_preserves_sources_and_attached_challenges_after_reopen() {
         let nonce = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .unwrap()
@@ -1852,112 +1806,10 @@ mod tests {
             source.observed_at = timestamp(Utc::now() - Duration::days(8));
         }
 
-        let summary = store.expire_unadopted(7).await.unwrap();
-        assert_eq!(summary.expired_external_inputs, 1);
-        assert_eq!(summary.expired_attacker_challenges, 1);
-        assert!(store.visible(10).await.unwrap().is_empty());
-        assert!(store.get(&source.id).await.unwrap().is_none());
-        let _ = tokio::fs::remove_file(path).await;
-    }
-
-    #[tokio::test]
-    async fn expiring_inputs_keeps_promoted_context_out_of_the_transient_cleanup() {
-        let nonce = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap()
-            .as_nanos();
-        let path =
-            std::env::temp_dir().join(format!("symbiont-signals-promoted-expiry-{nonce}.json"));
-        let store = SignalStore::open(path.clone()).await.unwrap();
-        let original = candidate("sense_promoted_expiry");
-        store
-            .publish_with_content(
-                &original,
-                original.proposed_input.clone(),
-                "credible".to_owned(),
-            )
-            .await
-            .unwrap();
-        let source = store.visible(10).await.unwrap().remove(0);
-        store
-            .mark_promoted(&source.id, "rev_durable".to_owned())
-            .await
-            .unwrap();
-        {
-            let mut document = store.document.write().await;
-            document
-                .signals
-                .iter_mut()
-                .find(|signal| signal.id == source.id)
-                .unwrap()
-                .observed_at = timestamp(Utc::now() - Duration::days(8));
-        }
-
-        assert!(!store.expire_unadopted(7).await.unwrap().changed());
-        let stored = store.get(&source.id).await.unwrap().unwrap();
-        assert_eq!(stored.promoted_revision_id.as_deref(), Some("rev_durable"));
-        assert!(!stored.hidden);
-        assert!(
-            store
-                .visible(10)
-                .await
-                .unwrap()
-                .iter()
-                .any(|signal| signal.id == source.id),
-            "promotion keeps the source card visible as the conversation's provenance anchor"
-        );
-        let _ = tokio::fs::remove_file(path).await;
-    }
-
-    #[tokio::test]
-    async fn opening_the_store_recovers_legacy_promoted_source_cards_but_not_dismissals() {
-        let nonce = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap()
-            .as_nanos();
-        let path =
-            std::env::temp_dir().join(format!("symbiont-signals-promotion-migration-{nonce}.json"));
-        let store = SignalStore::open(path.clone()).await.unwrap();
-
-        store
-            .publish_with_content(
-                &candidate("legacy-promoted"),
-                "A durable source.".to_owned(),
-                "credible".to_owned(),
-            )
-            .await
-            .unwrap();
-        let legacy = store.visible(10).await.unwrap().remove(0);
-        store
-            .mark_promoted(&legacy.id, "rev_legacy".to_owned())
-            .await
-            .unwrap();
-        {
-            let mut document = store.document.write().await;
-            document
-                .signals
-                .iter_mut()
-                .find(|signal| signal.id == legacy.id)
-                .unwrap()
-                .hidden = true;
-        }
         store.persist().await.unwrap();
-        drop(store);
-
-        let reopened = SignalStore::open(path.clone()).await.unwrap();
-        assert!(
-            reopened
-                .visible(10)
-                .await
-                .unwrap()
-                .iter()
-                .any(|signal| signal.id == legacy.id)
-        );
-        assert!(reopened.dismiss(&legacy.id).await.unwrap());
-        drop(reopened);
-
-        let reopened = SignalStore::open(path.clone()).await.unwrap();
-        assert!(reopened.visible(10).await.unwrap().is_empty());
+        let store = SignalStore::open(path.clone()).await.unwrap();
+        assert_eq!(store.visible(10).await.unwrap().len(), 2);
+        assert!(store.get(&source.id).await.unwrap().is_some());
         let _ = tokio::fs::remove_file(path).await;
     }
 }

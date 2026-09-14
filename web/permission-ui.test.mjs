@@ -43,3 +43,26 @@ test("a runtime refresh cannot re-enable an in-flight permission decision", asyn
   assert.equal(f.state.permissions.length, 0);
   assert.equal(f.doc.querySelector("#permission-center").hidden, true);
 });
+
+test("browser confirmation offers explicit persistent acceptance and sends the selected decision", async (t) => {
+  const f = fixture(t, { source: "codex", kind: "mcpElicitation", allowSession: false, allowCancel: true,
+    host: "https://huggingface.co", details: { mode: "form", requestedSchema: { type: "object", properties: {} }, _meta: { persist: "always" } } });
+  assert.deepEqual([...f.doc.querySelectorAll("button")].map(b => b.textContent), ["持续允许", "拒绝", "停止操作"]);
+  assert.match(f.doc.body.textContent, /会保存授权/);
+  assert.equal(f.doc.querySelector("a").href, "https://huggingface.co/");
+  const previousFetch = globalThis.fetch;
+  let submitted;
+  globalThis.fetch = async (url, options) => { submitted = { url, body: JSON.parse(options.body) }; return Response.json({}); };
+  t.after(() => globalThis.fetch = previousFetch);
+  assert.equal(submitted, undefined, "rendering must never grant approval");
+  f.doc.querySelector("button").click();
+  await new Promise(resolve => setImmediate(resolve));
+  assert.deepEqual(submitted, { url: "/api/permissions/request", body: { decision: "accept" } });
+  assert.equal(f.state.permissions.length, 0);
+});
+
+test("unsupported forms explain the missing accept action", (t) => {
+  const f = fixture(t, { source: "codex", kind: "mcpElicitation", allowAccept: false, allowSession: false, allowCancel: true });
+  assert.deepEqual([...f.doc.querySelectorAll("button")].map(b => b.textContent), ["拒绝", "停止操作"]);
+  assert.match(f.doc.body.textContent, /不支持的表单/);
+});

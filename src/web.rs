@@ -86,7 +86,6 @@ use crate::{
         ReflectionSnapshot, TurnDisposition,
     },
     sensing::{SensingCandidate, SensingSource},
-    signal_retention::{SignalRetentionConfig, SignalRetentionStore},
     signals::{SignalEvent, SignalStore},
     symbiont_context::{
         ContextAuthor, ContextDocumentKind, SymbiontContextSnapshot, SymbiontContextStore,
@@ -109,6 +108,7 @@ const CURIOSITY_UI_JS: &str = include_str!("../web/curiosity-ui.js");
 const IDENTITY_UI_JS: &str = include_str!("../web/identity-ui.js");
 const INPUT_ROLES_JS: &str = include_str!("../web/input-roles.js");
 const INPUT_BRIEFING_UI_JS: &str = include_str!("../web/input-briefing-ui.js");
+const INPUT_SIGNAL_HISTORY_JS: &str = include_str!("../web/input-signal-history.js");
 const INPUT_SIGNAL_GROUPS_JS: &str = include_str!("../web/input-signal-groups.js");
 const INPUT_SIGNAL_RELATIONS_JS: &str = include_str!("../web/input-signal-relations.js");
 const INPUT_SIGNAL_CONTENT_JS: &str = include_str!("../web/input-signal-content.js");
@@ -184,7 +184,6 @@ pub struct AppState {
     exploration: ExplorationHandle,
     attacker: AttackerHandle,
     signals: Arc<SignalStore>,
-    signal_retention: Arc<SignalRetentionStore>,
     input_roles: Arc<InputRoleStore>,
     reflection: ReflectionHandle,
     topics: Arc<TopicService>,
@@ -219,7 +218,6 @@ impl AppState {
         exploration: ExplorationHandle,
         attacker: AttackerHandle,
         signals: Arc<SignalStore>,
-        signal_retention: Arc<SignalRetentionStore>,
         input_roles: Arc<InputRoleStore>,
         reflection: ReflectionHandle,
         conversation: ConversationCoordinator,
@@ -255,7 +253,6 @@ impl AppState {
             exploration,
             attacker,
             signals,
-            signal_retention,
             input_roles,
             reflection,
             topics,
@@ -317,6 +314,7 @@ struct BootstrapResponse {
     history_has_more: bool,
     signals: Vec<SignalEvent>,
     signals_version: u64,
+    replied_signal_ids: Vec<String>,
     input_roles: InputRoleSettingsSnapshot,
     turn_dispositions: Vec<TurnDisposition>,
     memory_chars: usize,
@@ -324,7 +322,6 @@ struct BootstrapResponse {
     identity: IdentitySnapshot,
     profile: ProfileSnapshot,
     autonomy: AutonomyConfig,
-    signal_retention: SignalRetentionConfig,
     autonomy_permitted: bool,
     models: Vec<ModelInfo>,
     compute: ComputeConfig,
@@ -371,7 +368,7 @@ struct RuntimeResponse {
     #[serde(skip_serializing_if = "Option::is_none")]
     signals: Option<Vec<SignalEvent>>,
     signals_version: u64,
-    signal_retention: SignalRetentionConfig,
+    replied_signal_ids: Vec<String>,
     input_roles: InputRoleSettingsSnapshot,
     turn_dispositions: Vec<TurnDisposition>,
     permissions: Vec<PermissionRequestView>,
@@ -636,6 +633,15 @@ pub fn router(state: AppState) -> Router {
         .route("/curiosity-ui.js", get(curiosity_ui_js))
         .route("/identity-ui.js", get(identity_ui_js))
         .route("/input-roles.js", get(input_roles_js))
+        .route(
+            "/input-signal-history.js",
+            get(|| async {
+                (
+                    [(header::CONTENT_TYPE, "text/javascript; charset=utf-8")],
+                    INPUT_SIGNAL_HISTORY_JS,
+                )
+            }),
+        )
         .route("/input-briefing-ui.js", get(input_briefing_ui_js))
         .route("/input-signal-groups.js", get(input_signal_groups_js))
         .route("/input-signal-relations.js", get(input_signal_relations_js))
@@ -707,6 +713,7 @@ pub fn router(state: AppState) -> Router {
         )
         .route("/api/messages/{revision_id}", delete(retract_message))
         .route("/api/signals/{signal_id}", delete(dismiss_signal))
+        .route("/api/briefing/{date}", get(briefing_history))
         .route("/api/briefing/topics", post(run_briefing_topics))
         .route("/api/interaction/seen", post(record_seen))
         .route("/api/interaction/typing", post(record_typing))
@@ -726,7 +733,6 @@ pub fn router(state: AppState) -> Router {
         .route("/api/profile/orientation", post(update_orientation))
         .route("/api/context/{kind}", post(update_context_document))
         .route("/api/autonomy", post(update_autonomy))
-        .route("/api/signal-retention", post(update_signal_retention))
         .route("/api/exploration/run", post(trigger_exploration))
         .route("/api/exploration/recent", get(recent_explorations))
         .route(
@@ -1142,9 +1148,14 @@ async fn bootstrap(State(state): State<AppState>) -> Result<Json<BootstrapRespon
         .into_iter()
         .filter(|entry| matches!(entry.role, MemoryRole::User | MemoryRole::Assistant))
         .collect();
+    let replied_signal_ids = state
+        .continuity
+        .replied_signal_ids()
+        .await
+        .map_err(ApiError::internal)?;
     let mut signals = state
         .signals
-        .visible(100)
+        .visible_with_replies(100, &replied_signal_ids)
         .await
         .map_err(ApiError::internal)?;
     apply_input_role_appearances(&state, &mut signals).await;
@@ -1161,7 +1172,6 @@ async fn bootstrap(State(state): State<AppState>) -> Result<Json<BootstrapRespon
         .map_err(ApiError::internal)?;
     let profile = state.profile.snapshot().await;
     let autonomy = state.autonomy.snapshot().await;
-    let signal_retention = state.signal_retention.snapshot().await;
     let autonomy_permitted = state
         .autonomy
         .permitted(profile.status == SetupStatus::Ready)
@@ -1192,6 +1202,7 @@ async fn bootstrap(State(state): State<AppState>) -> Result<Json<BootstrapRespon
         messages,
         history_has_more: history.has_more,
         signals,
+        replied_signal_ids,
         signals_version: state.signals.revision(),
         input_roles,
         turn_dispositions,
@@ -1200,7 +1211,6 @@ async fn bootstrap(State(state): State<AppState>) -> Result<Json<BootstrapRespon
         identity,
         profile,
         autonomy,
-        signal_retention,
         autonomy_permitted,
         models: state.compute.catalog(),
         compute: state.compute.snapshot().await,
@@ -1384,33 +1394,6 @@ async fn update_autonomy(
         .await
         .map(Json)
         .map_err(ApiError::bad_request)
-}
-
-async fn update_signal_retention(
-    State(state): State<AppState>,
-    Json(config): Json<SignalRetentionConfig>,
-) -> Result<Json<SignalRetentionConfig>, ApiError> {
-    let config = state
-        .signal_retention
-        .update(config)
-        .await
-        .map_err(ApiError::bad_request)?;
-    let summary = state
-        .signals
-        .expire_unadopted(config.retention_days)
-        .await
-        .map_err(ApiError::internal)?;
-    if summary.changed() {
-        tracing::info!(
-            target: crate::runtime_log::TARGET,
-            event = "external_input_expired",
-            expired_external_inputs = summary.expired_external_inputs,
-            expired_attacker_challenges = summary.expired_attacker_challenges,
-            retention_days = config.retention_days,
-            "expired unadopted external inputs after retention update"
-        );
-    }
-    Ok(Json(config))
 }
 
 async fn update_compute(
@@ -1836,13 +1819,18 @@ async fn runtime(
         .live_messages_after(query.after_revision_id.as_deref(), 20)
         .await
         .map_err(ApiError::internal)?;
+    let replied_signal_ids = state
+        .continuity
+        .replied_signal_ids()
+        .await
+        .map_err(ApiError::internal)?;
     let signals_version = state.signals.revision();
     let signals = if query.signals_version == Some(signals_version) {
         None
     } else {
         let mut signals = state
             .signals
-            .visible(100)
+            .visible_with_replies(100, &replied_signal_ids)
             .await
             .map_err(ApiError::internal)?;
         apply_input_role_appearances(&state, &mut signals).await;
@@ -1883,8 +1871,8 @@ async fn runtime(
         compute_policies: state.compute_policies.snapshot().await,
         messages,
         signals,
+        replied_signal_ids,
         signals_version,
-        signal_retention: state.signal_retention.snapshot().await,
         input_roles,
         turn_dispositions,
         permissions: state.permissions.snapshot().await,
@@ -2506,6 +2494,17 @@ async fn dismiss_signal(
     Ok(StatusCode::NO_CONTENT)
 }
 
+async fn briefing_history(
+    State(state): State<AppState>,
+    AxumPath(date): AxumPath<String>,
+) -> Result<Json<Vec<SignalEvent>>, ApiError> {
+    let day = NaiveDate::parse_from_str(&date, "%Y-%m-%d")
+        .map_err(|_| ApiError::bad_request("Briefing date must use YYYY-MM-DD."))?;
+    let mut signals = state.signals.briefing_for_local_day(day).await;
+    apply_input_role_appearances(&state, &mut signals).await;
+    Ok(Json(signals))
+}
+
 async fn run_briefing_topics(
     State(state): State<AppState>,
     Json(request): Json<BriefingTopicRunRequest>,
@@ -3044,6 +3043,9 @@ async fn store_user_message(
         )
         .await
         .map_err(ApiError::internal)?;
+    if request.input_signal.is_some() {
+        state.signals.notify_changed();
+    }
     let mut hunch_feedback = Vec::new();
     if let (Some(reply_to_revision_id), Some(feedback_revision_id)) = (
         reply_to_revision_id.as_deref(),
@@ -3799,7 +3801,6 @@ fn external_input_reference(signal: &SignalEvent) -> MessageExternalInputReferen
     };
     MessageExternalInputReference {
         signal_id: Some(signal.id.clone()),
-        source_revision_id: signal.promoted_revision_id.clone(),
         actor_name: signal.actor.name.clone(),
         title: signal.title.clone(),
         observed_at: signal.observed_at.clone(),

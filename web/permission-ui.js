@@ -74,10 +74,23 @@ export function initPermissionUi(state) {
 
     const actions = document.createElement("div");
     actions.className = "permission-actions";
+    const elicitation = request.kind === "mcpElicitation";
+    const persistent = elicitation && request.details?._meta?.persist === "always";
     if (request.allowAccept) {
       actions.append(
-        actionButton("允许这一次", "accept", "primary-button"),
+        actionButton(persistent ? "持续允许" : elicitation ? "允许" : "允许这一次", "accept", "primary-button"),
       );
+    }
+    if (persistent && request.allowAccept) {
+      const scope = document.createElement("p");
+      scope.className = "permission-reason";
+      scope.textContent = "此请求会保存授权，后续访问可复用；授权范围由请求服务管理。";
+      article.append(scope);
+    } else if (elicitation && !request.allowAccept) {
+      const hint = document.createElement("p");
+      hint.className = "permission-reason";
+      hint.textContent = "此请求包含当前界面不支持的表单或确认格式，暂时无法提交允许。可展开完整请求查看。";
+      article.append(hint);
     }
     if (request.allowAccept && request.allowSession) {
       const localGrant = request.source === "symbiont";

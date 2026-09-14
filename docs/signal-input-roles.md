@@ -36,20 +36,29 @@ ambient sensing role
      -> discard | input | deep
   -> signal timeline event
   -> user reply
-  -> durable external-signal source + normal user/symbiont conversation
+  -> local transcript source packet + normal user/symbiont conversation
 ```
 
 Candidates are a short-lived intake pool.  A new sensing pass replaces unpromoted candidates, and
 candidates never write PCP.
 
-A broadcast signal is visible in the local timeline as a chat-shaped event, with its own actor
-snapshot and sources.  It remains operational history only: it is excluded from topic aggregation,
-profile maintenance, Hunches, and PCP recall.  The local stream is bounded so that previously seen
-timeline items do not disappear merely because a new sensing pass started.
+A broadcast signal is retained locally with its actor snapshot, original text, sources, and attached
+review annotations. Unreplied deliveries older than 24 hours are hidden from the chat during initial
+loading or deliberate backward browsing. Visible or actively selected cards are preserved while the
+user reads. The delivery clock, not the source document or event date, determines chat visibility.
+Original inputs remain available in the date archive; the live projection limit does not delete them.
+Local briefing topics are browsing labels, not PCP Topics or memory admission.
 
-Only an explicit user reply promotes a signal.  Promotion writes one immutable `external_signal`
-source to PCP and links the user message to it.  Promotion is idempotent, so later replies reuse the
-same source revision.
+An explicit user reply attaches the exact source packet to the local transcript. It does not write a
+PCP Page or stage a Context Inbox candidate. Actual live user references determine which old sources
+remain in chat. Source packets use local signal identifiers only; there is no PCP revision mapping
+or fallback read. Retracted replies no longer count as live references.
+
+Formal PCP memory and candidate staging remain separate, selective model decisions based on the
+content's future value. Merely receiving or replying to an external input does not establish that
+value. Temporary operational activity is also separate from source storage and durable memory.
+The retired automatic-deletion setting is no longer loaded or written; its old API returns HTTP 410.
+Existing configuration files and archived evidence are left intact.
 
 ## Actor contract
 
@@ -100,26 +109,12 @@ avatar, speaker name, source footer, and a single meaningful interaction: reply.
 
 Replying sends a signal reference, not a forged message quote.  The server resolves the reference
 from the local signal store and gives the continuous symbiont the exact signal snapshot, sources,
-and actor provenance.  A missing or expired signal fails visibly instead of silently dropping the
+and actor provenance.  A missing signal fails visibly instead of silently dropping the
 context.
-
-## Execution order
-
-1. **Done** — add the signal domain store, actor snapshot, bounded local retention, and focused
-   lifecycle tests.
-2. **Done** — split scheduled ambient sensing from directed exploration. Scheduled sensing now
-   performs a bounded strong review and writes signals; manual exploration, explicit intents, and
-   follow-ups stay on the continuous symbiont path.
-3. **Done** — add typed timeline projection and the chat-shaped signal UI.
-4. **Done** — add reply-to-signal promotion into PCP. The raw `external_signal` write is
-   idempotent and becomes provenance for the user message; the exact source packet is attached to
-   the subsequent symbiont-d turn.
-5. **Deferred intentionally** — add optional multiple input-role configuration and role/channel
-   rotation after real usage data exists. The persisted actor contract is already ready for it.
 
 ## Non-goals
 
 - No multi-agent free-form conversation.
-- No PCP Page, Topic, profile, or Hunch write before a user reply.
+- No automatic PCP Page, candidate, profile, or Hunch write merely because an input was received or replied to.
 - No automatic preference learning from ordinary response rate.
 - No retroactive migration or reclassification of existing assistant messages.

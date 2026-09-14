@@ -18,6 +18,7 @@ import { initComposerContextUi } from "/composer-context-ui.js";
 import { initVoiceInput } from "/voice-input.js";
 import { initMessageActions } from "/message-actions.js";
 import { initMessageSync } from "/message-sync.js";
+import { shouldShowSignal, pruneExpiredSignals, placeTimelineItem } from "/input-signal-history.js";
 import { initMessageHistory } from "/message-history.js";
 import { initPermissionUi } from "/permission-ui.js";
 import { initQuoteUi, quoteDraft } from "/quote-ui.js";
@@ -59,6 +60,7 @@ const appState = {
     codexTaskAccess: false,
   },
   signals: [],
+  repliedSignalIds: [],
   signalsVersion: 0,
   permissions: [],
 };
@@ -185,6 +187,18 @@ const messageHistory = initMessageHistory({
   },
   notify: notifyComposer,
 });
+let previousHistoryScroll = conversation.scrollTop;
+conversation.addEventListener("scroll", () => {
+  const goingBack = conversation.scrollTop < previousHistoryScroll;
+  previousHistoryScroll = conversation.scrollTop;
+  if (!goingBack) return;
+  pruneExpiredSignals({
+    conversation, signals: appState.signals, repliedIds: appState.repliedSignalIds,
+    onRemove(id) { displayedSignalIds.delete(id); messageSync.remove([`signal:${id}`]); },
+    regroup() { inputSignalRelations.refresh(); regroupInputSignals(conversation); },
+  });
+  previousHistoryScroll = conversation.scrollTop;
+}, { passive: true });
 const messageActions = initMessageActions({
   conversation,
   isBusy: () => busy,
@@ -355,10 +369,8 @@ function appendMessage(entry, options = {}) {
     foot.hidden = false;
   }
   if (options.prepend && target === conversation) {
-    const firstTimelineItem = target.querySelector(
-      ":scope > .message, :scope > .input-signal, :scope > .input-signal-group, :scope > .conversation-notice",
-    );
-    target.insertBefore(fragment, firstTimelineItem);
+    placeTimelineItem(target, article);
+    regroupInputSignals(target);
   } else {
     target.append(fragment);
   }
@@ -408,7 +420,8 @@ function appendInputSignal(signal, options = {}) {
   if (!signal?.id) return null;
   const previous = displayedSignalIds.has(signal.id)
     ? conversation.querySelector(`.input-signal[data-signal-id="${CSS.escape(signal.id)}"]`) : null;
-  const renderKey = JSON.stringify(signal);
+  if (!previous && !shouldShowSignal(signal, appState.repliedSignalIds)) return null;
+  const renderKey = JSON.stringify([signal, appState.repliedSignalIds.includes(signal.id)]);
   if (previous?.dataset.signalRenderKey === renderKey) return previous;
   const reviewOpen = previous?.querySelector(".input-signal-dissent-marker")?.open;
   displayedSignalIds.add(signal.id);
@@ -470,7 +483,7 @@ function appendInputSignal(signal, options = {}) {
   const footInfo = document.createElement("div");
   footInfo.className = "input-signal-foot-info";
   const title = document.createElement("div");
-  title.className = "message-runtime";
+  title.className = "input-signal-title";
   title.textContent = signal.kind === "attacker_challenge" ? "异议" : signal.title || "外部信号";
   const actions = document.createElement("span");
   actions.className = "message-actions";
@@ -478,7 +491,7 @@ function appendInputSignal(signal, options = {}) {
   reply.type = "button";
   reply.className = "message-action input-signal-reply";
   reply.textContent = "↩";
-  reply.title = signal.promotedRevisionId ? "继续讨论" : "回应这条输入";
+  reply.title = appState.repliedSignalIds.includes(signal.id) ? "继续讨论" : "回应这条输入";
   reply.setAttribute("aria-label", reply.title);
   reply.addEventListener("click", () => {
     signalReplyUi.select(signal);
@@ -517,15 +530,14 @@ function appendInputSignal(signal, options = {}) {
   });
   actions.append(reply, dismiss);
   renderIcons(actions);
-  content.append(meta, body);
-  footInfo.append(title);
+  content.append(title, meta, body);
   appendSignalDetails(footInfo, signal, renderMessageContent);
   foot.append(footInfo, actions);
   content.append(foot);
   layout.append(avatar, content);
   article.append(layout);
   if (previous) previous.replaceWith(article);
-  else conversation.append(article);
+  else placeTimelineItem(conversation, article);
   messageSync.trackSignal(article, signal, { ...options, previousElement: previous });
   inputSignalRelations.refresh();
   if (reviewOpen) {
@@ -897,10 +909,10 @@ function applyRuntime(payload) {
     payload.computePolicies || appState.computePolicies;
   appState.permissions = payload.permissions || appState.permissions;
   appState.bridge = payload.bridge || appState.bridge;
-  appState.signalRetention = payload.signalRetention || appState.signalRetention;
   if (typeof payload.signalsVersion === "number") {
     appState.signalsVersion = payload.signalsVersion;
   }
+  if (Array.isArray(payload.repliedSignalIds)) appState.repliedSignalIds = payload.repliedSignalIds;
   if (signalsChanged) {
     appState.signals = payload.signals;
     const liveSignalIds = new Set(payload.signals.map((signal) => signal.id));
@@ -1376,7 +1388,6 @@ function localUserEntry(text, images, quotes, topic, signal = null) {
               type: "externalInput",
               input: {
                 signalId: signal.id,
-                sourceRevisionId: signal.promotedRevisionId || "",
                 actorName: signal.actor?.name || "外部输入",
                 title: signal.title || "外部输入",
                 observedAt:
@@ -1618,8 +1629,7 @@ function signalForEntry(entry) {
   const source = (entry.parts || []).find((part) => part.type === "externalInput")?.input;
   if (!source) return null;
   return appState.signals.find((signal) =>
-    signal.id === source.signalId ||
-    (source.sourceRevisionId && signal.promotedRevisionId === source.sourceRevisionId),
+    signal.id === source.signalId,
   ) || null;
 }
 

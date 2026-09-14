@@ -16,13 +16,13 @@ test("normalizes only the persisted focused state", () => {
 
 test("focus presentation explains the inverse action and active count", () => {
   assert.deepEqual(conversationFocusPresentation(false, 8), {
-    label: "只看对话与已采用的来源",
+    label: "只看对话与回复中引用的来源",
     tooltip: "聚焦对话",
     icon: "eye",
     visibleLabel: "聚焦",
   });
   assert.deepEqual(conversationFocusPresentation(true, 8), {
-    label: "显示全部外部输入与异议",
+    label: "显示聊天中的外部输入与异议",
     tooltip: "显示外部输入与异议",
     icon: "eye-off",
     visibleLabel: "聚焦中 · 隐藏 8 条",
