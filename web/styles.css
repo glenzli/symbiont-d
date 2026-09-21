@@ -208,6 +208,56 @@ html[data-native-shell="macos"] .topbar {
   font-weight: 700;
 }
 
+.connection-alert {
+  min-height: 30px;
+  max-width: 180px;
+  padding: 4px 8px;
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  border: 1px solid var(--danger-border);
+  border-radius: 6px;
+  color: var(--danger-text);
+  background: var(--danger-bg);
+  cursor: pointer;
+  font-size: 10px;
+  font-weight: 650;
+  line-height: 1;
+  white-space: nowrap;
+}
+
+.connection-alert[hidden] {
+  display: none;
+}
+
+.connection-alert:hover {
+  filter: brightness(0.97);
+}
+
+.connection-alert svg {
+  width: 14px;
+  height: 14px;
+  flex: 0 0 auto;
+}
+
+.connection-alert span {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.connection-alert strong {
+  min-width: 16px;
+  height: 16px;
+  padding: 0 4px;
+  display: inline-grid;
+  place-items: center;
+  border-radius: 8px;
+  color: var(--danger-bg);
+  background: var(--danger-text);
+  font-size: 9px;
+}
+
 .usage-state {
   min-height: 30px;
   padding: 4px 5px;
@@ -3567,7 +3617,8 @@ html[data-native-shell="macos"] .topbar {
 }
 
 #settings-dialog {
-  width: min(720px, calc(100vw - 32px));
+  width: min(880px, calc(100vw - 40px));
+  height: min(760px, calc(100dvh - 48px));
 }
 
 #settings-dialog[open] {
@@ -3591,7 +3642,7 @@ html[data-native-shell="macos"] .topbar {
 
 #settings-dialog > .source-settings-shell {
   display: grid;
-  grid-template-columns: 132px minmax(0, 1fr);
+  grid-template-columns: 152px minmax(0, 1fr);
   overflow: hidden;
 }
 
@@ -3633,6 +3684,40 @@ html[data-native-shell="macos"] .topbar {
 .source-settings-pages {
   min-width: 0;
   overflow-y: auto;
+}
+
+.source-settings-pages .ambient-config-row {
+  min-width: 0;
+  padding: 16px 18px 18px;
+  gap: 12px;
+}
+
+.source-settings-pages .ambient-config-row-head {
+  min-width: 0;
+  display: grid;
+  grid-template-columns: minmax(0, auto) minmax(0, 1fr);
+  align-items: baseline;
+  gap: 12px;
+}
+
+.source-settings-pages .ambient-config-row-head > strong {
+  font-size: 13px;
+}
+
+.source-settings-pages .ambient-row-status {
+  white-space: normal;
+  overflow-wrap: anywhere;
+  line-height: 1.45;
+}
+
+.source-settings-pages .field-grid {
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 11px 12px;
+}
+
+.source-channel-note {
+  display: block;
+  overflow-wrap: anywhere;
 }
 
 .source-settings-pages > form[hidden] {
@@ -3677,6 +3762,23 @@ html[data-native-shell="macos"] .topbar {
   border-top: 1px solid var(--border);
 }
 
+.drive-input-actions > [role="status"],
+.mail-input-actions > [role="status"] {
+  min-width: 0;
+  flex: 1 1 220px;
+  white-space: normal;
+  overflow-wrap: anywhere;
+}
+
+.drive-input-actions .secondary-button,
+.mail-input-actions .secondary-button {
+  width: auto;
+  min-width: max-content;
+  flex: 0 0 auto;
+  padding-inline: 13px;
+  white-space: nowrap;
+}
+
 .settings-dialog-actions {
   border-top: 1px solid var(--border);
 }
@@ -3702,6 +3804,25 @@ html[data-native-shell="macos"] .topbar {
 
   .source-settings-tabs button[aria-selected="true"] {
     box-shadow: inset 0 -2px 0 var(--text);
+  }
+
+  .source-settings-pages .field-grid {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .source-settings-pages .ambient-config-row-head {
+    grid-template-columns: minmax(0, 1fr);
+    gap: 4px;
+  }
+
+  .drive-input-actions,
+  .mail-input-actions {
+    flex-wrap: wrap;
+  }
+
+  .drive-input-actions > [role="status"],
+  .mail-input-actions > [role="status"] {
+    flex-basis: 100%;
   }
 }
 
@@ -6127,6 +6248,17 @@ button:disabled {
   }
 
   .usage-state span {
+    display: none;
+  }
+
+  .connection-alert {
+    width: 30px;
+    padding: 0;
+    justify-content: center;
+  }
+
+  .connection-alert span,
+  .connection-alert strong {
     display: none;
   }
 

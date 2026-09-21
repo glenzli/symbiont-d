@@ -165,3 +165,25 @@ test("live model catalog refresh updates clean settings without overwriting a mo
   assert.equal(select.value, terra.model);
   assert.match(document.querySelector('[data-settings-tab="models"]').getAttribute("aria-label"), /未保存/);
 });
+
+test("settings deep link opens the requested source channel", async (t) => {
+  const html = await readFile(new URL("./index.html", import.meta.url), "utf8");
+  const source = (await readFile(new URL("./settings.js", import.meta.url), "utf8"))
+    .replace('"/presentation.js"', JSON.stringify(new URL("./presentation.js", import.meta.url).href))
+    .replace('"/settings-session.js"', JSON.stringify(new URL("./settings-session.js", import.meta.url).href));
+  const { initSettings } = await import(`data:text/javascript;base64,${Buffer.from(source).toString("base64")}`);
+  const dom = new JSDOM(html);
+  const prior = { document: globalThis.document, window: globalThis.window };
+  globalThis.document = dom.window.document;
+  globalThis.window = dom.window;
+  t.after(() => { Object.assign(globalThis, prior); dom.window.close(); });
+  const dialog = document.querySelector("#settings-dialog");
+  dialog.showModal = () => dialog.setAttribute("open", "");
+  const settings = initSettings({ models: [] });
+
+  settings.open("sources", "drive");
+
+  assert.equal(document.querySelector('[data-settings-tab="sources"]').getAttribute("aria-selected"), "true");
+  assert.equal(document.querySelector('[data-source-settings-tab="drive"]').getAttribute("aria-selected"), "true");
+  assert.equal(document.querySelector('[data-source-settings-panel="drive"]').hidden, false);
+});

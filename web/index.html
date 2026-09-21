@@ -30,6 +30,17 @@
         </div>
         <div class="top-actions">
           <button
+            class="connection-alert"
+            id="connection-alert"
+            type="button"
+            aria-label="连接状态正常"
+            hidden
+          >
+            <i data-lucide="triangle-alert" aria-hidden="true"></i>
+            <span id="connection-alert-label">连接异常</span>
+            <strong id="connection-alert-count" aria-hidden="true">1</strong>
+          </button>
+          <button
             class="unread-indicator"
             id="unread-indicator"
             type="button"
@@ -757,8 +768,8 @@
                   <label class="toggle-row compact-toggle source-channel-toggle"><span>启用</span><input id="drive-input-enabled" type="checkbox"></label>
                 </div>
                 <label class="field"><span>桌面应用 OAuth JSON</span><textarea id="drive-input-credential-value" rows="4" autocomplete="off" placeholder="首次连接时粘贴 Google Desktop app OAuth client JSON；连接后无需保留"></textarea><small>只用于打开 Google 的个人账号授权页；Symbiont 仅申请 Drive 只读权限。</small></label>
-                <small id="drive-input-credential-note" class="ambient-credential-note"></small>
-                <small id="drive-input-runtime-note" class="ambient-credential-note"></small>
+                <small id="drive-input-credential-note" class="ambient-credential-note source-channel-note"></small>
+                <small id="drive-input-runtime-note" class="ambient-credential-note source-channel-note"></small>
               </div>
             </div>
           </section>
@@ -790,8 +801,8 @@
                   <label class="toggle-row compact-toggle source-channel-toggle"><span>启用</span><input id="mail-input-enabled" type="checkbox"></label>
                 </div>
                 <label class="field"><span>允许的发件人</span><textarea id="mail-input-allowed-senders" rows="2" maxlength="2400" placeholder="spark@google.com&#10;@scholar.google.com&#10;@github.com"></textarea><small>每行一个地址或 @域名；仅白名单邮件进入模型上下文。</small></label>
-                <small id="mail-input-credential-note" class="ambient-credential-note"></small>
-                <small id="mail-input-runtime-note" class="ambient-credential-note"></small>
+                <small id="mail-input-credential-note" class="ambient-credential-note source-channel-note"></small>
+                <small id="mail-input-runtime-note" class="ambient-credential-note source-channel-note"></small>
               </div>
             </div>
           </section>

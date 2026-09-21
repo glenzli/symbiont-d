@@ -72,3 +72,31 @@ $$\begin{aligned} x &= 1 \\ & = 2 \end{aligned}$$`);
   assert.equal(root.querySelectorAll(".katex-error").length, 0);
   assert.match(root.querySelectorAll("annotation")[1].textContent, /\\\\ &/);
 });
+
+test("legacy double-escaped norm delimiters do not become KaTeX line breaks", () => {
+  const root = render(String.raw`$\\|\widehat{p}_{2t}\\|_{\ell_1} \le \left(\frac{en}{2t-1}\right)^{\frac{2t-1}{2}} \\|p\\|_{\mathrm{cb}}$`);
+  const annotation = root.querySelector("annotation");
+
+  assert.equal(root.querySelectorAll(".katex").length, 1);
+  assert.equal(root.querySelectorAll(".katex-error").length, 0);
+  assert.equal(root.querySelectorAll('mspace[linebreak="newline"]').length, 0);
+  assert.equal(annotation.textContent, String.raw`\|\widehat{p}_{2t}\|_{\ell_1} \le \left(\frac{en}{2t-1}\right)^{\frac{2t-1}{2}} \|p\|_{\mathrm{cb}}`);
+});
+
+test("intentional TeX row breaks remain unchanged", () => {
+  const root = render(String.raw`$$\begin{aligned} x &= 1 \\ |y| &= 2 \end{aligned}$$`);
+
+  assert.equal(root.querySelectorAll(".katex").length, 1);
+  assert.equal(root.querySelectorAll(".katex-error").length, 0);
+  assert.match(root.querySelector("annotation").textContent, /\\\\ \|y\|/);
+});
+
+test("legacy nbsp indentation does not hide a display formula from Markdown", () => {
+  const root = render(String.raw`&nbsp;&nbsp;&nbsp;&nbsp;$$\zeta_{X_f}(z) = \frac{1}{\det(I - z\mathcal{R}(f))}$$`);
+
+  assert.equal(root.querySelectorAll(".katex-display").length, 1);
+  assert.equal(root.querySelectorAll(".katex-error").length, 0);
+  assert.equal(root.querySelectorAll('mspace[linebreak="newline"]').length, 0);
+  assert.doesNotMatch(root.textContent, /\$\$/);
+  assert.equal(root.querySelector("annotation").textContent.trim(), String.raw`\zeta_{X_f}(z) = \frac{1}{\det(I - z\mathcal{R}(f))}`);
+});

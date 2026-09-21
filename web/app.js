@@ -160,6 +160,9 @@ const settingsUi = initSettings(appState, {
   refreshInputRoles: inputRoleUi.refresh,
   saveReflection: () => reflectionUi.save(),
 });
+const topbarUi = initTopbarUi(appState, {
+  openSettings: settingsUi.open,
+});
 const permissionUi = initPermissionUi(appState);
 const composerContextUi = initComposerContextUi({
   state: appState,
@@ -292,7 +295,6 @@ const ephemeralDiscussionUi = initEphemeralDiscussionUi({
     if (nextBusy) setRuntimeStatus("独立讨论正在回应", "working");
   },
 });
-initTopbarUi();
 renderIcons();
 
 function metadataText(metadata) {
@@ -882,6 +884,8 @@ function applyRuntime(payload) {
   const conversationChanged = runtimeValueChanged("conversation", payload.conversation);
   const permissionsChanged = runtimeValueChanged("permissions", payload.permissions);
   const bridgeChanged = runtimeValueChanged("bridge", payload.bridge);
+  const driveInputChanged = runtimeValueChanged("driveInput", payload.driveInput);
+  const mailInputChanged = runtimeValueChanged("mailInput", payload.mailInput);
   const turnDispositionsChanged = runtimeValueChanged(
     "turnDispositions",
     payload.turnDispositions,
@@ -944,6 +948,7 @@ function applyRuntime(payload) {
   if (permissionsChanged) permissionUi.render();
   if (audioTranscriptionChanged) voiceInput.configUpdated();
   if (turnDispositionsChanged) turnDispositionUi.applyAll(payload.turnDispositions);
+  if (driveInputChanged || mailInputChanged) topbarUi.render();
 }
 
 async function bootstrap() {
@@ -992,6 +997,7 @@ async function bootstrap() {
     identityUi.render();
     inputRoleUi.render();
     settingsUi.render();
+    topbarUi.render();
     modelCouncilUi.configUpdated();
     voiceInput.configUpdated();
     explorationUi.runtimeUpdated();

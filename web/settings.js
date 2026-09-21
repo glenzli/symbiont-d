@@ -1046,10 +1046,10 @@ export function initSettings(state, actions = {}) {
     session.refresh();
   }
 
-  function openSettings(tab = "exploration") {
+  function openSettings(tab = "exploration", sourceTab = null) {
     renderSettings();
     activateTab(normalizeSettingsTab(tab));
-    activateSourceTab(activeSourceSettingsTab);
+    activateSourceTab(sourceTab || activeSourceSettingsTab);
     if (!dialog.open) dialog.showModal();
   }
 
