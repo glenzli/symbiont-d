@@ -545,6 +545,10 @@ impl CodexClient {
         self.model_catalog.subscribe()
     }
 
+    pub fn model_catalog_sender(&self) -> watch::Sender<Vec<ModelInfo>> {
+        self.model_catalog.clone()
+    }
+
     pub fn rate_limits(&self) -> Arc<RwLock<Option<RateLimitInfo>>> {
         Arc::clone(&self.rate_limits)
     }
@@ -2551,10 +2555,12 @@ impl CodexClient {
         Ok(true)
     }
 
-    fn model_info(&self, slug: &str) -> Result<&ModelInfo> {
-        self.models
+    fn model_info(&self, slug: &str) -> Result<ModelInfo> {
+        self.model_catalog
+            .borrow()
             .iter()
             .find(|model| model.model == slug || model.id == slug)
+            .cloned()
             .with_context(|| format!("configured model is no longer available: {slug}"))
     }
 
@@ -2590,7 +2596,8 @@ impl CodexClient {
     }
 
     fn model_display_name(&self, slug: &str) -> String {
-        self.models
+        self.model_catalog
+            .borrow()
             .iter()
             .find(|model| model.model == slug || model.id == slug)
             .map(|model| model.display_name.clone())

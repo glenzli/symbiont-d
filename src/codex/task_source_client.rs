@@ -14,6 +14,7 @@ use super::{
     approvals::automatic_server_request_response,
     task_bridge::{parse_task_detail, parse_task_list},
 };
+use crate::compute::ModelInfo;
 
 /// A deliberately small app-server session used only to inspect existing Codex tasks.
 ///
@@ -93,6 +94,39 @@ impl CodexTaskSourceClient {
             .await
             .context("list interactive Codex tasks")?;
         parse_task_list(&result)
+    }
+
+    pub async fn list_models(&mut self) -> Result<Vec<ModelInfo>> {
+        let mut models = Vec::new();
+        let mut cursor: Option<String> = None;
+        loop {
+            let result = self
+                .request(
+                    "model/list",
+                    json!({ "cursor": cursor, "includeHidden": false, "limit": 100 }),
+                )
+                .await
+                .context("list Codex models")?;
+            for value in result
+                .get("data")
+                .and_then(Value::as_array)
+                .into_iter()
+                .flatten()
+            {
+                models.push(ModelInfo::from_app_server(value)?);
+            }
+            cursor = result
+                .get("nextCursor")
+                .and_then(Value::as_str)
+                .map(str::to_owned);
+            if cursor.is_none() {
+                break;
+            }
+        }
+        if models.is_empty() {
+            anyhow::bail!("Codex model/list returned no visible models");
+        }
+        Ok(models)
     }
 
     pub async fn read_task(&mut self, thread_id: &str) -> Result<CodexTaskDetail> {

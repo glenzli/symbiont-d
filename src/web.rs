@@ -18,7 +18,7 @@ use pcp_core::{
 };
 use serde::{Deserialize, Serialize};
 use tokio::{
-    sync::{Mutex, RwLock, mpsc},
+    sync::{Mutex, RwLock, mpsc, watch},
     task::JoinHandle,
 };
 use tokio_stream::{StreamExt, wrappers::ReceiverStream};
@@ -45,8 +45,8 @@ use crate::{
         BridgeRecallRequest, BridgeSettingsDraft, BridgeSnapshot, CodexBridge,
     },
     codex::{
-        ChatDisposition, ChatInput, ChatOutcome, CodexClient, RateLimitInfo, RuntimeEvent,
-        import_generated_images,
+        ChatDisposition, ChatInput, ChatOutcome, CodexClient, CodexTaskSources, RateLimitInfo,
+        RuntimeEvent, import_generated_images,
     },
     compute::{ComputeConfig, ComputeLane, ComputeStore, ModelInfo},
     compute_policy::{ComputePolicyStore, ComputeTopicPolicy, ComputeTopicPolicyDraft},
@@ -170,6 +170,8 @@ pub struct AppState {
     curiosity: Arc<CuriosityStore>,
     autonomy: Arc<AutonomyStore>,
     codex: Arc<Mutex<CodexClient>>,
+    model_catalog: watch::Sender<Vec<ModelInfo>>,
+    model_sources: Arc<CodexTaskSources>,
     compute: Arc<ComputeStore>,
     inference: Arc<InferenceExecutor>,
     ambient: Arc<AmbientTopologyStore>,
@@ -204,6 +206,8 @@ impl AppState {
         curiosity: Arc<CuriosityStore>,
         autonomy: Arc<AutonomyStore>,
         codex: Arc<Mutex<CodexClient>>,
+        model_catalog: watch::Sender<Vec<ModelInfo>>,
+        model_sources: Arc<CodexTaskSources>,
         compute: Arc<ComputeStore>,
         inference: Arc<InferenceExecutor>,
         ambient: Arc<AmbientTopologyStore>,
@@ -239,6 +243,8 @@ impl AppState {
             curiosity,
             autonomy,
             codex,
+            model_catalog,
+            model_sources,
             compute,
             inference,
             ambient,
@@ -744,6 +750,7 @@ pub fn router(state: AppState) -> Router {
             post(redeliver_exploration),
         )
         .route("/api/compute", post(update_compute))
+        .route("/api/models/refresh", post(refresh_models))
         .route("/api/model-council", post(update_model_council))
         .route(
             "/api/model-council/activation",
@@ -1955,6 +1962,16 @@ async fn recover_runtime(
         restarted: true,
         message: "Codex 通信连接已重建，现在可以重试消息。".to_owned(),
     }))
+}
+
+async fn refresh_models(State(state): State<AppState>) -> Result<Json<Vec<ModelInfo>>, ApiError> {
+    let models = state
+        .model_sources
+        .list_models()
+        .await
+        .map_err(ApiError::internal)?;
+    state.model_catalog.send_replace(models);
+    Ok(Json(state.compute.catalog()))
 }
 
 async fn resolve_permission(

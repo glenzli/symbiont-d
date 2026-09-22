@@ -509,6 +509,7 @@ async fn main() -> Result<()> {
         );
     }
     let rate_limits = codex.rate_limits();
+    let model_catalog = codex.model_catalog_sender();
     let codex = Arc::new(Mutex::new(codex));
     let task_sources = Arc::new(CodexTaskSources::new(codex_config));
     let bridge = Arc::new(
@@ -621,6 +622,8 @@ async fn main() -> Result<()> {
         curiosity,
         autonomy,
         codex,
+        model_catalog,
+        task_sources,
         compute,
         Arc::clone(&inference),
         ambient_provider,

@@ -3,12 +3,14 @@ use std::{
     time::{Duration, Instant},
 };
 
-use anyhow::Result;
+use anyhow::{Context, Result};
 use tokio::sync::{Mutex, MutexGuard, RwLock};
+use tokio::time::timeout;
 
 use super::{
     CodexConfig, CodexTaskDetail, CodexTaskSummary, task_source_client::CodexTaskSourceClient,
 };
+use crate::compute::ModelInfo;
 
 const TASK_LIST_TTL: Duration = Duration::from_secs(90);
 const TASK_DETAIL_TTL: Duration = Duration::from_secs(120);
@@ -50,6 +52,15 @@ impl CodexTaskSources {
             cache: RwLock::new(CacheState::default()),
             refresh: Mutex::new(()),
         }
+    }
+
+    pub async fn list_models(&self) -> Result<Vec<ModelInfo>> {
+        timeout(Duration::from_secs(20), async {
+            let mut client = CodexTaskSourceClient::start(self.config.clone()).await?;
+            client.list_models().await
+        })
+        .await
+        .context("refresh Codex model list timed out")?
     }
 
     pub async fn list(&self, refresh: bool) -> Result<Vec<CodexTaskSummary>> {

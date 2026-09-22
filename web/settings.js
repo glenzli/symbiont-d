@@ -102,6 +102,7 @@ export function initSettings(state, actions = {}) {
   let driveInputTestController = null;
   let driveInputOAuthPollTimer = null;
   let mailInputTestController = null;
+  let modelCatalogRefresh = null;
   const session = initSettingsSession({
     dialog,
     button: settingsSave,
@@ -163,6 +164,32 @@ export function initSettings(state, actions = {}) {
       appendComputePolicy(policy);
     }
     renderModelCouncil();
+  }
+
+  async function refreshModelCatalog() {
+    if (modelCatalogRefresh) return modelCatalogRefresh;
+    modelCatalogRefresh = (async () => {
+      settingsSaveState.textContent = "正在刷新可选模型…";
+      try {
+        const models = await responseJson(
+          await fetch("/api/models/refresh", { method: "POST" }),
+          "模型列表刷新失败",
+        );
+        state.models = models;
+        if (!session.isDirty(currentPanel("models"))) {
+          renderCompute();
+          session.captureClean();
+        }
+        session.refresh();
+      } catch (error) {
+        settingsSaveState.textContent = `模型列表刷新失败：${error.message}`;
+      }
+    })();
+    try {
+      await modelCatalogRefresh;
+    } finally {
+      modelCatalogRefresh = null;
+    }
   }
 
   function renderModelCouncil() {
@@ -1008,6 +1035,7 @@ export function initSettings(state, actions = {}) {
       Promise.resolve(actions.refreshInputRoles?.()).then(() => session.captureClean());
     }
     session.refresh();
+    if (activeSettingsTab === "models") void refreshModelCatalog();
   }
 
   function activateSourceTab(name) {
