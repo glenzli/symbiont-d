@@ -100,3 +100,20 @@ test("legacy nbsp indentation does not hide a display formula from Markdown", ()
   assert.doesNotMatch(root.textContent, /\$\$/);
   assert.equal(root.querySelector("annotation").textContent.trim(), String.raw`\zeta_{X_f}(z) = \frac{1}{\det(I - z\mathcal{R}(f))}`);
 });
+
+test("sentence-adjacent bold with terminal punctuation renders without changing text", () => {
+  const source = "判断：**代码生成动画非常突出，不只是漂亮样片。**尤其是有时间线的长作品。";
+  const root = render(source);
+
+  assert.equal(root.querySelector("strong")?.textContent, "代码生成动画非常突出，不只是漂亮样片");
+  assert.equal(root.textContent.trimEnd(), "判断：代码生成动画非常突出，不只是漂亮样片。尤其是有时间线的长作品。");
+  assert.doesNotMatch(root.textContent, /\*\*/);
+});
+
+test("literal asterisks in code and ordinary emphasis remain unchanged", () => {
+  const root = render("`**代码。**后文`\n\n```text\n**原文。**后文\n```\n\n**正常加粗**后文");
+
+  assert.equal(root.querySelector("code")?.textContent, "**代码。**后文");
+  assert.match(root.querySelector("pre")?.textContent, /\*\*原文。\*\*后文/);
+  assert.equal(root.querySelector("strong")?.textContent, "正常加粗");
+});

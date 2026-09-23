@@ -4,6 +4,7 @@
 //! the current model reviews exact sources and current PCP heads before commit.
 //! Failed queries preserve a local proposal. A review token binds that evidence
 //! and is revalidated at commit, so prior repairs cannot silently be bypassed.
+mod experience;
 mod store;
 #[cfg(test)]
 mod tests;
@@ -94,6 +95,22 @@ pub(super) struct ReviewSnapshot {
 impl ContinuityHost {
     pub(crate) async fn retain_page(
         &self,
+        proposal: Proposal,
+        review: Option<RetentionReview>,
+    ) -> Result<Value> {
+        let result = self.retain_page_review(proposal, review).await;
+        // One delivery opportunity at this existing native checkpoint. Never
+        // turn an optional delivery failure into failure of the retained Page.
+        if result.is_ok()
+            && let Err(error) = self.retention_experience_checkpoint().await
+        {
+            tracing::warn!(%error, "could not persist optional retention experience delivery status");
+        }
+        result
+    }
+
+    async fn retain_page_review(
+        &self,
         mut proposal: Proposal,
         review: Option<RetentionReview>,
     ) -> Result<Value> {
@@ -174,10 +191,11 @@ impl ContinuityHost {
                 .get_mut(&id)
                 .unwrap()
                 .defer(&review.rationale);
+            let result = json!({"status":"deferred", "created":false, "proposalId":id, "reason":review.rationale});
+            self.capture_retention_experience(&mut state, &id, &proposal, review, &result)
+                .await;
             self.retention.save(&state).await?;
-            return Ok(
-                json!({"status":"deferred", "created":false, "proposalId":id, "reason":review.rationale}),
-            );
+            return Ok(result);
         }
         if matches!(
             review.disposition,
@@ -241,6 +259,8 @@ impl ContinuityHost {
         record.status = "written".to_owned();
         record.review = None;
         record.result = Some(result.clone());
+        self.capture_retention_experience(&mut state, &id, &proposal, review, &result)
+            .await;
         self.retention.save(&state).await?;
         Ok(result)
     }
@@ -328,7 +348,8 @@ impl ContinuityHost {
     pub(crate) async fn retention_snapshot(&self) -> Value {
         let state = self.retention.state.lock().await;
         json!({"pending":state.proposals.iter().filter(|(_,p)|p.result.is_none()).map(|(id,p)|json!({"id":id,"proposal":p.proposal,"reason":p.reason,"status":p.status,"automaticRetry":p.status != "blocked","consecutiveFailures":p.consecutive_failures,"proposedAt":p.proposed_at,"retryAfter":p.retry_after})).collect::<Vec<_>>(),
-            "recent":state.proposals.iter().filter_map(|(_,p)|p.result.clone()).rev().take(20).collect::<Vec<_>>()})
+            "recent":state.proposals.iter().filter_map(|(_,p)|p.result.clone()).rev().take(20).collect::<Vec<_>>(),
+            "experience": self.retention_experience_snapshot(&state)})
     }
 
     pub(crate) async fn retention_retry_bundle(&self) -> Result<Option<String>> {

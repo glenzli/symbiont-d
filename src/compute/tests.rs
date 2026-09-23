@@ -105,3 +105,54 @@ async fn settings_and_validation_follow_the_reconnected_catalog() {
     assert!(store.update(original.clone()).await.is_err());
     assert_eq!(store.snapshot().await.lanes.critical.model, sol.model);
 }
+
+#[tokio::test]
+async fn startup_keeps_saved_models_when_the_catalog_is_temporarily_incomplete() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("compute.toml");
+    let luna = model("gpt-6-luna", false, &["low", "medium"]);
+    let sol = model("gpt-6-sol", false, &["low", "high", "xhigh"]);
+    let terra = model("gpt-5.6-terra", true, &["medium"]);
+    let mut saved = ComputeConfig::defaults(&[luna.clone(), sol.clone(), terra.clone()]).unwrap();
+    saved.lanes.sense.model = luna.model.clone();
+    saved.lanes.sense.effort = "low".to_owned();
+    saved.lanes.observe.model = luna.model.clone();
+    saved.lanes.observe.effort = "medium".to_owned();
+    saved.lanes.conversation.model = sol.model.clone();
+    saved.lanes.conversation.effort = "low".to_owned();
+    saved.lanes.investigate.model = sol.model.clone();
+    saved.lanes.investigate.effort = "high".to_owned();
+    saved.lanes.critical.model = sol.model.clone();
+    saved.lanes.critical.effort = "xhigh".to_owned();
+    saved.show_model = false;
+    let original = toml::to_string_pretty(&saved).unwrap();
+    tokio::fs::write(&path, &original).await.unwrap();
+
+    let (sender, receiver) = tokio::sync::watch::channel(vec![terra]);
+    let store = ComputeStore::open(path.clone(), receiver).await.unwrap();
+
+    assert_eq!(store.snapshot().await.lanes.conversation.model, sol.model);
+    assert_eq!(store.snapshot().await.lanes.sense.model, luna.model);
+    assert!(!store.snapshot().await.show_model);
+    assert_eq!(tokio::fs::read_to_string(&path).await.unwrap(), original);
+
+    sender.send_replace(vec![luna, sol, model("gpt-5.6-terra", true, &["medium"])]);
+    assert!(store.update(store.snapshot().await).await.is_ok());
+}
+
+#[tokio::test]
+async fn startup_keeps_saved_effort_when_catalog_metadata_changes() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("compute.toml");
+    let full = model("gpt-6-sol", true, &["low", "high"]);
+    let mut saved = ComputeConfig::defaults(&[full]).unwrap();
+    saved.lanes.conversation.effort = "high".to_owned();
+    let original = toml::to_string_pretty(&saved).unwrap();
+    tokio::fs::write(&path, &original).await.unwrap();
+
+    let (_, receiver) = tokio::sync::watch::channel(vec![model("gpt-6-sol", true, &["low"])]);
+    let store = ComputeStore::open(path.clone(), receiver).await.unwrap();
+
+    assert_eq!(store.snapshot().await.lanes.conversation.effort, "high");
+    assert_eq!(tokio::fs::read_to_string(&path).await.unwrap(), original);
+}

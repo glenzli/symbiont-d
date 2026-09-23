@@ -1901,7 +1901,12 @@ html[data-native-shell="macos"] .topbar {
   padding: 5px 7px;
   border: 1px solid var(--border);
   text-align: left;
-  white-space: nowrap;
+  white-space: normal;
+  overflow-wrap: anywhere;
+}
+
+.rich-text tr > :first-child {
+  min-width: 7.5em;
 }
 
 .rich-text hr {

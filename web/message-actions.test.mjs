@@ -68,3 +68,36 @@ test("clipboard failure does not turn an answered message into a retryable turn"
   assert.ok(message.querySelector('[data-message-action="recall"]'));
   assert.match(message.querySelector(".message-state").textContent, /操作失败：剪贴板不可用/);
 });
+
+test("an action only redraws its own message while pending and after completion", async (t) => {
+  const dom = new JSDOM(`<section id="conversation">
+    <article class="message" data-role="user"><footer class="message-foot"><span class="message-state"></span><div class="message-actions"></div></footer></article>
+    <article class="message" data-role="user"><footer class="message-foot"><span class="message-state"></span><div class="message-actions"></div></footer></article>
+  </section>`);
+  const previousDocument = globalThis.document;
+  globalThis.document = dom.window.document;
+  t.after(() => { globalThis.document = previousDocument; dom.window.close(); });
+
+  const conversation = document.querySelector("#conversation");
+  const [first, second] = conversation.querySelectorAll(".message");
+  let finish;
+  const actions = initMessageActions({
+    conversation,
+    isBusy: () => false,
+    perform: () => new Promise((resolve) => { finish = resolve; }),
+  });
+  actions.track(first, { role: "user", revisionId: "first", content: "one" });
+  actions.track(second, { role: "user", revisionId: "second", content: "two" });
+  const untouchedButton = second.querySelector('[data-message-action="edit"]');
+
+  first.querySelector('[data-message-action="edit"]').click();
+  assert.equal(first.dataset.actionBusy, "true");
+  assert.equal(first.querySelector(".message-state").textContent, "正在准备编辑…");
+  assert.equal(second.querySelector('[data-message-action="edit"]'), untouchedButton);
+
+  finish();
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(first.dataset.actionBusy, undefined);
+  assert.equal(first.querySelector(".message-state").textContent, "");
+  assert.equal(second.querySelector('[data-message-action="edit"]'), untouchedButton);
+});

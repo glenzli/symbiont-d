@@ -48,7 +48,7 @@ impl InteractiveThreads {
 
     pub fn contains(&self, scope: &InteractiveScope) -> bool {
         match scope {
-            InteractiveScope::Main => true,
+            InteractiveScope::Main => !self.main.thread_id.is_empty(),
             InteractiveScope::Topic(id) => self.topics.contains_key(id),
         }
     }
@@ -148,5 +148,35 @@ mod tests {
         assert_eq!(evicted, vec!["thread_1"]);
         assert!(threads.contains(&InteractiveScope::Topic("ep_0".to_owned())));
         assert!(!threads.contains(&InteractiveScope::Topic("ep_1".to_owned())));
+    }
+
+    #[test]
+    fn invalidation_requires_a_fresh_main_thread_and_clears_topics() {
+        let mut threads = InteractiveThreads::new("main".to_owned());
+        let topic = InteractiveScope::Topic("ep_topic".to_owned());
+        threads.insert_topic("ep_topic".to_owned(), "topic".to_owned());
+        threads
+            .select(&InteractiveScope::Main)
+            .cursor
+            .mark("rev_old".to_owned());
+
+        let previous = threads.reset(String::new());
+
+        assert_eq!(previous.len(), 2);
+        assert!(previous.contains(&"main".to_owned()));
+        assert!(previous.contains(&"topic".to_owned()));
+        assert!(!threads.contains(&InteractiveScope::Main));
+        assert!(!threads.contains(&topic));
+        assert_eq!(
+            threads.select(&InteractiveScope::Main).cursor.revision(),
+            None
+        );
+
+        assert_eq!(
+            threads.replace(&InteractiveScope::Main, "fresh".to_owned()),
+            ""
+        );
+        assert!(threads.contains(&InteractiveScope::Main));
+        assert_eq!(threads.select(&InteractiveScope::Main).thread_id, "fresh");
     }
 }

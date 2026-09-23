@@ -125,20 +125,21 @@ export function initSettings(state, actions = {}) {
     const effortSelect = row.querySelector('[data-field="effort"]');
     const model = modelBySlug(modelSelect.value);
     const efforts = model?.supportedReasoningEfforts || [];
-    effortSelect.replaceChildren(
-      ...efforts.map((effort) => {
-        const option = document.createElement("option");
-        option.value = effort.reasoningEffort;
-        option.textContent = effort.reasoningEffort;
-        option.title = effort.description;
-        return option;
-      }),
-    );
-    effortSelect.value = efforts.some(
-      (effort) => effort.reasoningEffort === selectedEffort,
-    )
-      ? selectedEffort
-      : model?.defaultReasoningEffort || "";
+    const options = efforts.map((effort) => {
+      const option = document.createElement("option");
+      option.value = effort.reasoningEffort;
+      option.textContent = effort.reasoningEffort;
+      option.title = effort.description;
+      return option;
+    });
+    if (selectedEffort && !efforts.some((effort) => effort.reasoningEffort === selectedEffort)) {
+      const option = document.createElement("option");
+      option.value = selectedEffort;
+      option.textContent = `${selectedEffort}（当前列表暂不可用）`;
+      options.push(option);
+    }
+    effortSelect.replaceChildren(...options);
+    effortSelect.value = selectedEffort || model?.defaultReasoningEffort || "";
   }
 
   function renderCompute() {
@@ -146,17 +147,23 @@ export function initSettings(state, actions = {}) {
     routingSelect.value = state.compute.routing;
     for (const row of computeForm.querySelectorAll(".lane-row")) {
       const lane = row.dataset.lane;
+      const selectedModel = state.compute.lanes[lane].model;
       const modelSelect = row.querySelector('[data-field="model"]');
-      modelSelect.replaceChildren(
-        ...state.models.map((model) => {
-          const option = document.createElement("option");
-          option.value = model.model;
-          option.textContent = model.displayName;
-          option.title = model.description;
-          return option;
-        }),
-      );
-      modelSelect.value = state.compute.lanes[lane].model;
+      const options = state.models.map((model) => {
+        const option = document.createElement("option");
+        option.value = model.model;
+        option.textContent = model.displayName;
+        option.title = model.description;
+        return option;
+      });
+      if (selectedModel && !state.models.some((model) => model.model === selectedModel)) {
+        const option = document.createElement("option");
+        option.value = selectedModel;
+        option.textContent = `${selectedModel}（当前列表暂不可用）`;
+        options.push(option);
+      }
+      modelSelect.replaceChildren(...options);
+      modelSelect.value = selectedModel;
       configureEffortSelect(row, state.compute.lanes[lane].effort);
     }
     computePolicyList.replaceChildren();
@@ -693,6 +700,7 @@ export function initSettings(state, actions = {}) {
         "Google Drive Inbox 连接测试失败",
       );
       driveInputSaveState.textContent = `读取正常：列出 ${result.listedFileCount || 0}，匹配 ${result.matchingFileCount || 0}，选择 ${result.selectedFileCount || 0}，读取 ${result.fetchedFileCount || 0}，拆分候选 ${result.candidateCount || 0}；尚未保存`;
+      await actions.refreshRuntime?.();
     } catch (error) {
       driveInputSaveState.textContent = controller.signal.aborted
         ? "连接测试已取消"
@@ -874,6 +882,7 @@ export function initSettings(state, actions = {}) {
         "研究收件箱连接测试失败",
       );
       mailInputSaveState.textContent = `读取正常：「${result.folder}」共 ${result.messageCount || 0} 封，抓取 ${result.fetchedMessageCount || 0}，解析 ${result.parsedMessageCount || 0}，白名单 ${result.allowedMessageCount || 0}，拆分候选 ${result.candidateCount || 0}；尚未保存`;
+      await actions.refreshRuntime?.();
     } catch (error) {
       mailInputSaveState.textContent = controller.signal.aborted
         ? "连接测试已取消"

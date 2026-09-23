@@ -15,7 +15,7 @@ use tokio::{fs, sync::Mutex};
 use super::{Proposal, ReviewSnapshot};
 
 pub(in crate::continuity) struct RetentionQueue {
-    path: PathBuf,
+    pub(super) path: PathBuf,
     pub(super) state: Mutex<QueueState>,
 }
 
@@ -25,6 +25,8 @@ pub(super) struct QueueState {
     pub(super) proposals: BTreeMap<String, Record>,
     #[serde(default)]
     pub(super) unavailable_recent_pages: BTreeSet<String>,
+    #[serde(default)]
+    pub(super) experience_delivery: BTreeMap<String, super::experience::DeliveryStatus>,
 }
 
 #[derive(Clone, Serialize, Deserialize)]
@@ -39,6 +41,10 @@ pub(super) struct Record {
     pub(super) result: Option<Value>,
     #[serde(default)]
     pub(super) consecutive_failures: u32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(super) experience: Option<super::experience::BoundExperience>,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub(super) experience_receipts: BTreeMap<String, Value>,
 }
 
 impl Record {
@@ -52,6 +58,8 @@ impl Record {
             review: None,
             result: None,
             consecutive_failures: 0,
+            experience: None,
+            experience_receipts: BTreeMap::new(),
         }
     }
 

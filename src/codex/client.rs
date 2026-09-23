@@ -75,7 +75,7 @@ const ATTACKER_COMPLETE_MARKER: &str = "<symbiont-attacker-reviewed/>";
 // Starting an app-server includes initializing account state and Symbiont's
 // isolated native threads. A cold desktop reconnect can take longer than a
 // plain process spawn; do not mistake that for a dead process.
-const APP_SERVER_START_TIMEOUT: Duration = Duration::from_secs(60);
+const APP_SERVER_START_TIMEOUT: Duration = Duration::from_secs(120);
 const APP_SERVER_START_ATTEMPTS: u8 = 2;
 const APP_SERVER_IDLE_TIMEOUT: Duration = Duration::from_secs(75);
 const LUNA_SENSE_TIMEOUT: Duration = Duration::from_secs(180);
@@ -784,23 +784,19 @@ impl CodexClient {
         }
     }
 
-    pub async fn reset_interactive_thread(&mut self) -> Result<()> {
-        let workspace = self.workspace.clone();
-        let next = self
-            .start_thread(&workspace, ToolSurface::Conversation)
-            .await
-            .context("start a fresh interactive Codex thread after message retraction")?;
-        let previous = self.interactive_threads.reset(next);
+    pub fn invalidate_interactive_thread(&mut self) {
+        let previous = self.interactive_threads.reset(String::new());
         for thread_id in previous {
             self.clear_thread_state(&thread_id);
         }
-        Ok(())
+    }
+
+    pub async fn prepare_interactive_thread(&mut self) -> Result<()> {
+        self.ensure_interactive_scope(&super::InteractiveScope::Main)
+            .await
     }
 
     async fn ensure_interactive_scope(&mut self, scope: &super::InteractiveScope) -> Result<()> {
-        let Some(topic_id) = scope.topic_id() else {
-            return Ok(());
-        };
         if self.interactive_threads.contains(scope) {
             return Ok(());
         }
@@ -808,11 +804,21 @@ impl CodexClient {
         let thread_id = self
             .start_thread(&workspace, ToolSurface::Conversation)
             .await?;
-        for evicted in self
-            .interactive_threads
-            .insert_topic(topic_id.to_owned(), thread_id)
-        {
-            self.clear_thread_state(&evicted);
+        match scope {
+            super::InteractiveScope::Main => {
+                let previous = self.interactive_threads.replace(scope, thread_id);
+                if !previous.is_empty() {
+                    self.clear_thread_state(&previous);
+                }
+            }
+            super::InteractiveScope::Topic(topic_id) => {
+                for evicted in self
+                    .interactive_threads
+                    .insert_topic(topic_id.to_owned(), thread_id)
+                {
+                    self.clear_thread_state(&evicted);
+                }
+            }
         }
         Ok(())
     }

@@ -230,33 +230,36 @@ impl ComputeStore {
             anyhow::bail!("Codex returned no models meeting the Luna minimum");
         }
         let defaults = ComputeConfig::defaults(&available)?;
-        let config = match fs::read_to_string(&path).await {
+        let (config, should_persist) = match fs::read_to_string(&path).await {
             Ok(content) => match toml::from_str::<ComputeConfig>(&content) {
                 Ok(config) => {
                     let mut config = hydrate_legacy_sense(config, &defaults);
                     migrate_legacy_lightweight_models(&mut config, &defaults);
-                    if validate(&config, &available).is_ok() {
-                        config
-                    } else {
-                        warn!(
-                            "compute configuration references unavailable model settings; using defaults"
-                        );
-                        defaults
+                    match validate(&config, &available) {
+                        Ok(()) => (config, true),
+                        Err(error) => {
+                            warn!(%error, "keeping saved compute configuration until the model catalog is available");
+                            // model/list can be incomplete during startup. Never replace a
+                            // user's saved choices with defaults because of one snapshot.
+                            (config, false)
+                        }
                     }
                 }
                 Err(error) => {
-                    warn!(%error, "compute configuration could not be parsed; using defaults");
-                    defaults
+                    warn!(%error, "compute configuration could not be parsed; keeping the file");
+                    (defaults, false)
                 }
             },
-            Err(error) if error.kind() == ErrorKind::NotFound => defaults,
+            Err(error) if error.kind() == ErrorKind::NotFound => (defaults, true),
             Err(error) => {
                 return Err(error)
                     .with_context(|| format!("read compute config {}", path.display()));
             }
         };
 
-        persist(&path, &config).await?;
+        if should_persist {
+            persist(&path, &config).await?;
+        }
         Ok(Self {
             path,
             catalog,

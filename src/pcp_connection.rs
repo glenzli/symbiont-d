@@ -179,10 +179,10 @@ impl ManagedPcpClient {
         if !Arc::ptr_eq(&current.api, &failed.api) {
             return Ok(());
         }
-        if self.refresh_enrollment(true).await.unwrap_or(false) {
+        if self.refresh_enrollment(true).await? {
             return Ok(());
         }
-        anyhow::bail!("no approved PCP session is available through discovery")
+        Err(NoApprovedSession.into())
     }
 
     fn spawn_monitor(client: &Arc<Self>) {
@@ -226,6 +226,15 @@ fn grant_set(access: &AccessSession) -> BTreeMap<String, BTreeSet<pcp_core::Acce
     }
     grants
 }
+
+#[derive(Debug)]
+struct NoApprovedSession;
+impl std::fmt::Display for NoApprovedSession {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("no approved PCP session is available through discovery")
+    }
+}
+impl std::error::Error for NoApprovedSession {}
 
 fn transport_failure(error: &anyhow::Error) -> bool {
     error.chain().any(|cause| cause.is::<std::io::Error>())
@@ -307,6 +316,36 @@ impl PcpTenantApi for ManagedPcpClient {
         &self.access
     }
 
+    async fn access_snapshot(&self) -> Result<AccessSession> {
+        // Probe the real session, recovering a read before any outbox dispatch.
+        // The facade's cached access is only the approved comparison baseline.
+        let first = self.current();
+        let (active, access) = match first.api.access_snapshot().await {
+            Ok(access) => (first, access),
+            Err(error) if transport_failure(&error) => {
+                match self.recover_after_transport_failure(&first).await {
+                    Ok(()) => {}
+                    // Retain the original transport classification so an offline
+                    // checkpoint stays pending. Policy/identity failures remain
+                    // distinct errors and stop optional delivery for inspection.
+                    Err(recovery) if recovery.is::<NoApprovedSession>() => {
+                        return Err(error).context(recovery);
+                    }
+                    Err(recovery) => return Err(recovery),
+                }
+                let active = self.current();
+                let access = active.api.access_snapshot().await?;
+                (active, access)
+            }
+            Err(error) => return Err(error),
+        };
+        anyhow::ensure!(
+            active.api.identity_id() == self.owner_id && equivalent_access(&self.access, &access),
+            "live PCP Identity, principal or approved grants changed; delivery was stopped"
+        );
+        Ok(access)
+    }
+
     async fn context_hub(&self, request: ContextInboxRequest) -> Result<serde_json::Value> {
         let retry_safe = matches!(
             &request,
@@ -322,7 +361,8 @@ impl PcpTenantApi for ManagedPcpClient {
             Err(error) if transport_failure(&error) => {
                 let _ = self.recover_after_transport_failure(&first).await;
                 let guidance = match request {
-                    ContextInboxRequest::SubmitCandidate(_) => {
+                    ContextInboxRequest::SubmitCandidate(_)
+                    | ContextInboxRequest::SubmitExperience(_) => {
                         "PCP transport recovered after an ambiguous Context Inbox candidate submission; retry only the exact unchanged candidate request with its stable event identity"
                     }
                     ContextInboxRequest::PublishActivity(_) => {
@@ -474,5 +514,141 @@ mod tests {
             "offline",
         ));
         assert!(transport_failure(&transport));
+    }
+
+    async fn endpoint(
+        socket: &std::path::Path,
+        api: Arc<dyn PcpApi>,
+    ) -> pcp_rpc::RunningRuntimeEndpoint {
+        let listener = tokio::net::UnixListener::bind(socket).unwrap();
+        pcp_rpc::RunningRuntimeEndpoint::from_bound_listener(socket, listener, api)
+    }
+
+    #[tokio::test]
+    async fn managed_snapshot_proves_liveness_and_rejects_replaced_principal_and_identity() {
+        let root = tempfile::Builder::new()
+            .prefix("spcp-")
+            .tempdir_in("/tmp")
+            .unwrap();
+        let store: Arc<dyn pcp_store::PcpStore> = Arc::new(
+            pcp_sqlite::SqlitePcpStore::open(root.path().join("s.sqlite3"))
+                .await
+                .unwrap(),
+        );
+        let access = crate::continuity::ContinuityHost::access_session("fixture");
+        let api = pcp_client::EmbeddedPcpClient::shared(store.clone(), access.clone());
+        let socket = root.path().join("p.sock");
+        let running = endpoint(&socket, api).await;
+        let remote = pcp_rpc::RemotePcpClient::connect(&socket).await.unwrap();
+        let managed = managed_client(
+            ActiveClient {
+                api: Arc::new(remote),
+                generation: None,
+                enrolled: false,
+            },
+            None,
+        );
+        assert_eq!(
+            managed.access_snapshot().await.unwrap().principal,
+            access.principal
+        );
+        running.shutdown().await;
+        let offline = managed
+            .access_snapshot()
+            .await
+            .expect_err("cached access is not liveness proof");
+        assert!(
+            transport_failure(&offline),
+            "unavailable discovery preserves offline classification for later native checkpoints"
+        );
+
+        let mut changed = access.clone();
+        changed.principal.principal_id = "other:principal".into();
+        let replacement = endpoint(
+            &socket,
+            pcp_client::EmbeddedPcpClient::shared(store, changed),
+        )
+        .await;
+        assert!(
+            managed.access_snapshot().await.is_err(),
+            "a replacement principal cannot inherit pending delivery"
+        );
+        replacement.shutdown().await;
+        let other: Arc<dyn pcp_store::PcpStore> = Arc::new(
+            pcp_sqlite::SqlitePcpStore::open(root.path().join("other.sqlite3"))
+                .await
+                .unwrap(),
+        );
+        let _replacement = endpoint(
+            &socket,
+            pcp_client::EmbeddedPcpClient::shared(other, access),
+        )
+        .await;
+        assert!(
+            managed.access_snapshot().await.is_err(),
+            "a replacement Store cannot inherit pending delivery"
+        );
+    }
+
+    #[tokio::test]
+    async fn managed_experience_does_not_replay_an_ambiguous_mutation() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        struct LostAck(Arc<AtomicUsize>);
+        #[async_trait::async_trait]
+        impl pcp_client::context_hub::ContextHubService for LostAck {
+            async fn execute(
+                &self,
+                _: &AccessSession,
+                _: ContextInboxRequest,
+            ) -> Result<serde_json::Value> {
+                self.0.fetch_add(1, Ordering::SeqCst);
+                anyhow::bail!("closed before responding after mutation");
+            }
+        }
+        let root = tempfile::Builder::new()
+            .prefix("spcp-")
+            .tempdir_in("/tmp")
+            .unwrap();
+        let store: Arc<dyn pcp_store::PcpStore> = Arc::new(
+            pcp_sqlite::SqlitePcpStore::open(root.path().join("s.sqlite3"))
+                .await
+                .unwrap(),
+        );
+        let calls = Arc::new(AtomicUsize::new(0));
+        let api: Arc<dyn PcpApi> = Arc::new(
+            pcp_client::EmbeddedPcpClient::new(
+                store,
+                crate::continuity::ContinuityHost::access_session("fixture"),
+            )
+            .with_context_hub(Arc::new(LostAck(calls.clone()))),
+        );
+        let socket = root.path().join("p.sock");
+        let _running = endpoint(&socket, api).await;
+        let remote = pcp_rpc::RemotePcpClient::connect(&socket).await.unwrap();
+        let managed = managed_client(
+            ActiveClient {
+                api: Arc::new(remote),
+                generation: None,
+                enrolled: false,
+            },
+            None,
+        );
+        let experience = pcp_client::experience::Experience {
+            topic_key: None,
+            conditions: None,
+            attempt: "A bounded native attempt".into(),
+            observation: "The outcome remains unknown".into(),
+            interpretation: None,
+            unresolved: vec![],
+            receipts: vec![],
+        }
+        .into_candidate("symbiont-d".into(), "Test".into())
+        .unwrap();
+        let error = managed
+            .context_hub(ContextInboxRequest::SubmitExperience(experience))
+            .await
+            .unwrap_err();
+        assert!(error.to_string().contains("exact unchanged candidate"));
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
     }
 }

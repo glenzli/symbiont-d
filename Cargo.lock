@@ -1270,7 +1270,7 @@ checksum = "f38d5652c16fde515bb1ecef450ab0f6a219d619a7274976324d5e377f7dceba"
 
 [[package]]
 name = "pcp-client"
-version = "0.1.0"
+version = "0.3.0"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -1278,20 +1278,22 @@ dependencies = [
  "pcp-store",
  "serde",
  "serde_json",
+ "sha2",
 ]
 
 [[package]]
 name = "pcp-core"
-version = "0.1.0"
+version = "0.3.0"
 dependencies = [
  "schemars",
  "serde",
  "serde_json",
+ "sha2",
 ]
 
 [[package]]
 name = "pcp-rpc"
-version = "0.1.0"
+version = "0.3.0"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -1305,7 +1307,7 @@ dependencies = [
 
 [[package]]
 name = "pcp-runtime"
-version = "0.1.0"
+version = "0.3.0"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -1327,7 +1329,7 @@ dependencies = [
 
 [[package]]
 name = "pcp-sqlite"
-version = "0.1.0"
+version = "0.3.0"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -1342,7 +1344,7 @@ dependencies = [
 
 [[package]]
 name = "pcp-store"
-version = "0.1.0"
+version = "0.3.0"
 dependencies = [
  "anyhow",
  "async-trait",

@@ -1,6 +1,6 @@
 use std::sync::{
     Arc,
-    atomic::{AtomicBool, Ordering},
+    atomic::{AtomicBool, AtomicU8, AtomicUsize, Ordering},
 };
 
 use pcp_client::{EmbeddedPcpClient, PcpApi, PcpTenantApi};
@@ -99,16 +99,48 @@ impl RuntimeQueryService for QueryFixture {
     }
 }
 
-struct Fixture {
-    _root: tempfile::TempDir,
-    host: ContinuityHost,
-    transcript: Arc<TranscriptStore>,
-    api: Arc<dyn PcpApi>,
+struct ExperienceTransport {
+    hub: Arc<pcp_runtime::context_hub::ContextHub>,
+    mode: Arc<AtomicU8>,
+    calls: Arc<AtomicUsize>,
+}
+#[async_trait::async_trait]
+impl pcp_client::context_hub::ContextHubService for ExperienceTransport {
+    async fn execute(
+        &self,
+        access: &pcp_core::AccessSession,
+        request: pcp_client::context_hub::ContextHubRequest,
+    ) -> Result<Value> {
+        use pcp_client::context_hub::ContextHubRequest;
+        let experience = matches!(request, ContextHubRequest::SubmitExperience(_));
+        if experience {
+            self.calls.fetch_add(1, Ordering::SeqCst);
+            if self.mode.load(Ordering::SeqCst) == 1 {
+                anyhow::bail!("closed before responding: simulated offline delivery");
+            }
+        }
+        let result = self.hub.execute(access, request).await?;
+        if experience && self.mode.load(Ordering::SeqCst) == 2 {
+            Ok(json!({})) // committed, acknowledgement lost
+        } else {
+            Ok(result)
+        }
+    }
+}
+
+pub(super) struct Fixture {
+    pub(super) _root: tempfile::TempDir,
+    pub(super) host: ContinuityHost,
+    pub(super) transcript: Arc<TranscriptStore>,
+    pub(super) api: Arc<dyn PcpApi>,
     available: Arc<AtomicBool>,
-    _endpoint: RunningRuntimeEndpoint,
+    pub(super) _endpoint: RunningRuntimeEndpoint,
+    pub(super) hub: Arc<pcp_runtime::context_hub::ContextHub>,
+    pub(super) delivery_mode: Arc<AtomicU8>,
+    pub(super) delivery_calls: Arc<AtomicUsize>,
 }
 impl Fixture {
-    async fn new(empty_index: bool) -> Self {
+    pub(super) async fn new(empty_index: bool) -> Self {
         let root = tempfile::Builder::new()
             .prefix("sret-")
             .tempdir_in("/tmp")
@@ -131,7 +163,19 @@ impl Fixture {
             )
             .await
             .unwrap();
-        let api = EmbeddedPcpClient::shared(store, access);
+        let hub = Arc::new(pcp_runtime::context_hub::ContextHub::new(
+            store.clone(),
+            root.path().join("inbox.json"),
+        ));
+        let delivery_mode = Arc::new(AtomicU8::new(0));
+        let delivery_calls = Arc::new(AtomicUsize::new(0));
+        let api: Arc<dyn PcpApi> = Arc::new(
+            EmbeddedPcpClient::new(store, access).with_context_hub(Arc::new(ExperienceTransport {
+                hub: hub.clone(),
+                mode: delivery_mode.clone(),
+                calls: delivery_calls.clone(),
+            })),
+        );
         let available = Arc::new(AtomicBool::new(true));
         let socket = root.path().join("p.sock");
         let listener = tokio::net::UnixListener::bind(&socket).unwrap();
@@ -161,9 +205,12 @@ impl Fixture {
             api,
             available,
             _endpoint: endpoint,
+            hub,
+            delivery_mode,
+            delivery_calls,
         }
     }
-    async fn source(&self, at: &str, role: MemoryRole, content: &str) -> String {
+    pub(super) async fn source(&self, at: &str, role: MemoryRole, content: &str) -> String {
         self.transcript
             .append(
                 MemoryEntry {
@@ -183,14 +230,14 @@ impl Fixture {
             .unwrap()
             .message_id
     }
-    async fn count(&self) -> usize {
+    pub(super) async fn count(&self) -> usize {
         self.api
             .page_count(vec!["symbiont-d".to_owned()])
             .await
             .unwrap() as usize
     }
 }
-fn proposal(source: &str, content: &str) -> Proposal {
+pub(super) fn proposal(source: &str, content: &str) -> Proposal {
     Proposal {
         kind: Some("user_constraint".to_owned()),
         content: content.to_owned(),
@@ -198,7 +245,11 @@ fn proposal(source: &str, content: &str) -> Proposal {
         based_on_revision_ids: vec![],
     }
 }
-fn decision(packet: &Value, disposition: Disposition, related: Vec<String>) -> RetentionReview {
+pub(super) fn decision(
+    packet: &Value,
+    disposition: Disposition,
+    related: Vec<String>,
+) -> RetentionReview {
     RetentionReview {token:packet["reviewToken"].as_str().unwrap().to_owned(),disposition,rationale:"The exact source supports this decision; no assistant-added requirements are being promoted.".to_owned(),attribution:Attribution::UserStatement,related_revision_ids:related,
         retention_basis:Some(RetentionBasis::ExplicitState),recall_value:Some("When this project resumes, recall the user's exact constraint instead of guessing it.".to_owned())}
 }

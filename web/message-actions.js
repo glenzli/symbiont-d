@@ -2,11 +2,23 @@ import { renderIcons } from "./icons.js";
 
 const ACTIONS = {
   copy: { icon: "copy", label: "复制文本" },
-  delete: { icon: "trash-2", label: "删除本条及后续对话", destructive: true },
-  edit: { icon: "pencil", label: "从此处编辑并重开对话" },
+  delete: {
+    icon: "trash-2", label: "删除本条及后续对话",
+    pendingLabel: "正在删除…", destructive: true,
+  },
+  edit: {
+    icon: "pencil", label: "从此处编辑并重开对话",
+    pendingLabel: "正在准备编辑…",
+  },
   quote: { icon: "quote", label: "引用此消息" },
-  recall: { icon: "undo-2", label: "撤回本条及后续对话", destructive: true },
-  retry: { icon: "rotate-cw", label: "重新发送" },
+  recall: {
+    icon: "undo-2", label: "撤回本条及后续对话",
+    pendingLabel: "正在撤回…", destructive: true,
+  },
+  retry: {
+    icon: "rotate-cw", label: "重新发送",
+    pendingLabel: "正在重新发送…",
+  },
 };
 
 export function availableMessageActions({
@@ -47,8 +59,9 @@ export function initMessageActions({ conversation, isBusy, perform }) {
     if (!message || !entry || message.dataset.actionBusy === "true") return;
 
     message.dataset.actionBusy = "true";
+    message.dataset.pendingAction = action;
     actionFailures.delete(message);
-    refresh();
+    render(message);
     try {
       await perform(action, message, entry);
     } catch (error) {
@@ -57,7 +70,8 @@ export function initMessageActions({ conversation, isBusy, perform }) {
       actionFailures.set(message, `操作失败：${error.message || "请重试"}`);
     } finally {
       delete message.dataset.actionBusy;
-      refresh();
+      delete message.dataset.pendingAction;
+      render(message);
     }
   });
 
@@ -70,7 +84,7 @@ export function initMessageActions({ conversation, isBusy, perform }) {
         options.failureReason,
       );
     } else {
-      refresh();
+      render(message);
     }
   }
 
@@ -91,7 +105,7 @@ export function initMessageActions({ conversation, isBusy, perform }) {
     message.dataset.deliveryState = state;
     if (failureReason) failures.set(message, failureReason);
     else failures.delete(message);
-    refresh();
+    render(message);
   }
 
   function refresh() {
@@ -111,7 +125,8 @@ export function initMessageActions({ conversation, isBusy, perform }) {
     const state = states.get(message) || "delivered";
     const entry = entries.get(message);
     const actionBusy = message.dataset.actionBusy === "true";
-    stateLabel.textContent = actionFailures.get(message) || (
+    stateLabel.textContent = actionFailures.get(message) ||
+      (actionBusy && ACTIONS[message.dataset.pendingAction]?.pendingLabel) || (
       state === "pending"
         ? "等待回复"
         : state === "failed"

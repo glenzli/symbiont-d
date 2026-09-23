@@ -52,7 +52,7 @@ pub enum DriveFileSelection {
     Pattern,
 }
 
-#[derive(Clone, Debug, Deserialize, Serialize)]
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct DriveInputConfig {
     #[serde(default)]
@@ -322,6 +322,12 @@ impl DriveInputStore {
         };
         *self.test_cancellation.lock().await = None;
         let drive = result?;
+        // A successful check of the saved configuration supersedes its previous
+        // polling error. Draft settings must not change the saved channel status.
+        if *self.config.read().await == config {
+            self.update_runtime(|runtime| runtime.last_error = None)
+                .await?;
+        }
         Ok(DriveInputConnectionTest {
             checked_at: timestamp(Utc::now()),
             folder_id: config.folder_id.trim().to_owned(),

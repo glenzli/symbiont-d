@@ -37,7 +37,8 @@ test("topbar alert stays visible and opens the affected source settings", () => 
     ui.render();
     const alert = document.querySelector("#connection-alert");
     assert.equal(alert.hidden, false);
-    assert.equal(document.querySelector("#connection-alert-count").textContent, "2");
+    assert.equal(document.querySelector("#connection-alert-label").textContent, "Drive、邮箱需处理");
+    assert.equal(document.querySelector("#connection-alert-count").hidden, true);
     assert.match(alert.getAttribute("aria-label"), /打开设置处理/);
     alert.click();
     assert.deepEqual(opened, [["sources", "drive"]]);

@@ -7,6 +7,7 @@ export function connectionIssues(state) {
     ["incomplete", "missing_credential", "credential_unavailable"].includes(drive.availability)
   )) {
     issues.push({
+      sourceName: "Drive",
       label: drive.lastError || drive.oauth?.error ? "Drive 需处理" : "Drive 未连接",
       detail: drive.lastError || drive.oauth?.error || "Google Drive 输入尚未就绪",
       settingsTab: "sources",
@@ -19,6 +20,7 @@ export function connectionIssues(state) {
     ["incomplete", "missing_credential", "credential_unavailable"].includes(mail.availability)
   )) {
     issues.push({
+      sourceName: "邮箱",
       label: "邮箱需处理",
       detail: mail.lastError || "邮箱输入尚未就绪",
       settingsTab: "sources",
@@ -66,9 +68,11 @@ export function initTopbarUi(state = {}, actions = {}) {
       return;
     }
     const [first] = currentIssues;
-    alertLabel.textContent = first.label;
+    alertLabel.textContent = currentIssues.length === 1
+      ? first.label
+      : `${currentIssues.map((issue) => issue.sourceName).join("、")}需处理`;
     alertCount.textContent = String(currentIssues.length);
-    alertCount.hidden = currentIssues.length === 1;
+    alertCount.hidden = true;
     const details = currentIssues.map((issue) => `${issue.label}：${issue.detail}`).join("；");
     alert.title = `${details}。点此处理`;
     alert.setAttribute("aria-label", `${details}。打开设置处理`);

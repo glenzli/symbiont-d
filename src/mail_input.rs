@@ -56,7 +56,7 @@ const IMAP_CLIENT_IDENTITY: [(&str, Option<&str>); 3] = [
 /// The one private mailbox that accepts reports from any number of outside
 /// services. Its sender allow-list is mandatory when enabled so an arbitrary
 /// e-mail cannot become model context.
-#[derive(Clone, Debug, Deserialize, Serialize)]
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct MailInputConfig {
     #[serde(default)]
@@ -302,6 +302,10 @@ impl MailInputStore {
         mut config: MailInputConfig,
     ) -> Result<MailInputConnectionTest> {
         validate_connection_config(&config)?;
+        let uses_saved_credential = config
+            .credential_value
+            .as_deref()
+            .is_none_or(|secret| secret.trim().is_empty());
         let secret = match config.credential_value.take() {
             Some(secret) if !secret.trim().is_empty() => secret,
             _ => self
@@ -331,6 +335,12 @@ impl MailInputStore {
         };
         *self.test_cancellation.lock().await = None;
         let mailbox = result?;
+        // A draft credential or configuration may pass without repairing the
+        // saved channel, so only clear its old error when the saved path passed.
+        if uses_saved_credential && *self.config.read().await == config {
+            self.update_runtime(|runtime| runtime.last_error = None)
+                .await?;
+        }
         let allowed_messages = mailbox
             .messages
             .iter()

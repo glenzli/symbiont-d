@@ -29,6 +29,27 @@ function repairLegacyMathLinePrefixes(source) {
   return source.replace(/^(?:&nbsp;)+(?=\$\$)/gm, "");
 }
 
+function repairSentenceAdjacentStrong(source) {
+  // CommonMark leaves **句子。**下文 literal: punctuation before the closing
+  // delimiter and a letter after it prevent the delimiter from closing.
+  // Move only the punctuation outside an otherwise paired strong span. This
+  // preserves visible text and avoids adding a space between Chinese words.
+  return source.replace(
+    /\*\*([^*\n]+?)([。！？；：，、.!?;:,])\*\*(?=[\p{L}\p{N}])/gu,
+    "**$1**$2",
+  );
+}
+
+markdown.core.ruler.before("inline", "repair_sentence_adjacent_strong", (state) => {
+  for (const token of state.tokens) {
+    // Code fences are separate block tokens. Be conservative with paragraphs
+    // containing inline code, whose literal asterisks must stay untouched.
+    if (token.type === "inline" && !token.content.includes("`")) {
+      token.content = repairSentenceAdjacentStrong(token.content);
+    }
+  }
+});
+
 markdown.use(tex, {
   delimiters: "all",
   mathFence: true,

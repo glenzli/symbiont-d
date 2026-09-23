@@ -2464,6 +2464,7 @@ async fn retract_message(
     State(state): State<AppState>,
     AxumPath(revision_id): AxumPath<String>,
 ) -> Result<Json<MessageRetractionResponse>, ApiError> {
+    state.conversation.announce_input();
     state.conversation.interrupt().await;
     state.continuations.cancel_all().await;
     let result = state
@@ -2476,13 +2477,16 @@ async fn retract_message(
         .record_retraction(&result.message_revision_ids)
         .await
         .map_err(ApiError::internal)?;
-    state
-        .codex
-        .lock()
-        .await
-        .reset_interactive_thread()
-        .await
-        .map_err(ApiError::internal)?;
+    state.codex.lock().await.invalidate_interactive_thread();
+    let codex = Arc::clone(&state.codex);
+    tokio::spawn(async move {
+        if let Err(error) = codex.lock().await.prepare_interactive_thread().await {
+            tracing::warn!(
+                ?error,
+                "could not prepare interactive thread after retraction"
+            );
+        }
+    });
     let memory_chars = state
         .continuity
         .memory_chars()

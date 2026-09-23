@@ -110,6 +110,7 @@ pub struct ContinuityHost {
     transcript_recall: TranscriptRecall,
     recall_runtime: Option<Arc<crate::infer_runtime::InferRuntimeAccess>>,
     retention: retention::RetentionQueue,
+    experience_enabled: bool,
     scopes: ScopePolicy,
     orientation: RwLock<Option<WriteResult>>,
     live_conversation: ConversationProjection,
@@ -227,6 +228,8 @@ impl ContinuityHost {
             transcript,
             transcript_recall,
             retention,
+            experience_enabled: std::env::var("SYMBIONT_PCP_EXPERIENCE_MEMORY")
+                .is_ok_and(|value| value == "true"),
             recall_runtime: None,
             scopes,
             orientation: RwLock::new(None),

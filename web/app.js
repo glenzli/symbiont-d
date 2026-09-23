@@ -159,6 +159,7 @@ const settingsUi = initSettings(appState, {
   saveInputRoles: inputRoleUi.save,
   refreshInputRoles: inputRoleUi.refresh,
   saveReflection: () => reflectionUi.save(),
+  refreshRuntime: () => messageSync.refresh(),
 });
 const topbarUi = initTopbarUi(appState, {
   openSettings: settingsUi.open,
@@ -1593,7 +1594,6 @@ function removeMessages(revisionIds, fallback) {
   }
   if (fallback?.isConnected) fallback.remove();
   emptyState.hidden = Boolean(conversation.querySelector(".message"));
-  messageActions.refresh();
 }
 
 async function recoverImages(entry) {
