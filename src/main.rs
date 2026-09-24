@@ -54,6 +54,7 @@ mod usage;
 mod web;
 mod web_fetch;
 mod working_context;
+mod x_browser;
 
 use std::{
     env,
@@ -104,6 +105,7 @@ use transcript::TranscriptStore;
 use usage::UsageStore;
 use web::AppState;
 use web_fetch::WebFetcher;
+use x_browser::XBrowser;
 
 const DEFAULT_BIND: &str = "127.0.0.1:4317";
 
@@ -246,6 +248,7 @@ async fn main() -> Result<()> {
     );
     let permissions = Arc::new(PermissionBroker::new());
     let web_fetcher = Arc::new(WebFetcher::new(Arc::clone(&permissions))?);
+    let x_browser = Arc::new(XBrowser::new(Arc::clone(&permissions), &workspace));
     let (continuations, continuation_receiver) = ContinuationQueue::new();
     let continuations = Arc::new(continuations);
     let (exploration_intents, exploration_intent_receiver) =
@@ -295,6 +298,7 @@ async fn main() -> Result<()> {
                     Arc::clone(&compute_policies),
                     Arc::clone(&permissions),
                     Arc::clone(&web_fetcher),
+                    Arc::clone(&x_browser),
                     Arc::clone(&continuations),
                     Arc::clone(&exploration_intents),
                 )
@@ -369,6 +373,7 @@ async fn main() -> Result<()> {
             Arc::clone(&compute_policies),
             Arc::clone(&permissions),
             Arc::clone(&web_fetcher),
+            Arc::clone(&x_browser),
             Arc::clone(&continuations),
             Arc::clone(&exploration_intents),
         );

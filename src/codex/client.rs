@@ -75,7 +75,9 @@ const ATTACKER_COMPLETE_MARKER: &str = "<symbiont-attacker-reviewed/>";
 // Starting an app-server includes initializing account state and Symbiont's
 // isolated native threads. A cold desktop reconnect can take longer than a
 // plain process spawn; do not mistake that for a dead process.
-const APP_SERVER_START_TIMEOUT: Duration = Duration::from_secs(120);
+// Native threads start in sequence. A slow but responsive app-server can need
+// more than two minutes to create every stage after a system or CLI update.
+const APP_SERVER_START_TIMEOUT: Duration = Duration::from_secs(360);
 const APP_SERVER_START_ATTEMPTS: u8 = 2;
 const APP_SERVER_IDLE_TIMEOUT: Duration = Duration::from_secs(75);
 const LUNA_SENSE_TIMEOUT: Duration = Duration::from_secs(180);
@@ -97,6 +99,7 @@ struct CodexDependencies {
     compute_policies: Arc<crate::compute_policy::ComputePolicyStore>,
     permissions: Arc<PermissionBroker>,
     web_fetcher: Arc<WebFetcher>,
+    x_browser: Arc<crate::x_browser::XBrowser>,
     continuations: Arc<ContinuationQueue>,
     exploration_intents: Arc<ExplorationIntentQueue>,
 }
@@ -355,6 +358,7 @@ impl CodexClient {
         compute_policies: Arc<crate::compute_policy::ComputePolicyStore>,
         permissions: Arc<PermissionBroker>,
         web_fetcher: Arc<WebFetcher>,
+        x_browser: Arc<crate::x_browser::XBrowser>,
         continuations: Arc<ContinuationQueue>,
         exploration_intents: Arc<ExplorationIntentQueue>,
     ) -> Result<Self> {
@@ -367,6 +371,7 @@ impl CodexClient {
             compute_policies,
             permissions,
             web_fetcher,
+            x_browser,
             continuations,
             exploration_intents,
         };
@@ -471,6 +476,7 @@ impl CodexClient {
                 Arc::clone(&dependencies.reflection),
                 Arc::clone(&dependencies.compute_policies),
                 Some(Arc::clone(&dependencies.web_fetcher)),
+                Some(Arc::clone(&dependencies.x_browser)),
                 Arc::clone(&dependencies.continuations),
                 Arc::clone(&dependencies.exploration_intents),
             ),
@@ -485,29 +491,39 @@ impl CodexClient {
             permissions: Arc::clone(&dependencies.permissions),
             compute_policies: Arc::clone(&dependencies.compute_policies),
         };
+        tracing::info!(target: crate::runtime_log::TARGET, event = "codex_start_stage", stage = "initialize");
         client.initialize().await?;
+        tracing::info!(target: crate::runtime_log::TARGET, event = "codex_start_stage", stage = "model_list");
         client.models = client.load_models().await?;
         client.model_catalog.send_replace(client.models.clone());
+        tracing::info!(target: crate::runtime_log::TARGET, event = "codex_start_stage", stage = "rate_limits");
         client.refresh_rate_limits().await;
+        tracing::info!(target: crate::runtime_log::TARGET, event = "codex_start_stage", stage = "conversation_thread");
         let interactive_thread_id = client
             .start_thread(&config.workspace, ToolSurface::Conversation)
             .await?;
         client.interactive_threads = InteractiveThreads::new(interactive_thread_id);
+        tracing::info!(target: crate::runtime_log::TARGET, event = "codex_start_stage", stage = "luna_sensing_thread");
         client.luna_sensing_thread_id = client
             .start_thread(&config.workspace, ToolSurface::LunaSensing)
             .await?;
+        tracing::info!(target: crate::runtime_log::TARGET, event = "codex_start_stage", stage = "autonomous_scout_thread");
         client.autonomous_scout_thread_id = client
             .start_thread(&config.workspace, ToolSurface::AutonomousScout)
             .await?;
+        tracing::info!(target: crate::runtime_log::TARGET, event = "codex_start_stage", stage = "autonomous_review_thread");
         client.autonomous_review_thread_id = client
             .start_thread(&config.workspace, ToolSurface::AutonomousReview)
             .await?;
+        tracing::info!(target: crate::runtime_log::TARGET, event = "codex_start_stage", stage = "maintenance_thread");
         client.maintenance_thread_id = client
             .start_thread(&config.workspace, ToolSurface::Maintenance)
             .await?;
+        tracing::info!(target: crate::runtime_log::TARGET, event = "codex_start_stage", stage = "temporary_discussion_thread");
         client.temporary_discussion_thread_id = client
             .start_thread(&config.workspace, ToolSurface::TemporaryDiscussion)
             .await?;
+        tracing::info!(target: crate::runtime_log::TARGET, event = "codex_start_stage", stage = "ready");
         Ok(client)
     }
 
@@ -1655,13 +1671,16 @@ impl CodexClient {
         events: &mpsc::Sender<RuntimeEvent>,
     ) -> Result<TurnOutcome> {
         let lane_config = compute.lane(lane).clone();
-        let model = self.model_info(&lane_config.model)?;
+        // A model/list snapshot can omit a configured model temporarily. The
+        // saved slug is submitted to turn/start, which is the authoritative
+        // availability check for this request.
+        let display_name = self.model_display_name(&lane_config.model);
         send_event(
             events,
             RuntimeEvent::Activity {
-                label: format!("{} 正在思考", model.display_name),
-                model: model.model.clone(),
-                display_name: model.display_name.clone(),
+                label: format!("{display_name} 正在思考"),
+                model: lane_config.model.clone(),
+                display_name,
                 effort: lane_config.effort.clone(),
                 lane: lane.as_str().to_owned(),
             },
@@ -2478,6 +2497,14 @@ impl CodexClient {
             tool_deduplicator.remember_success(&namespace, &tool, &arguments, tool_sequence);
         }
         let mut trace_result = response.clone();
+        // Browser screenshots are transient model input, not durable trace data.
+        if let Some(items) = trace_result["contentItems"].as_array_mut() {
+            for item in items {
+                if item["type"] == "inputImage" {
+                    *item = json!({"type":"inputText","text":"[browser screenshot omitted from trace]"});
+                }
+            }
+        }
         if let Some(raw) = raw_result {
             trace_result["_symbiontTrace"] = json!({
                 "projection": "pcp-model-view-v1",
@@ -2561,13 +2588,9 @@ impl CodexClient {
         Ok(true)
     }
 
-    fn model_info(&self, slug: &str) -> Result<ModelInfo> {
-        self.model_catalog
-            .borrow()
-            .iter()
-            .find(|model| model.model == slug || model.id == slug)
-            .cloned()
-            .with_context(|| format!("configured model is no longer available: {slug}"))
+    fn model_info(&self, slug: &str) -> Option<ModelInfo> {
+        let catalog = self.model_catalog.borrow();
+        find_catalog_model(&catalog, &self.models, slug).cloned()
     }
 
     fn user_input_items(
@@ -2586,29 +2609,50 @@ impl CodexClient {
         lane: ComputeLane,
         compute: &ComputeConfig,
     ) -> Result<Vec<Value>> {
-        let model = self.model_info(&compute.lane(lane).model)?;
-        if !local_images.is_empty()
-            && !model
-                .input_modalities
-                .iter()
-                .any(|modality| modality == "image")
-        {
-            anyhow::bail!(
-                "the configured {} model does not accept image input",
-                lane.as_str()
-            );
-        }
-        Ok(text_and_image_input_items(text, local_images))
+        let model = self.model_info(&compute.lane(lane).model);
+        checked_input_items(text, local_images, lane, model.as_ref())
     }
 
     fn model_display_name(&self, slug: &str) -> String {
-        self.model_catalog
-            .borrow()
-            .iter()
-            .find(|model| model.model == slug || model.id == slug)
+        self.model_info(slug)
+            .as_ref()
             .map(|model| model.display_name.clone())
             .unwrap_or_else(|| slug.to_owned())
     }
+}
+
+pub(super) fn find_catalog_model<'a>(
+    catalog: &'a [ModelInfo],
+    startup_catalog: &'a [ModelInfo],
+    slug: &str,
+) -> Option<&'a ModelInfo> {
+    catalog
+        .iter()
+        .chain(startup_catalog)
+        .find(|model| model.model == slug || model.id == slug)
+}
+
+pub(super) fn checked_input_items(
+    text: &str,
+    local_images: &[PathBuf],
+    lane: ComputeLane,
+    model: Option<&ModelInfo>,
+) -> Result<Vec<Value>> {
+    if !local_images.is_empty()
+        && model.is_some_and(|model| {
+            !model.input_modalities.is_empty()
+                && !model
+                    .input_modalities
+                    .iter()
+                    .any(|modality| modality == "image")
+        })
+    {
+        anyhow::bail!(
+            "the configured {} model does not accept image input",
+            lane.as_str()
+        );
+    }
+    Ok(text_and_image_input_items(text, local_images))
 }
 
 fn is_app_server_transport_failure(error: &anyhow::Error) -> bool {
@@ -2797,6 +2841,7 @@ fn activity_label(item: Option<&Value>) -> Option<String> {
                     "upsert_compute_policy" => "正在保存话题计算规则",
                     "remove_compute_policy" => "正在移除话题计算规则",
                     "fetch_url" => "正在读取指定网页",
+                    "inspect_x_post" => "正在查看 X 原帖",
                     "open_hunch" => "正在留下一个待探索的问题",
                     "revise_hunch" => "正在修订探索中的问题",
                     "retire_hunch" => "正在结束一个探索问题",

@@ -113,6 +113,8 @@ struct DriveInputRuntime {
     last_succeeded_at: Option<String>,
     last_failed_at: Option<String>,
     last_error: Option<String>,
+    #[serde(default)]
+    consecutive_poll_failures: u32,
     last_received_at: Option<String>,
     #[serde(default)]
     last_received_count: usize,
@@ -140,6 +142,8 @@ pub struct DriveInputSnapshot {
     pub last_succeeded_at: Option<String>,
     pub last_failed_at: Option<String>,
     pub last_error: Option<String>,
+    pub consecutive_poll_failures: u32,
+    pub requires_reauthorization: bool,
     pub last_received_at: Option<String>,
     pub last_received_count: usize,
     pub last_listed_file_count: usize,
@@ -226,6 +230,10 @@ impl DriveInputStore {
         let runtime = self.runtime.read().await.clone();
         let oauth = self.oauth.snapshot(config.credential_store).await;
         let authorized = self.oauth.is_authorized(config.credential_store).await;
+        let requires_reauthorization = runtime
+            .last_error
+            .as_deref()
+            .is_some_and(refresh_grant_rejected);
         let credential_status = if authorized {
             "configured"
         } else if oauth.status == "invalid" {
@@ -244,6 +252,8 @@ impl DriveInputStore {
             last_succeeded_at: runtime.last_succeeded_at,
             last_failed_at: runtime.last_failed_at,
             last_error: runtime.last_error,
+            consecutive_poll_failures: runtime.consecutive_poll_failures,
+            requires_reauthorization,
             last_received_at: runtime.last_received_at,
             last_received_count: runtime.last_received_count,
             last_listed_file_count: runtime.last_listed_file_count,
@@ -325,8 +335,11 @@ impl DriveInputStore {
         // A successful check of the saved configuration supersedes its previous
         // polling error. Draft settings must not change the saved channel status.
         if *self.config.read().await == config {
-            self.update_runtime(|runtime| runtime.last_error = None)
-                .await?;
+            self.update_runtime(|runtime| {
+                runtime.last_error = None;
+                runtime.consecutive_poll_failures = 0;
+            })
+            .await?;
         }
         Ok(DriveInputConnectionTest {
             checked_at: timestamp(Utc::now()),
@@ -399,6 +412,7 @@ impl DriveInputStore {
                 self.update_runtime(|runtime| {
                     runtime.last_succeeded_at = Some(timestamp(Utc::now()));
                     runtime.last_error = None;
+                    runtime.consecutive_poll_failures = 0;
                     runtime.last_listed_file_count = drive.listed_file_count;
                     runtime.last_matching_file_count = drive.matching_file_count;
                     runtime.last_selected_file_count = drive.selected_file_count;
@@ -421,6 +435,7 @@ impl DriveInputStore {
         self.update_runtime(|runtime| {
             runtime.last_failed_at = Some(timestamp(Utc::now()));
             runtime.last_error = Some(message.clone());
+            runtime.consecutive_poll_failures = runtime.consecutive_poll_failures.saturating_add(1);
         })
         .await?;
         tracing::warn!(%error, "Google Drive Inbox input failed");
@@ -802,6 +817,10 @@ fn compact_error(value: &str) -> String {
         .collect()
 }
 
+fn refresh_grant_rejected(error: &str) -> bool {
+    error.contains("refresh personal Google Drive authorization") && error.contains("invalid_grant")
+}
+
 fn timestamp(value: DateTime<Utc>) -> String {
     value.to_rfc3339_opts(SecondsFormat::Secs, true)
 }
@@ -957,5 +976,11 @@ mod tests {
     fn drive_status_errors_keep_a_bounded_server_detail() {
         assert_eq!(reqwest::StatusCode::FORBIDDEN.as_u16(), 403);
         assert_eq!(compact_error(" permission\n denied "), "permission denied");
+        assert!(refresh_grant_rejected(
+            "authorize the personal Google Drive account: refresh personal Google Drive authorization: Google OAuth returned 400: invalid_grant"
+        ));
+        assert!(!refresh_grant_rejected(
+            "authorize the personal Google Drive account: refresh personal Google Drive authorization: send request timed out"
+        ));
     }
 }

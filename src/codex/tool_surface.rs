@@ -66,6 +66,7 @@ pub(super) fn allowed(origin: &str, namespace: &str, tool: &str, calibrating: bo
                         | "request_exploration"
                         | "schedule_follow_up"
                         | "fetch_url"
+                        | "inspect_x_post"
                         | "upsert_compute_policy"
                         | "remove_compute_policy"
                         | "escalate"
@@ -77,7 +78,10 @@ pub(super) fn allowed(origin: &str, namespace: &str, tool: &str, calibrating: bo
         "autonomous" => {
             HISTORY.contains(&tool)
                 || HUNCH.contains(&tool)
-                || matches!(tool, "propose_proactive_message" | "escalate")
+                || matches!(
+                    tool,
+                    "propose_proactive_message" | "inspect_x_post" | "escalate"
+                )
         }
         "maintenance" => matches!(
             tool,
@@ -142,7 +146,7 @@ fn group(namespace: &str, tool: &str) -> &'static str {
     ) {
         return "maintenance";
     }
-    if matches!(tool, "fetch_url" | "escalate") {
+    if matches!(tool, "fetch_url" | "inspect_x_post" | "escalate") {
         return "utilities";
     }
     "reflection"
@@ -168,7 +172,7 @@ fn gateways() -> Vec<Value> {
 pub(super) fn initial(origin: &str, calibrating: bool) -> Value {
     let core: &[&str] = match origin {
         "interactive" if calibrating => &["complete_orientation", "escalate"],
-        "interactive" => &["escalate"],
+        "interactive" => &["inspect_x_post", "escalate"],
         "autonomous_scout" => &["submit_exploration_finding"],
         "autonomous" => &["propose_proactive_message", "escalate"],
         "maintenance" => &[],
@@ -360,6 +364,27 @@ fn check_bounds(value: f64, schema: &Value, min: &str, max: &str) -> Result<()> 
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn x_browser_is_visible_to_interactive_and_bounded_review_only() {
+        assert!(allowed("interactive", "symbiont", "inspect_x_post", false));
+        assert!(allowed("autonomous", "symbiont", "inspect_x_post", false));
+        for origin in [
+            "maintenance",
+            "autonomous_scout",
+            "reflection",
+            "luna_sense",
+        ] {
+            assert!(!allowed(origin, "symbiont", "inspect_x_post", false));
+        }
+        let initial = initial("interactive", false);
+        assert!(
+            initial[0]["tools"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|spec| spec["name"] == "inspect_x_post")
+        );
+    }
     #[test]
     fn defaults_are_small_and_schemas_are_loaded_individually() {
         let full = SymbiontTools::specifications().to_string().len();

@@ -1,5 +1,5 @@
 use std::{
-    path::Path,
+    path::{Path, PathBuf},
     sync::Arc,
     time::{SystemTime, UNIX_EPOCH},
 };
@@ -7,9 +7,10 @@ use std::{
 use super::{
     autonomous::{ExplorationEvidence, ExplorationScoutFinding, review_prompt, scout_prompt},
     client::{
-        autonomous_response_is_superseded, context_revision_ids, extract_completed_response_text,
-        extract_final_agent_message, generated_image_output, remember_generated_image,
-        should_restart_app_server, text_and_image_input_items,
+        autonomous_response_is_superseded, checked_input_items, context_revision_ids,
+        extract_completed_response_text, extract_final_agent_message, find_catalog_model,
+        generated_image_output, remember_generated_image, should_restart_app_server,
+        text_and_image_input_items,
     },
     prompts::{
         context_fragments, developer_instructions, interaction_reflection_prompt,
@@ -19,7 +20,7 @@ use super::{
     trace::observable_item_event,
 };
 use crate::{
-    compute::ComputeLane,
+    compute::{ComputeLane, ModelInfo},
     compute_policy::ComputePolicyStore,
     continuity::{ContinuityHost, MessageLinks},
     curiosity::CuriosityStore,
@@ -37,6 +38,38 @@ use serde_json::json;
 fn terminal_reconnecting_errors_are_connection_failures() {
     let error = anyhow::anyhow!("Reconnecting... 5/5");
     assert!(should_restart_app_server(&error));
+}
+
+#[test]
+fn incomplete_catalog_does_not_block_saved_model_input() {
+    let model = |slug: &str, modalities: &[&str]| {
+        ModelInfo::from_app_server(&json!({
+            "id": slug,
+            "model": slug,
+            "displayName": slug,
+            "description": "test",
+            "defaultReasoningEffort": "low",
+            "inputModalities": modalities,
+        }))
+        .unwrap()
+    };
+    let sol = model("gpt-6-sol", &["text", "image"]);
+    let refreshed = [model("gpt-6-luna", &["text", "image"])];
+    assert_eq!(
+        find_catalog_model(&refreshed, &[sol], "gpt-6-sol")
+            .unwrap()
+            .model,
+        "gpt-6-sol"
+    );
+
+    // Even when both listings omit the saved slug, the request can reach
+    // turn/start, where Codex checks actual availability.
+    let items = checked_input_items("hello", &[], ComputeLane::Conversation, None).unwrap();
+    assert_eq!(items, vec![json!({"type":"text", "text":"hello"})]);
+    let image = [PathBuf::from("/tmp/example.png")];
+    assert!(checked_input_items("", &image, ComputeLane::Conversation, None).is_ok());
+    let text_only = model("text-only", &["text"]);
+    assert!(checked_input_items("", &image, ComputeLane::Conversation, Some(&text_only)).is_err());
 }
 
 #[test]
@@ -750,6 +783,7 @@ async fn orientation_tool_requires_active_calibration() {
                 .expect("open compute policies"),
         ),
         None,
+        None,
         Arc::new(crate::continuation::ContinuationQueue::new().0),
         exploration_intents,
     );
@@ -829,6 +863,7 @@ async fn pcp_tools_defer_without_query_and_preserve_read_feedback_contracts() {
                 .await
                 .expect("open compute policies"),
         ),
+        None,
         None,
         Arc::new(crate::continuation::ContinuationQueue::new().0),
         exploration_intents,
@@ -1251,6 +1286,7 @@ async fn reflection_tools_accept_recalled_conversation_revisions_outside_the_eve
                 .expect("open compute policies"),
         ),
         None,
+        None,
         Arc::new(crate::continuation::ContinuationQueue::new().0),
         Arc::clone(&exploration_intents),
     );
@@ -1386,6 +1422,7 @@ async fn hunch_tools_preserve_model_owned_state_and_record_autonomous_exploratio
                 .await
                 .expect("open compute policies"),
         ),
+        None,
         None,
         Arc::new(crate::continuation::ContinuationQueue::new().0),
         exploration_intents,

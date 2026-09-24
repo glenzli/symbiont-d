@@ -124,6 +124,8 @@ struct MailInputRuntime {
     last_succeeded_at: Option<String>,
     last_failed_at: Option<String>,
     last_error: Option<String>,
+    #[serde(default)]
+    consecutive_poll_failures: u32,
     last_received_at: Option<String>,
     #[serde(default)]
     last_received_count: usize,
@@ -156,6 +158,7 @@ pub struct MailInputSnapshot {
     pub last_succeeded_at: Option<String>,
     pub last_failed_at: Option<String>,
     pub last_error: Option<String>,
+    pub consecutive_poll_failures: u32,
     pub last_received_at: Option<String>,
     pub last_received_count: usize,
     pub last_message_count: u32,
@@ -256,6 +259,7 @@ impl MailInputStore {
             last_succeeded_at: runtime.last_succeeded_at,
             last_failed_at: runtime.last_failed_at,
             last_error: runtime.last_error,
+            consecutive_poll_failures: runtime.consecutive_poll_failures,
             last_received_at: runtime.last_received_at,
             last_received_count: runtime.last_received_count,
             last_message_count: runtime.last_message_count,
@@ -338,8 +342,11 @@ impl MailInputStore {
         // A draft credential or configuration may pass without repairing the
         // saved channel, so only clear its old error when the saved path passed.
         if uses_saved_credential && *self.config.read().await == config {
-            self.update_runtime(|runtime| runtime.last_error = None)
-                .await?;
+            self.update_runtime(|runtime| {
+                runtime.last_error = None;
+                runtime.consecutive_poll_failures = 0;
+            })
+            .await?;
         }
         let allowed_messages = mailbox
             .messages
@@ -428,6 +435,7 @@ impl MailInputStore {
                 self.update_runtime(|runtime| {
                     runtime.last_succeeded_at = Some(timestamp(Utc::now()));
                     runtime.last_error = None;
+                    runtime.consecutive_poll_failures = 0;
                     runtime.last_received_count = candidates.len();
                     runtime.last_message_count = mailbox.message_count;
                     runtime.last_searchable_message_count = mailbox.searchable_message_count;
@@ -453,6 +461,8 @@ impl MailInputStore {
                 self.update_runtime(|runtime| {
                     runtime.last_failed_at = Some(timestamp(Utc::now()));
                     runtime.last_error = Some(message.clone());
+                    runtime.consecutive_poll_failures =
+                        runtime.consecutive_poll_failures.saturating_add(1);
                 })
                 .await?;
                 tracing::warn!(%error, "research inbox failed without fallback");
