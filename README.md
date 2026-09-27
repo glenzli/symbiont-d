@@ -42,6 +42,7 @@ symbiont-d 是一个本地运行的对话与信息整理服务。日常对话通
 
 - **对话界面**：支持流式回复、停止、编辑、撤回和重发，并在本地保存对话记录。
 - **外部输入**：支持可选的 IMAP 收件箱和 Google Drive 只读接入，以及定时探索和手动调查。输入保留来源，未发布的候选不会写入 PCP。
+- **X 账号关注**：可在探索通道设置或对话中管理账号、关注点、呈现偏好及暂停状态。点击“检查关注”或在对话中提出检查时，Symbiont 尝试使用已连接、已登录的浏览器读取可见动态，首次检查建立进度；无法访问时不会推进进度。不会调用 X API，也不会在后台定时检查。
 - **长期上下文**：symbiont-d 按运行策略判断普通内容是否需要记录；PCP 负责持久化、版本和检索。
 - **临时讨论**：在进程内保存独立对话。默认丢弃，也可由用户选择保留结论或完整记录。
 - **语音输入**：通过可选的 infer-runtime 转写本地录音；音频文件本身不写入 PCP。
@@ -131,6 +132,7 @@ scheduled exploration / IMAP / Google Drive / selected Codex context
 
 - **Conversation UI**: streaming responses, stop, edit, retract, and resend, with a locally stored transcript.
 - **External input**: optional read-only IMAP and Google Drive connections, scheduled exploration, and manual investigation. Inputs retain their sources; unpublished candidates do not enter PCP.
+- **X account watches**: manage accounts, focus, presentation preference, pause and removal through Sources settings or conversation. An explicit check uses the connected, signed-in browser when available and advances progress only for posts actually observed. The first check establishes a baseline. No X API calls or scheduled X checks run.
 - **Durable context**: symbiont-d applies its runtime policy to ordinary recording; PCP provides persistence, revision history, and retrieval.
 - **Temporary discussions**: isolated in-process conversations that are discarded by default. The user may retain a conclusion or the full transcript.
 - **Voice input**: local recordings can be transcribed through optional infer-runtime. Audio files are not written to PCP.

@@ -3725,6 +3725,24 @@ html[data-native-shell="macos"] .topbar {
   overflow-wrap: anywhere;
 }
 
+.x-watch-controls {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.x-watch-recent {
+  display: grid;
+  gap: 5px;
+  min-width: 0;
+}
+
+.x-watch-recent a {
+  color: var(--text-soft);
+  overflow-wrap: anywhere;
+  line-height: 1.45;
+}
+
 .source-settings-pages > form[hidden] {
   display: none;
 }
@@ -6732,18 +6750,8 @@ button:disabled {
   background: color-mix(in srgb, var(--surface-raised) 82%, var(--surface-subtle));
 }
 
-/* Reading surfaces and everyday navigation. Shared tokens retain dark mode. */
-:root {
-  --page: #e9eceb;
-  --surface: #f8faf9;
-  --surface-subtle: #f0f3f2;
-  --text-soft: #59635f;
-  --text-faint: #727c77;
-  --border: #dce2de;
-  --border-strong: #bdc9c2;
-  --focus: #496b5c;
-}
-.shell { box-shadow: 0 0 48px rgb(25 45 35 / 4%); }
+/* Reading surfaces and navigation use the shared neutral light/dark tokens. */
+.shell { box-shadow: 0 0 48px rgb(0 0 0 / 4%); }
 .topbar { min-height: 54px; padding-inline: 18px; }
 #open-archive { width: auto; gap: 5px; padding-inline: 9px; font-size: 12px; }
 /* Keep navigation as separate, lightweight floating icons. */
@@ -6758,7 +6766,7 @@ button:disabled {
   transform: translateY(50%);
 }
 .conversation-floating-controls > button {
-  box-shadow: 0 3px 12px rgb(25 45 35 / 9%);
+  box-shadow: 0 3px 12px rgb(0 0 0 / 9%);
 }
 .conversation-floating-controls > button:focus-visible {
   outline: 2px solid var(--focus);
@@ -6784,10 +6792,10 @@ button:disabled {
 .input-signal .message-body { line-height: 1.75; }
 .message-runtime, .input-signal-label, .input-signal-details summary,
 .message-meta, .topic-list-item > span { font-size: 11px; }
-.composer-row { border-radius: 14px; box-shadow: 0 2px 10px rgb(25 45 35 / 4%); }
+.composer-row { border-radius: 14px; box-shadow: 0 2px 10px rgb(0 0 0 / 4%); }
 .composer-row:focus-within { border-color: var(--focus); box-shadow: 0 0 0 2px color-mix(in srgb, var(--focus) 12%, transparent); }
-.panel-dialog { border-radius: 16px; border-color: var(--border); box-shadow: 0 24px 80px rgb(20 35 28 / 20%); }
-.panel-dialog::backdrop { background: rgb(25 35 30 / 26%); backdrop-filter: blur(3px); }
+.panel-dialog { border-radius: 16px; border-color: var(--border); box-shadow: 0 24px 80px rgb(0 0 0 / 20%); }
+.panel-dialog::backdrop { background: rgb(0 0 0 / 26%); backdrop-filter: blur(3px); }
 .dialog-header { padding: 18px 20px; }
 .dialog-header h2 { font-size: 16px; letter-spacing: -.2px; }
 .dialog-header p, .dialog-tabs button { font-size: 12px; }
@@ -6811,18 +6819,6 @@ button:disabled {
   .conversation-floating-controls { right: 10px; bottom: 10px; }
   .dialog-header { padding: 14px; }
   .input-signal-title { font-size: 13px; }
-}
-@media (prefers-color-scheme: dark) {
-  :root {
-    --page: #171b19;
-    --surface: #202522;
-    --surface-subtle: #272d29;
-    --text-soft: #b6c1ba;
-    --text-faint: #98a59d;
-    --border: #37413b;
-    --border-strong: #526158;
-    --focus: #a1c5b2;
-  }
 }
 #orientation-form, .context-document-form { display: flex; flex-direction: column; }
 .context-reading { order: 2; }

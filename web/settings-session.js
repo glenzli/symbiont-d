@@ -19,6 +19,14 @@ export function initSettingsSession({ dialog, button, status, currentPage, persi
     }
   }
 
+  function markClean(page) {
+    if (!page) return;
+    dirty.delete(page);
+    baselines.set(page, fingerprint(page));
+    notices.delete(page);
+    refresh();
+  }
+
   function isDirty(page) {
     return [...dirty].some((item) => page === item || page.contains(item));
   }
@@ -117,5 +125,5 @@ export function initSettingsSession({ dialog, button, status, currentPage, persi
     event.preventDefault();
     event.returnValue = "";
   });
-  return { captureClean, isDirty, refresh, save, get busy() { return busy; } };
+  return { captureClean, markClean, isDirty, refresh, save, get busy() { return busy; } };
 }

@@ -7,10 +7,10 @@ use std::{
 use super::{
     autonomous::{ExplorationEvidence, ExplorationScoutFinding, review_prompt, scout_prompt},
     client::{
-        autonomous_response_is_superseded, checked_input_items, context_revision_ids,
-        extract_completed_response_text, extract_final_agent_message, find_catalog_model,
-        generated_image_output, remember_generated_image, should_restart_app_server,
-        text_and_image_input_items,
+        LunaSenseTimeout, autonomous_response_is_superseded, checked_input_items,
+        context_revision_ids, extract_completed_response_text, extract_final_agent_message,
+        find_catalog_model, generated_image_output, remember_generated_image,
+        should_restart_app_server, text_and_image_input_items,
     },
     prompts::{
         context_fragments, developer_instructions, interaction_reflection_prompt,
@@ -38,6 +38,14 @@ use serde_json::json;
 fn terminal_reconnecting_errors_are_connection_failures() {
     let error = anyhow::anyhow!("Reconnecting... 5/5");
     assert!(should_restart_app_server(&error));
+}
+
+#[test]
+fn bounded_luna_sensing_does_not_restart_the_app_server() {
+    assert!(!should_restart_app_server(&LunaSenseTimeout.into()));
+    assert!(should_restart_app_server(&anyhow::anyhow!(
+        "Codex app-server did not respond for 75 seconds"
+    )));
 }
 
 #[test]
@@ -784,6 +792,7 @@ async fn orientation_tool_requires_active_calibration() {
         ),
         None,
         None,
+        None,
         Arc::new(crate::continuation::ContinuationQueue::new().0),
         exploration_intents,
     );
@@ -863,6 +872,7 @@ async fn pcp_tools_defer_without_query_and_preserve_read_feedback_contracts() {
                 .await
                 .expect("open compute policies"),
         ),
+        None,
         None,
         None,
         Arc::new(crate::continuation::ContinuationQueue::new().0),
@@ -1287,6 +1297,7 @@ async fn reflection_tools_accept_recalled_conversation_revisions_outside_the_eve
         ),
         None,
         None,
+        None,
         Arc::new(crate::continuation::ContinuationQueue::new().0),
         Arc::clone(&exploration_intents),
     );
@@ -1422,6 +1433,7 @@ async fn hunch_tools_preserve_model_owned_state_and_record_autonomous_exploratio
                 .await
                 .expect("open compute policies"),
         ),
+        None,
         None,
         None,
         Arc::new(crate::continuation::ContinuationQueue::new().0),

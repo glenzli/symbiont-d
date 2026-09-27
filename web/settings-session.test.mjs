@@ -81,6 +81,17 @@ test("refresh cannot adopt unsaved drafts; restoring the original value clears d
   f.dom.window.close();
 });
 
+test("a separately saved source action can mark only its page clean", () => {
+  const f = fixture(async () => true);
+  f.edit("2");
+  assert.equal(f.session.isDirty(f.page()), true);
+  f.session.markClean(f.page());
+  assert.equal(f.session.isDirty(f.page()), false);
+  f.edit("3");
+  assert.equal(f.session.isDirty(f.page()), true);
+  f.dom.window.close();
+});
+
 test("save failure keeps the draft and reports it on the owning page only", async () => {
   const f = fixture(async () => { throw new Error("服务暂不可用"); });
   f.edit("3");
@@ -99,7 +110,8 @@ test("real settings keep a Luna draft across reopening and submit its exact valu
   const html = await readFile(new URL("./index.html", import.meta.url), "utf8");
   const source = (await readFile(new URL("./settings.js", import.meta.url), "utf8"))
     .replace('"/presentation.js"', JSON.stringify(new URL("./presentation.js", import.meta.url).href))
-    .replace('"/settings-session.js"', JSON.stringify(new URL("./settings-session.js", import.meta.url).href));
+    .replace('"/settings-session.js"', JSON.stringify(new URL("./settings-session.js", import.meta.url).href))
+    .replace('"/x-watch-ui.js"', JSON.stringify(new URL("./x-watch-ui.js", import.meta.url).href));
   const { initSettings } = await import(`data:text/javascript;base64,${Buffer.from(source).toString("base64")}`);
   const dom = new JSDOM(html);
   const prior = { document: globalThis.document, window: globalThis.window, fetch: globalThis.fetch };
@@ -140,7 +152,8 @@ test("live model catalog refresh updates clean settings without overwriting a mo
   const html = await readFile(new URL("./index.html", import.meta.url), "utf8");
   const source = (await readFile(new URL("./settings.js", import.meta.url), "utf8"))
     .replace('"/presentation.js"', JSON.stringify(new URL("./presentation.js", import.meta.url).href))
-    .replace('"/settings-session.js"', JSON.stringify(new URL("./settings-session.js", import.meta.url).href));
+    .replace('"/settings-session.js"', JSON.stringify(new URL("./settings-session.js", import.meta.url).href))
+    .replace('"/x-watch-ui.js"', JSON.stringify(new URL("./x-watch-ui.js", import.meta.url).href));
   const { initSettings } = await import(`data:text/javascript;base64,${Buffer.from(source).toString("base64")}`);
   const dom = new JSDOM(html);
   const prior = { document: globalThis.document, window: globalThis.window };
@@ -170,7 +183,8 @@ test("settings deep link opens the requested source channel", async (t) => {
   const html = await readFile(new URL("./index.html", import.meta.url), "utf8");
   const source = (await readFile(new URL("./settings.js", import.meta.url), "utf8"))
     .replace('"/presentation.js"', JSON.stringify(new URL("./presentation.js", import.meta.url).href))
-    .replace('"/settings-session.js"', JSON.stringify(new URL("./settings-session.js", import.meta.url).href));
+    .replace('"/settings-session.js"', JSON.stringify(new URL("./settings-session.js", import.meta.url).href))
+    .replace('"/x-watch-ui.js"', JSON.stringify(new URL("./x-watch-ui.js", import.meta.url).href));
   const { initSettings } = await import(`data:text/javascript;base64,${Buffer.from(source).toString("base64")}`);
   const dom = new JSDOM(html);
   const prior = { document: globalThis.document, window: globalThis.window };

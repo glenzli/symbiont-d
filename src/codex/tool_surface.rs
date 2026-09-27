@@ -67,6 +67,7 @@ pub(super) fn allowed(origin: &str, namespace: &str, tool: &str, calibrating: bo
                         | "schedule_follow_up"
                         | "fetch_url"
                         | "inspect_x_post"
+                        | "manage_x_watch"
                         | "upsert_compute_policy"
                         | "remove_compute_policy"
                         | "escalate"
@@ -146,7 +147,10 @@ fn group(namespace: &str, tool: &str) -> &'static str {
     ) {
         return "maintenance";
     }
-    if matches!(tool, "fetch_url" | "inspect_x_post" | "escalate") {
+    if matches!(
+        tool,
+        "fetch_url" | "inspect_x_post" | "manage_x_watch" | "escalate"
+    ) {
         return "utilities";
     }
     "reflection"
@@ -172,7 +176,7 @@ fn gateways() -> Vec<Value> {
 pub(super) fn initial(origin: &str, calibrating: bool) -> Value {
     let core: &[&str] = match origin {
         "interactive" if calibrating => &["complete_orientation", "escalate"],
-        "interactive" => &["inspect_x_post", "escalate"],
+        "interactive" => &["inspect_x_post", "manage_x_watch", "escalate"],
         "autonomous_scout" => &["submit_exploration_finding"],
         "autonomous" => &["propose_proactive_message", "escalate"],
         "maintenance" => &[],

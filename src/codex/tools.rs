@@ -31,6 +31,7 @@ use crate::{
     transcript::TranscriptSearchOptions,
     web_fetch::WebFetcher,
     x_browser::XBrowser,
+    x_watch::{WatchCommand, XWatchStore},
 };
 
 #[derive(Clone)]
@@ -43,6 +44,7 @@ pub(super) struct SymbiontTools {
     compute_policies: Arc<ComputePolicyStore>,
     web_fetcher: Option<Arc<WebFetcher>>,
     x_browser: Option<Arc<XBrowser>>,
+    x_watches: Option<Arc<XWatchStore>>,
     continuations: Arc<ContinuationQueue>,
     exploration_intents: Arc<ExplorationIntentQueue>,
 }
@@ -72,6 +74,7 @@ impl SymbiontTools {
         compute_policies: Arc<ComputePolicyStore>,
         web_fetcher: Option<Arc<WebFetcher>>,
         x_browser: Option<Arc<XBrowser>>,
+        x_watches: Option<Arc<XWatchStore>>,
         continuations: Arc<ContinuationQueue>,
         exploration_intents: Arc<ExplorationIntentQueue>,
     ) -> Self {
@@ -84,6 +87,7 @@ impl SymbiontTools {
             compute_policies,
             web_fetcher,
             x_browser,
+            x_watches,
             continuations,
             exploration_intents,
         }
@@ -785,6 +789,24 @@ impl SymbiontTools {
                     },
                     {
                         "type": "function",
+                        "name": "manage_x_watch",
+                        "description": "List or manage persistent Symbiont X account watch rules. This never follows accounts on X and never schedules checks. Only record_check after actually reading that account through the user's connected browser; report a login wall or unavailable browser without recording progress.",
+                        "inputSchema": {
+                            "type": "object",
+                            "properties": {
+                                "action": {"type":"string", "enum":["list","add","update","pause","resume","remove","record_check"]},
+                                "handle": {"type":"string", "description":"X account handle for add, with or without @."},
+                                "key": {"type":"string", "description":"Watch ID or handle for update, pause, resume, remove or record_check."},
+                                "focus": {"type":"string", "description":"What to follow about this account; required for add/update."},
+                                "delivery": {"type":"string", "enum":["digest","important"]},
+                                "posts": {"type":"array", "maxItems":20, "description":"Verified visible posts from the watched account, newest first. Use [] only after actually inspecting the account's visible timeline.", "items":{"type":"object","properties":{"id":{"type":"string"},"url":{"type":"string"},"text":{"type":"string"},"postedAt":{"type":["string","null"]}},"required":["id","url","text"],"additionalProperties":false}}
+                            },
+                            "required": ["action"],
+                            "additionalProperties": false
+                        }
+                    },
+                    {
+                        "type": "function",
                         "name": "upsert_compute_policy",
                         "description": "Create or revise a visible persistent minimum-compute rule only when the user explicitly asks that a topic always use deeper or maximum capability. Use semantic topic aliases a future message is likely to contain. Do not infer such a durable cost policy from topic complexity alone.",
                         "inputSchema": {
@@ -1186,6 +1208,7 @@ impl SymbiontTools {
             "schedule_follow_up",
             "fetch_url",
             "inspect_x_post",
+            "manage_x_watch",
             "upsert_compute_policy",
             "remove_compute_policy",
             "escalate",
@@ -1220,6 +1243,9 @@ impl SymbiontTools {
                     ),
                     "inspect_x_post" => Some(
                         "Inspect one exact X post in an isolated read-only browser; returns rendered text and screenshot. Use when the original post, replies or media matter. A login wall is inconclusive.",
+                    ),
+                    "manage_x_watch" => Some(
+                        "Manage visible X account watch rules on explicit user request. Checks use the connected browser only when the user asks; record_check only after seeing the account's posts. No X API or background collection.",
                     ),
                     "upsert_compute_policy" => Some(
                         "Create/revise a visible persistent minimum-compute rule only on explicit durable user request; never infer it from topic complexity. Use future-matchable aliases.",
@@ -2113,6 +2139,17 @@ impl SymbiontTools {
                     )
                     .await?;
                 Ok((serde_json::to_string(&observation)?, None))
+            }
+            "manage_x_watch" => {
+                require_interactive_origin(run_origin, tool)?;
+                let watches = self
+                    .x_watches
+                    .as_ref()
+                    .context("X watches are not configured")?;
+                let command: WatchCommand =
+                    serde_json::from_value(arguments.clone()).context("decode X watch action")?;
+                let snapshot = watches.manage(command).await?;
+                Ok((serde_json::to_string(&snapshot)?, None))
             }
             "upsert_compute_policy" => {
                 require_interactive_origin(run_origin, tool)?;

@@ -4,6 +4,7 @@ import {
   tokensToMillions,
 } from "/presentation.js";
 import { initSettingsSession } from "/settings-session.js";
+import { initXWatchUi } from "/x-watch-ui.js";
 
 export function initSettings(state, actions = {}) {
   const dialog = document.querySelector("#settings-dialog");
@@ -113,6 +114,7 @@ export function initSettings(state, actions = {}) {
     persist: saveCurrentSettings,
     mutationSelector: "#add-compute-policy, .remove-compute-policy, #add-model-participant, .remove-model-participant, #add-ambient-provider, .remove-ambient-provider, #add-ambient-channel, .remove-ambient-channel, .input-role-avatar-option",
   });
+  const xWatchUi = initXWatchUi(state, () => session.markClean(currentPanel("x-watches")));
 
   function modelBySlug(slug) {
     return state.models.find(
@@ -1011,6 +1013,7 @@ export function initSettings(state, actions = {}) {
         return saved;
       }
       if (activeSourceSettingsTab === "mail") return saveMailInput();
+      if (activeSourceSettingsTab === "x-watches") return xWatchUi.saveAll();
     }
     if (activeSettingsTab === "reflection") {
       return actions.saveReflection();
@@ -1074,6 +1077,7 @@ export function initSettings(state, actions = {}) {
     const renderers = {
       models: renderCompute, ambient: renderAmbient, drive: renderDriveInput,
       mail: renderMailInput, exploration: renderAutonomy,
+      "x-watches": xWatchUi.render,
       system: () => { renderAudioTranscription(); renderBridge(); },
     };
     for (const [name, render] of Object.entries(renderers)) {
@@ -1214,6 +1218,12 @@ export function initSettings(state, actions = {}) {
     renderAutonomy() {
       if (!session.busy && !session.isDirty(currentPanel("exploration"))) {
         renderAutonomy();
+        session.captureClean();
+      }
+    },
+    renderXWatches() {
+      if (!session.busy && !session.isDirty(currentPanel("x-watches"))) {
+        xWatchUi.render();
         session.captureClean();
       }
     },

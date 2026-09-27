@@ -39,6 +39,7 @@ const appState = {
   modelCouncil: { participants: [], maximumSelected: 3 },
   driveInput: null,
   mailInput: null,
+  xWatches: null,
   inputRoles: { roles: [], avatarOptions: [] },
   audioTranscription: null,
   computePolicies: [],
@@ -887,6 +888,7 @@ function applyRuntime(payload) {
   const bridgeChanged = runtimeValueChanged("bridge", payload.bridge);
   const driveInputChanged = runtimeValueChanged("driveInput", payload.driveInput);
   const mailInputChanged = runtimeValueChanged("mailInput", payload.mailInput);
+  const xWatchesChanged = runtimeValueChanged("xWatches", payload.xWatches);
   const turnDispositionsChanged = runtimeValueChanged(
     "turnDispositions",
     payload.turnDispositions,
@@ -899,6 +901,7 @@ function applyRuntime(payload) {
   appState.ambient = payload.ambient || appState.ambient;
   appState.driveInput = payload.driveInput || appState.driveInput;
   appState.mailInput = payload.mailInput || appState.mailInput;
+  appState.xWatches = payload.xWatches || appState.xWatches;
   appState.inputRoles = payload.inputRoles || appState.inputRoles;
   appState.audioTranscription =
     payload.audioTranscription || appState.audioTranscription;
@@ -950,6 +953,7 @@ function applyRuntime(payload) {
   if (audioTranscriptionChanged) voiceInput.configUpdated();
   if (turnDispositionsChanged) turnDispositionUi.applyAll(payload.turnDispositions);
   if (driveInputChanged || mailInputChanged) topbarUi.render();
+  if (xWatchesChanged) settingsUi.renderXWatches();
 }
 
 async function bootstrap() {
@@ -1231,6 +1235,18 @@ async function sendMessage(
   }
   return true;
 }
+
+document.addEventListener("symbiont:x-watch-check", (event) => {
+  const key = event.detail?.key;
+  const watch = key ? appState.xWatches?.watches?.find((item) => item.id === key) : null;
+  if (key && (!watch || !watch.enabled)) return;
+  const prompt = watch
+    ? `请用已连接浏览器的 computer use 检查我在 Symbiont 中关注的 X 账号 @${watch.handle}。先读取关注规则，只记录实际看到的原帖与检查进度；如果无法访问已登录页面，请说明原因，不要猜测。`
+    : "请用已连接浏览器的 computer use 检查我在 Symbiont 中已启用的 X 关注账号。先读取关注列表，再逐个查看；只记录实际看到的原帖与检查进度。若账号太多或浏览器无法访问，请明确列出未检查的账号，不要猜测。";
+  const dialog = document.querySelector("#settings-dialog");
+  if (dialog?.open) dialog.close();
+  void sendMessage(prompt);
+});
 
 function clearTemporaryDiscussionMessages() {
   for (const message of temporaryDiscussionConversation.querySelectorAll(

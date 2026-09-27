@@ -92,6 +92,7 @@ use crate::{
     },
     topics::{TopicContext, TopicDetail, TopicIndex, TopicService},
     usage::{ExplorationRunSummary, TraceBundle, UsageHeadline, UsageStore, UsageSummary},
+    x_watch::{WatchCommand, WatchSnapshot, XWatchStore},
 };
 
 const INDEX_HTML: &str = include_str!("../web/index.html");
@@ -115,6 +116,7 @@ const INPUT_SIGNAL_CONTENT_JS: &str = include_str!("../web/input-signal-content.
 const INPUT_SIGNAL_POPOVERS_JS: &str = include_str!("../web/input-signal-popovers.js");
 const CONVERSATION_FOCUS_UI_JS: &str = include_str!("../web/conversation-focus-ui.js");
 const SETTINGS_JS: &str = include_str!("../web/settings.js");
+const X_WATCH_UI_JS: &str = include_str!("../web/x-watch-ui.js");
 const SETTINGS_SESSION_JS: &str = include_str!("../web/settings-session.js");
 const USAGE_UI_JS: &str = include_str!("../web/usage-ui.js");
 const COMPOSER_CONTEXT_UI_JS: &str = include_str!("../web/composer-context-ui.js");
@@ -179,6 +181,7 @@ pub struct AppState {
     model_council: Arc<ModelCouncilService>,
     drive_input: Arc<DriveInputStore>,
     mail_input: Arc<MailInputStore>,
+    x_watches: Arc<XWatchStore>,
     audio_transcription: Arc<AudioTranscriptionStore>,
     compute_policies: Arc<ComputePolicyStore>,
     usage: Arc<UsageStore>,
@@ -215,6 +218,7 @@ impl AppState {
         model_council: Arc<ModelCouncilService>,
         drive_input: Arc<DriveInputStore>,
         mail_input: Arc<MailInputStore>,
+        x_watches: Arc<XWatchStore>,
         audio_transcription: Arc<AudioTranscriptionStore>,
         compute_policies: Arc<ComputePolicyStore>,
         usage: Arc<UsageStore>,
@@ -252,6 +256,7 @@ impl AppState {
             model_council,
             drive_input,
             mail_input,
+            x_watches,
             audio_transcription,
             compute_policies,
             usage,
@@ -335,6 +340,7 @@ struct BootstrapResponse {
     model_council: ModelCouncilSnapshot,
     drive_input: DriveInputSnapshot,
     mail_input: MailInputSnapshot,
+    x_watches: WatchSnapshot,
     audio_transcription: AudioTranscriptionSnapshot,
     compute_policies: Vec<ComputeTopicPolicy>,
     rate_limits: Option<RateLimitInfo>,
@@ -364,6 +370,7 @@ struct RuntimeResponse {
     ambient: AmbientSnapshot,
     drive_input: DriveInputSnapshot,
     mail_input: MailInputSnapshot,
+    x_watches: WatchSnapshot,
     audio_transcription: AudioTranscriptionSnapshot,
     exploration: ExplorationSnapshot,
     attacker: AttackerSnapshot,
@@ -655,6 +662,7 @@ pub fn router(state: AppState) -> Router {
         .route("/input-signal-popovers.js", get(input_signal_popovers_js))
         .route("/conversation-focus-ui.js", get(conversation_focus_ui_js))
         .route("/settings.js", get(settings_js))
+        .route("/x-watch-ui.js", get(x_watch_ui_js))
         .route("/settings-session.js", get(settings_session_js))
         .route("/usage-ui.js", get(usage_ui_js))
         .route("/composer-context-ui.js", get(composer_context_ui_js))
@@ -784,6 +792,7 @@ pub fn router(state: AppState) -> Router {
             post(cancel_drive_input_connection_test),
         )
         .route("/api/mail-input", post(update_mail_input))
+        .route("/api/x-watches", get(x_watches).post(manage_x_watch))
         .route("/api/mail-input/test", post(test_mail_input_connection))
         .route(
             "/api/mail-input/test/cancel",
@@ -977,6 +986,13 @@ async fn settings_js() -> impl IntoResponse {
     (
         [(header::CONTENT_TYPE, "text/javascript; charset=utf-8")],
         SETTINGS_JS,
+    )
+}
+
+async fn x_watch_ui_js() -> impl IntoResponse {
+    (
+        [(header::CONTENT_TYPE, "text/javascript; charset=utf-8")],
+        X_WATCH_UI_JS,
     )
 }
 
@@ -1225,6 +1241,7 @@ async fn bootstrap(State(state): State<AppState>) -> Result<Json<BootstrapRespon
         model_council,
         drive_input,
         mail_input,
+        x_watches: state.x_watches.snapshot().await,
         audio_transcription: state.audio_transcription.snapshot().await,
         compute_policies: state.compute_policies.snapshot().await,
         rate_limits: state.rate_limits.read().await.clone(),
@@ -1624,6 +1641,27 @@ async fn update_mail_input(
     Ok(Json(snapshot))
 }
 
+async fn x_watches(State(state): State<AppState>) -> Json<WatchSnapshot> {
+    Json(state.x_watches.snapshot().await)
+}
+
+async fn manage_x_watch(
+    State(state): State<AppState>,
+    Json(command): Json<WatchCommand>,
+) -> Result<Json<WatchSnapshot>, ApiError> {
+    if matches!(command, WatchCommand::RecordCheck { .. }) {
+        return Err(ApiError::bad_request(anyhow::anyhow!(
+            "X browser observations must be recorded from an interactive check"
+        )));
+    }
+    let snapshot = state
+        .x_watches
+        .manage(command)
+        .await
+        .map_err(ApiError::bad_request)?;
+    Ok(Json(snapshot))
+}
+
 async fn test_mail_input_connection(
     State(state): State<AppState>,
     Json(config): Json<MailInputConfig>,
@@ -1870,6 +1908,7 @@ async fn runtime(
         ambient,
         drive_input,
         mail_input,
+        x_watches: state.x_watches.snapshot().await,
         audio_transcription: state.audio_transcription.snapshot().await,
         exploration: state.exploration.snapshot().await,
         attacker: state.attacker.snapshot().await,

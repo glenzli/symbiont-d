@@ -55,6 +55,7 @@ mod web;
 mod web_fetch;
 mod working_context;
 mod x_browser;
+mod x_watch;
 
 use std::{
     env,
@@ -106,6 +107,7 @@ use usage::UsageStore;
 use web::AppState;
 use web_fetch::WebFetcher;
 use x_browser::XBrowser;
+use x_watch::XWatchStore;
 
 const DEFAULT_BIND: &str = "127.0.0.1:4317";
 
@@ -249,6 +251,14 @@ async fn main() -> Result<()> {
     let permissions = Arc::new(PermissionBroker::new());
     let web_fetcher = Arc::new(WebFetcher::new(Arc::clone(&permissions))?);
     let x_browser = Arc::new(XBrowser::new(Arc::clone(&permissions), &workspace));
+    let x_watches = Arc::new(
+        XWatchStore::open(resolve_data_path(
+            &workspace,
+            "SYMBIONT_X_WATCH_PATH",
+            "x-watches.json",
+        ))
+        .await?,
+    );
     let (continuations, continuation_receiver) = ContinuationQueue::new();
     let continuations = Arc::new(continuations);
     let (exploration_intents, exploration_intent_receiver) =
@@ -299,6 +309,7 @@ async fn main() -> Result<()> {
                     Arc::clone(&permissions),
                     Arc::clone(&web_fetcher),
                     Arc::clone(&x_browser),
+                    Arc::clone(&x_watches),
                     Arc::clone(&continuations),
                     Arc::clone(&exploration_intents),
                 )
@@ -374,6 +385,7 @@ async fn main() -> Result<()> {
             Arc::clone(&permissions),
             Arc::clone(&web_fetcher),
             Arc::clone(&x_browser),
+            Arc::clone(&x_watches),
             Arc::clone(&continuations),
             Arc::clone(&exploration_intents),
         );
@@ -636,6 +648,7 @@ async fn main() -> Result<()> {
         model_council,
         drive_input,
         mail_input,
+        x_watches,
         audio_transcription,
         compute_policies,
         usage,

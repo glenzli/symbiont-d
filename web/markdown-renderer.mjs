@@ -32,12 +32,30 @@ function repairLegacyMathLinePrefixes(source) {
 function repairSentenceAdjacentStrong(source) {
   // CommonMark leaves **句子。**下文 literal: punctuation before the closing
   // delimiter and a letter after it prevent the delimiter from closing.
-  // Move only the punctuation outside an otherwise paired strong span. This
-  // preserves visible text and avoids adding a space between Chinese words.
-  return source.replace(
-    /\*\*([^*\n]+?)([。！？；：，、.!?;:,])\*\*(?=[\p{L}\p{N}])/gu,
-    "**$1**$2",
-  );
+  // Work on delimiter pairs: a regex can mistake the closing ** of one span
+  // for the opening ** of the next and move punctuation between valid spans.
+  const markers = [];
+  for (const match of source.matchAll(/(?<!\*)\*\*(?!\*)/g)) {
+    let cursor = match.index - 1;
+    while (source[cursor] === "\\") cursor -= 1;
+    const backslashes = match.index - 1 - cursor;
+    if (backslashes % 2 === 0) markers.push(match.index);
+  }
+  if (markers.length % 2 !== 0) return source;
+
+  let repaired = "";
+  let offset = 0;
+  for (let index = 0; index < markers.length; index += 2) {
+    const opening = markers[index];
+    const closing = markers[index + 1];
+    const body = source.slice(opening + 2, closing);
+    if (!/^[^*\n]+[。！？；：，、.!?;:,]$/u.test(body)
+      || !/^[\p{L}\p{N}]$/u.test(source[closing + 2] || "")) continue;
+    repaired += source.slice(offset, opening)
+      + `**${body.slice(0, -1)}**${body.slice(-1)}`;
+    offset = closing + 2;
+  }
+  return repaired ? repaired + source.slice(offset) : source;
 }
 
 markdown.core.ruler.before("inline", "repair_sentence_adjacent_strong", (state) => {

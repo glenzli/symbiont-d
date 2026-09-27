@@ -654,13 +654,6 @@ fn normalize_and_prune(document: &mut SignalDocument, now: DateTime<Utc>) -> boo
             signal.source_document_at = crate::external_digest::source_document_at(&signal.sources);
             changed |= signal.source_document_at.is_some();
         }
-        if signal.kind == SignalKind::ExternalInput {
-            let fingerprint = signal_fingerprint(&signal.title, &signal.summary);
-            if signal.fingerprint != fingerprint {
-                signal.fingerprint = fingerprint;
-                changed = true;
-            }
-        }
         if signal.received_text.trim().is_empty() {
             signal.received_text = if signal.summary.trim().is_empty() {
                 signal.content.clone()
@@ -686,6 +679,13 @@ fn normalize_and_prune(document: &mut SignalDocument, now: DateTime<Utc>) -> boo
         if summary != signal.summary {
             signal.summary = summary;
             changed = true;
+        }
+        if signal.kind == SignalKind::ExternalInput {
+            let fingerprint = signal_fingerprint(&signal.title, &signal.summary);
+            if signal.fingerprint != fingerprint {
+                signal.fingerprint = fingerprint;
+                changed = true;
+            }
         }
     }
     // Archive lifetime is independent of the bounded live projection and
@@ -1533,6 +1533,30 @@ mod tests {
         assert_eq!(first.id, again.id);
         assert_eq!(store.visible(10).await.unwrap().len(), 1);
         let _ = tokio::fs::remove_file(path).await;
+    }
+
+    #[tokio::test]
+    async fn normalized_math_and_fingerprint_are_consistent_when_published() {
+        let temporary = tempfile::tempdir().unwrap();
+        let store = SignalStore::open(temporary.path().join("signals.json"))
+            .await
+            .unwrap();
+        let mut source = candidate("escaped_math");
+        source.summary = r"压力场 \$p\$ 脱离 \$L^2\$".to_owned();
+        source.received_text = source.summary.clone();
+        store
+            .publish_with_content(&source, source.summary.clone(), "credible".to_owned())
+            .await
+            .unwrap();
+
+        let signal = store.visible(10).await.unwrap().remove(0);
+        assert_eq!(signal.summary, "压力场 $p$ 脱离 $L^2$");
+        assert_eq!(signal.content, signal.summary);
+        assert_eq!(signal.received_text, signal.summary);
+        assert_eq!(
+            signal.fingerprint,
+            super::signal_fingerprint(&signal.title, &signal.summary)
+        );
     }
 
     #[tokio::test]

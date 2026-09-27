@@ -368,6 +368,9 @@ impl EnrollmentManager {
                 persist_state(&self.state_path, &snapshot).await?;
                 Ok(EnrollmentProbe::Active(active))
             }
+            EnrollmentResult::ProjectReady { .. } => {
+                anyhow::bail!("PCP returned a project-scope result for an enrollment request")
+            }
         }
     }
 

@@ -1,5 +1,6 @@
 use std::{
     collections::{HashMap, HashSet},
+    fmt,
     path::PathBuf,
     process::Stdio,
     sync::Arc,
@@ -14,7 +15,7 @@ use tokio::{
     io::{AsyncBufReadExt, AsyncWriteExt, BufReader, Lines},
     process::{Child, ChildStdin, ChildStdout, Command},
     sync::{RwLock, mpsc, watch},
-    time::{sleep, timeout},
+    time::{sleep, timeout, timeout_at},
 };
 use tracing::{debug, warn};
 
@@ -80,8 +81,25 @@ const ATTACKER_COMPLETE_MARKER: &str = "<symbiont-attacker-reviewed/>";
 const APP_SERVER_START_TIMEOUT: Duration = Duration::from_secs(360);
 const APP_SERVER_START_ATTEMPTS: u8 = 2;
 const APP_SERVER_IDLE_TIMEOUT: Duration = Duration::from_secs(75);
-const LUNA_SENSE_TIMEOUT: Duration = Duration::from_secs(180);
+// High-effort sensing can legitimately run for several minutes. Bound the
+// individual turn without treating its deadline as a broken app-server.
+const LUNA_SENSE_TIMEOUT: Duration = Duration::from_secs(600);
 const APP_SERVER_STOP_TIMEOUT: Duration = Duration::from_secs(2);
+
+#[derive(Debug)]
+pub(super) struct LunaSenseTimeout;
+
+impl fmt::Display for LunaSenseTimeout {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            formatter,
+            "Luna sensing exceeded {} seconds; cancellation was requested",
+            LUNA_SENSE_TIMEOUT.as_secs()
+        )
+    }
+}
+
+impl std::error::Error for LunaSenseTimeout {}
 
 #[derive(Clone)]
 pub struct CodexConfig {
@@ -100,6 +118,7 @@ struct CodexDependencies {
     permissions: Arc<PermissionBroker>,
     web_fetcher: Arc<WebFetcher>,
     x_browser: Arc<crate::x_browser::XBrowser>,
+    x_watches: Arc<crate::x_watch::XWatchStore>,
     continuations: Arc<ContinuationQueue>,
     exploration_intents: Arc<ExplorationIntentQueue>,
 }
@@ -359,6 +378,7 @@ impl CodexClient {
         permissions: Arc<PermissionBroker>,
         web_fetcher: Arc<WebFetcher>,
         x_browser: Arc<crate::x_browser::XBrowser>,
+        x_watches: Arc<crate::x_watch::XWatchStore>,
         continuations: Arc<ContinuationQueue>,
         exploration_intents: Arc<ExplorationIntentQueue>,
     ) -> Result<Self> {
@@ -372,6 +392,7 @@ impl CodexClient {
             permissions,
             web_fetcher,
             x_browser,
+            x_watches,
             continuations,
             exploration_intents,
         };
@@ -477,6 +498,7 @@ impl CodexClient {
                 Arc::clone(&dependencies.compute_policies),
                 Some(Arc::clone(&dependencies.web_fetcher)),
                 Some(Arc::clone(&dependencies.x_browser)),
+                Some(Arc::clone(&dependencies.x_watches)),
                 Arc::clone(&dependencies.continuations),
                 Arc::clone(&dependencies.exploration_intents),
             ),
@@ -973,7 +995,15 @@ impl CodexClient {
                 Some(input_events),
                 &events,
             )
-            .await?;
+            .await;
+        if outcome
+            .as_ref()
+            .is_err_and(|error| error.is::<LunaSenseTimeout>())
+        {
+            self.renew_background_thread(&thread_id, BackgroundThread::LunaSensing)
+                .await;
+        }
+        let outcome = outcome?;
         if !outcome.interrupted {
             self.renew_background_thread(&thread_id, BackgroundThread::LunaSensing)
                 .await;
@@ -1463,31 +1493,22 @@ impl CodexClient {
         input_events: Option<watch::Receiver<u64>>,
         events: &mpsc::Sender<RuntimeEvent>,
     ) -> Result<ChatOutcome> {
-        let request = self.run_request_inner(
-            thread_id,
-            first_input,
-            first_lane,
-            origin,
-            compute,
-            profile,
-            continuity_context,
-            working_context,
-            rollover,
-            allow_escalation,
-            input_events,
-            events,
-        );
-        let outcome = if origin == "luna_sense" {
-            match timeout(LUNA_SENSE_TIMEOUT, request).await {
-                Ok(outcome) => outcome,
-                Err(_) => Err(anyhow::anyhow!(
-                    "Codex app-server Luna sensing exceeded {} seconds",
-                    LUNA_SENSE_TIMEOUT.as_secs()
-                )),
-            }
-        } else {
-            request.await
-        };
+        let outcome = self
+            .run_request_inner(
+                thread_id,
+                first_input,
+                first_lane,
+                origin,
+                compute,
+                profile,
+                continuity_context,
+                working_context,
+                rollover,
+                allow_escalation,
+                input_events,
+                events,
+            )
+            .await;
         match outcome {
             Ok(outcome) => Ok(outcome),
             Err(error) if should_restart_app_server(&error) => {
@@ -1688,6 +1709,8 @@ impl CodexClient {
         .await;
 
         let started = Instant::now();
+        let mut sensing_deadline = (origin == "luna_sense").then_some(started + LUNA_SENSE_TIMEOUT);
+        let mut sensing_timed_out = false;
         let started_at = now();
         let baseline_usage = self
             .thread_usage
@@ -1828,11 +1851,21 @@ impl CodexClient {
         let mut interactive_delta_gate = InteractiveDeltaGate::new(origin == "interactive");
 
         loop {
+            let read = async {
+                if let Some(deadline) = sensing_deadline {
+                    match timeout_at(deadline.into(), self.read_message()).await {
+                        Ok(message) => message.map(Some),
+                        Err(_) => Ok(None),
+                    }
+                } else {
+                    self.read_message().await.map(Some)
+                }
+            };
             let message = if interrupt_sent || input_events.is_none() {
-                self.read_message().await?
+                read.await?
             } else {
                 tokio::select! {
-                    message = self.read_message() => message?,
+                    message = read => message?,
                     changed = input_events.as_mut().expect("input receiver checked").changed() => {
                         if changed.is_err() {
                             input_events = None;
@@ -1850,6 +1883,26 @@ impl CodexClient {
                         continue;
                     }
                 }
+            };
+            let Some(message) = message else {
+                sensing_deadline = None;
+                sensing_timed_out = true;
+                interrupt_requested = true;
+                tracing::warn!(
+                    target: crate::runtime_log::TARGET,
+                    event = "luna_sense_deadline",
+                    timeout_seconds = LUNA_SENSE_TIMEOUT.as_secs(),
+                    "Luna sensing reached its turn deadline; interrupting without restarting Codex"
+                );
+                if let Some(turn_id) = turn_id.as_deref() {
+                    self.send_request(
+                        "turn/interrupt",
+                        json!({"threadId": thread_id, "turnId": turn_id}),
+                    )
+                    .await?;
+                    interrupt_sent = true;
+                }
+                continue;
             };
             if self
                 .handle_server_request(
@@ -1995,6 +2048,9 @@ impl CodexClient {
                         .pointer("/turn/status")
                         .and_then(Value::as_str)
                         .unwrap_or("unknown");
+                    if sensing_timed_out && status != "completed" {
+                        return Err(LunaSenseTimeout.into());
+                    }
                     if status != "completed" && status != "interrupted" {
                         let error = params
                             .pointer("/turn/error/message")
@@ -2084,6 +2140,9 @@ impl CodexClient {
                     });
                 }
                 Some("error") if event_matches(params, thread_id, &turn_id) => {
+                    if sensing_timed_out {
+                        return Err(LunaSenseTimeout.into());
+                    }
                     let message = params
                         .pointer("/error/message")
                         .or_else(|| params.get("message"))
@@ -2668,11 +2727,12 @@ fn is_app_server_transport_failure(error: &anyhow::Error) -> bool {
 }
 
 pub(super) fn should_restart_app_server(error: &anyhow::Error) -> bool {
-    is_app_server_transport_failure(error)
-        || error
-            .to_string()
-            .to_ascii_lowercase()
-            .contains("reconnecting")
+    !error.is::<LunaSenseTimeout>()
+        && (is_app_server_transport_failure(error)
+            || error
+                .to_string()
+                .to_ascii_lowercase()
+                .contains("reconnecting"))
 }
 
 pub(crate) fn is_recoverable_connection_error(error: &anyhow::Error) -> bool {

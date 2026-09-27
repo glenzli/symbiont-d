@@ -12,6 +12,7 @@ const MAX_SOURCE_URLS: usize = 8;
 
 pub(crate) fn normalize_external_markdown(value: &str) -> String {
     let value = unescape_systematically_escaped_markdown(value);
+    let value = repair_escaped_dollar_delimited_math(&value);
     let value = repair_mixed_digest_escapes(&value);
     // Heal the one malformed wrapper produced by the earliest local migration
     // before normalized links became aware of angle-bracket autolinks.
@@ -32,6 +33,207 @@ pub(crate) fn normalize_external_markdown(value: &str) -> String {
         output.push(normalize_inline_urls(line));
     }
     output.join("\n")
+}
+
+/// Some external digests Markdown-escape the dollar delimiters and TeX
+/// punctuation before delivery. In that form the Markdown parser sees literal
+/// dollars and never invokes KaTeX. Recover only paired, math-shaped escaped
+/// delimiters; a lone escaped price or a prose span stays literal.
+fn repair_escaped_dollar_delimited_math(value: &str) -> String {
+    let bytes = value.as_bytes();
+    let has_escaped_tex_commands = bytes
+        .windows(3)
+        .any(|window| window[0] == b'\\' && window[1] == b'\\' && window[2].is_ascii_alphabetic());
+    let mut output = String::with_capacity(value.len());
+    let mut cursor = 0;
+
+    while let Some((open, width, open_end)) = find_escaped_dollar_delimiter(bytes, cursor) {
+        output.push_str(&value[cursor..open]);
+        if !is_in_markdown_code(value, open)
+            && let Some((close, close_end)) = find_matching_escaped_dollar(value, open_end, width)
+        {
+            let expression = &value[open_end..close];
+            if escaped_span_looks_like_math(expression, width, has_escaped_tex_commands) {
+                if width == 2 {
+                    // A display delimiter after prose is not a Markdown block.
+                    // Give it its own lines even when the source put both
+                    // escaped delimiters in the middle of one list item.
+                    output.push_str("\n\n$$\n");
+                    let repaired = repair_escaped_math_punctuation(expression);
+                    output.push_str(repaired.trim());
+                    output.push_str("\n$$\n\n");
+                } else {
+                    output.push('$');
+                    output.push_str(&repair_escaped_math_punctuation(expression));
+                    output.push('$');
+                }
+                cursor = close_end;
+                continue;
+            }
+        }
+        output.push_str(&value[open..open_end]);
+        cursor = open_end;
+    }
+    output.push_str(&value[cursor..]);
+    output
+}
+
+fn find_matching_escaped_dollar(
+    value: &str,
+    mut cursor: usize,
+    width: usize,
+) -> Option<(usize, usize)> {
+    while let Some((start, closing_width, end)) =
+        find_escaped_dollar_delimiter(value.as_bytes(), cursor)
+    {
+        if width == 1 && value.as_bytes()[cursor..start].contains(&b'\n') {
+            return None;
+        }
+        if closing_width == width && !is_in_markdown_code(value, start) {
+            return Some((start, end));
+        }
+        cursor = end;
+    }
+    None
+}
+
+fn is_in_markdown_code(value: &str, position: usize) -> bool {
+    let prefix = &value[..position];
+    let line_start = prefix.rfind('\n').map_or(0, |index| index + 1);
+    let mut fence = None::<(u8, usize)>;
+    for line in prefix[..line_start].lines() {
+        let trimmed = line.trim_start_matches(' ');
+        if line.len() - trimmed.len() > 3 {
+            continue;
+        }
+        let marker = trimmed.as_bytes().first().copied();
+        if !matches!(marker, Some(b'\x60' | b'~')) {
+            continue;
+        }
+        let width = trimmed
+            .as_bytes()
+            .iter()
+            .take_while(|byte| Some(**byte) == marker)
+            .count();
+        if width < 3 {
+            continue;
+        }
+        match fence {
+            None => fence = Some((marker.unwrap(), width)),
+            Some((active, opening_width))
+                if marker == Some(active)
+                    && width >= opening_width
+                    && trimmed[width..].trim().is_empty() =>
+            {
+                fence = None;
+            }
+            _ => {}
+        }
+    }
+    if fence.is_some() {
+        return true;
+    }
+
+    let line = prefix[line_start..].as_bytes();
+    let mut cursor = 0;
+    let mut inline_ticks = None;
+    while cursor < line.len() {
+        if line[cursor] != b'\x60' {
+            cursor += 1;
+            continue;
+        }
+        let width = line[cursor..]
+            .iter()
+            .take_while(|byte| **byte == b'\x60')
+            .count();
+        let escaped = cursor > 0
+            && line[..cursor]
+                .iter()
+                .rev()
+                .take_while(|byte| **byte == b'\\')
+                .count()
+                % 2
+                == 1;
+        if !escaped {
+            match inline_ticks {
+                None => inline_ticks = Some(width),
+                Some(opening_width) if opening_width == width => inline_ticks = None,
+                _ => {}
+            }
+        }
+        cursor += width;
+    }
+    inline_ticks.is_some()
+}
+
+fn find_escaped_dollar_delimiter(bytes: &[u8], mut cursor: usize) -> Option<(usize, usize, usize)> {
+    while cursor + 1 < bytes.len() {
+        if bytes[cursor] == b'\\'
+            && bytes[cursor + 1] == b'$'
+            && (cursor == 0 || bytes[cursor - 1] != b'\\')
+        {
+            if bytes.get(cursor + 2) == Some(&b'\\') && bytes.get(cursor + 3) == Some(&b'$') {
+                return Some((cursor, 2, cursor + 4));
+            }
+            return Some((cursor, 1, cursor + 2));
+        }
+        cursor += 1;
+    }
+    None
+}
+
+fn escaped_span_looks_like_math(
+    expression: &str,
+    width: usize,
+    has_escaped_tex_commands: bool,
+) -> bool {
+    if expression.is_empty() || width == 1 && expression.contains('\n') {
+        return false;
+    }
+    let trimmed = expression.trim();
+    if trimmed.is_empty() || width == 1 && trimmed != expression {
+        return false;
+    }
+    let one_symbol =
+        trimmed.chars().count() == 1 && trimmed.chars().all(|character| character.is_alphabetic());
+    one_symbol
+        || has_escaped_tex_commands && trimmed.chars().all(|character| character.is_ascii_digit())
+        || trimmed.chars().any(|character| {
+            matches!(
+                character,
+                '^' | '_'
+                    | '\\'
+                    | '='
+                    | '+'
+                    | '-'
+                    | '*'
+                    | '/'
+                    | '{'
+                    | '}'
+                    | '('
+                    | ')'
+                    | '<'
+                    | '>'
+                    | '|'
+            )
+        })
+}
+
+fn repair_escaped_math_punctuation(expression: &str) -> String {
+    let mut output = String::with_capacity(expression.len());
+    let mut characters = expression.chars().peekable();
+    while let Some(character) = characters.next() {
+        if character == '\\'
+            && characters
+                .peek()
+                .is_some_and(|next| matches!(next, '_' | '=' | '-' | '<' | '>' | '[' | ']'))
+        {
+            output.push(characters.next().unwrap());
+        } else {
+            output.push(character);
+        }
+    }
+    output
 }
 
 /// Repairs the narrower mixed state produced when a digest generator escapes
@@ -151,7 +353,7 @@ fn repair_math_expression(expression: &str) -> String {
         && !has_escaped_bracket
         && !has_escaped_numeric_comparison
     {
-        return expression.to_owned();
+        return repair_invalid_brace_delimiters(expression);
     }
 
     let mut output = String::with_capacity(expression.len());
@@ -207,7 +409,15 @@ fn repair_math_expression(expression: &str) -> String {
         output.push(characters[index]);
         index += 1;
     }
-    output
+    repair_invalid_brace_delimiters(&output)
+}
+
+fn repair_invalid_brace_delimiters(expression: &str) -> String {
+    // A bare brace starts or ends a TeX group; \left and \right require
+    // escaped braces when the intended delimiter is visible.
+    expression
+        .replace(r"\left{", r"\left\{")
+        .replace(r"\right}", r"\right\}")
 }
 
 fn escaped_greater_is_numeric_comparison(characters: &[char], index: usize) -> bool {
@@ -486,6 +696,53 @@ mod tests {
     fn preserves_isolated_markdown_escapes_and_math_delimiters() {
         let value = "使用 \\* 表示字面星号，并保留公式：\\[x + y\\]。";
         assert_eq!(normalize_external_markdown(value), value);
+    }
+
+    #[test]
+    fn restores_escaped_math_from_a_drive_digest_without_changing_the_claims() {
+        let value = r"1. **第二类速度奇异**：速率 \$(T-t)^{-1/2}\$；
+2. **压力场非 \$L^2\$ 性**：压力场 \$p\$ 必须脱离 \$L^2\$；
+3. **击穿 Onsager 空间**：脱离 \$L^3\_t B^{1/3}\_{3,c\_0}\$。
+4. 能量式：\$\$\\frac{d}{dt} \\frac{1}{2}\\int\_{\mathbb{R}^3}|u|^2 dx \= -\\nu\\int|\nabla u|^2 dx\$\$";
+        let expected = r"1. **第二类速度奇异**：速率 $(T-t)^{-1/2}$；
+2. **压力场非 $L^2$ 性**：压力场 $p$ 必须脱离 $L^2$；
+3. **击穿 Onsager 空间**：脱离 $L^3_t B^{1/3}_{3,c_0}$。
+4. 能量式：
+
+$$
+\frac{d}{dt} \frac{1}{2}\int_{\mathbb{R}^3}|u|^2 dx = -\nu\int|\nabla u|^2 dx
+$$";
+        assert_eq!(normalize_external_markdown(value), expected);
+        assert_eq!(normalize_external_markdown(expected), expected);
+    }
+
+    #[test]
+    fn leaves_escaped_prices_and_prose_dollars_literal() {
+        let value = r"价格从 \$5 到 \$6；字面写法 \$5\$，还有 \$a and b\$。";
+        assert_eq!(normalize_external_markdown(value), value);
+    }
+
+    #[test]
+    fn repairs_numeric_math_and_brace_delimiters_in_a_systematically_escaped_document() {
+        let value = r"原点 \$0\$；
+公式：\$\$\\left{ x \= 0 \\right}\$\$";
+        let expected = r"原点 $0$；
+公式：
+
+$$
+\left\{ x = 0 \right\}
+$$";
+        assert_eq!(normalize_external_markdown(value), expected);
+        assert_eq!(normalize_external_markdown(expected), expected);
+    }
+
+    #[test]
+    fn does_not_turn_escaped_dollars_inside_code_into_math() {
+        let value =
+            "字面 \x60\\$p\\$\x60，公式 \\$p\\$。\n\n\x60\x60\x60text\n\\$L^2\\$\n\x60\x60\x60";
+        let expected =
+            "字面 \x60\\$p\\$\x60，公式 $p$。\n\n\x60\x60\x60text\n\\$L^2\\$\n\x60\x60\x60";
+        assert_eq!(normalize_external_markdown(value), expected);
     }
 
     #[test]

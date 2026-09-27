@@ -706,6 +706,7 @@
           <button id="source-settings-tab-ambient" type="button" role="tab" data-source-settings-tab="ambient" aria-controls="ambient-form" aria-selected="true">广域输入</button>
           <button id="source-settings-tab-drive" type="button" role="tab" data-source-settings-tab="drive" aria-controls="drive-input-form" aria-selected="false">Google Drive</button>
           <button id="source-settings-tab-mail" type="button" role="tab" data-source-settings-tab="mail" aria-controls="mail-input-form" aria-selected="false">邮箱 Inbox</button>
+          <button id="source-settings-tab-x-watches" type="button" role="tab" data-source-settings-tab="x-watches" aria-controls="x-watch-form" aria-selected="false">X 关注</button>
         </nav>
         <div class="source-settings-pages">
         <form id="ambient-form" role="tabpanel" aria-labelledby="source-settings-tab-ambient" data-source-settings-panel="ambient">
@@ -810,6 +811,28 @@
             <span id="mail-input-save-state" role="status"></span>
             <button id="mail-input-test-connection" class="secondary-button" type="button" title="使用当前填写内容验证连接、正文抓取与解析；不会保存配置、替换凭据或标记远端已读">测试</button>
           </footer>
+        </form>
+        <form id="x-watch-form" role="tabpanel" aria-labelledby="source-settings-tab-x-watches" data-source-settings-panel="x-watches" hidden>
+          <section class="compute-policy-section ambient-provider-section">
+            <header class="settings-panel-intro source-channel-intro">
+              <h3>X 账号关注</h3>
+              <p>这里保存 Symbiont 的关注规则，不会在 X 上替你关注账号。点击检查时通过已连接的浏览器查看；请先在浏览器中登录 X。检查只在你主动发起时运行。</p>
+            </header>
+            <div class="ambient-config-group">
+              <div class="ambient-config-heading"><strong>关注列表</strong><button id="x-watch-check-all" class="secondary-button" type="button">检查已启用账号</button></div>
+              <div id="x-watch-list" class="ambient-config-list"></div>
+              <div class="ambient-config-row">
+                <strong>新增关注</strong>
+                <div class="field-grid">
+                  <label class="field"><span>X 账号</span><input id="x-watch-new-handle" type="text" maxlength="16" placeholder="@account"></label>
+                  <label class="field"><span>关注点</span><input id="x-watch-new-focus" type="text" maxlength="300" placeholder="例如：模型发布和重要评测"></label>
+                  <label class="field"><span>呈现方式</span><select id="x-watch-new-delivery"><option value="digest">合并摘要</option><option value="important">只看重要变化</option></select></label>
+                </div>
+                <button id="x-watch-add" class="secondary-button" type="button">添加关注</button>
+              </div>
+            </div>
+          </section>
+          <footer class="dialog-actions"><span id="x-watch-save-state" role="status"></span><button class="primary-button" type="submit">保存本页</button></footer>
         </form>
         </div>
       </section>

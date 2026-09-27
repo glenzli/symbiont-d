@@ -110,6 +110,28 @@ test("sentence-adjacent bold with terminal punctuation renders without changing 
   assert.doesNotMatch(root.textContent, /\*\*/);
 });
 
+test("separate bold spans do not pair their closing and opening markers", () => {
+  const source = "如果你说的是**北京时间今天（9 月 25 日）、美国当地 24 日在白宫举行的国宴**，你的观察基本对：**白宫公布的宾客名单里，中国一方列出的是官员和外交人员，没有列出中国企业负责人**。";
+  const root = render(source);
+
+  assert.deepEqual(
+    [...root.querySelectorAll("strong")].map((element) => element.textContent),
+    ["北京时间今天（9 月 25 日）、美国当地 24 日在白宫举行的国宴", "白宫公布的宾客名单里，中国一方列出的是官员和外交人员，没有列出中国企业负责人"],
+  );
+  assert.equal(root.textContent.trim(), source.replaceAll("**", ""));
+  assert.doesNotMatch(root.textContent, /\*\*/);
+});
+
+test("sentence-adjacent bold repairs only its own delimiter pair", () => {
+  const root = render("**第一段**，后面：**第二段。**继续说明。");
+
+  assert.deepEqual(
+    [...root.querySelectorAll("strong")].map((element) => element.textContent),
+    ["第一段", "第二段"],
+  );
+  assert.equal(root.textContent.trim(), "第一段，后面：第二段。继续说明。");
+});
+
 test("literal asterisks in code and ordinary emphasis remain unchanged", () => {
   const root = render("`**代码。**后文`\n\n```text\n**原文。**后文\n```\n\n**正常加粗**后文");
 
