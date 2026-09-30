@@ -10,6 +10,20 @@
 
 ## 中文
 
+### 退役声明：通用助手能力交回平台
+
+**日期：2026-09-30**
+
+**项目状态：已退役。** symbiont-d 不再推荐用于新部署，也不再规划新功能。现有代码和文档保留，供已有部署查阅和迁移参考。
+
+symbiont-d 原本把日常对话、外部输入、定时探索和长期上下文连接到一套本地服务中。在我的实际工作流里，日常对话、主动信息整理、工具协调，以及语音、移动端和持续任务，已经可以交给 dots 承接。我决定停止继续扩展这层通用助手服务。
+
+这次退役的范围是 symbiont-d。PCP 管理的长期知识、来源和修订历史仍值得保留；PCP 与 infer-runtime 的独立用途不在此次退役范围内。已有本地数据应按需要备份和迁移，本声明不表示现有服务已经停止或数据已经迁移。
+
+参见 [VASMC 的退役声明](https://github.com/glenzli/vasmc/blob/main/README.md#zh-cn)及[《AI 脚手架的半衰期》](https://glenzli.com/notes/half-life-of-ai-scaffolding/)。下面保留的功能、安装和配置说明记录退役前的实现，供历史参考。
+
+### 退役前项目说明
+
 > **开发预览。** symbiont-d 的接口、配置和本地数据格式仍可能调整。建议在测试环境中使用，并备份 `data/` 中需要保留的数据。
 
 symbiont-d 是一个本地运行的对话与信息整理服务。日常对话通过 Codex app-server 完成；定时探索、IMAP 邮箱和 Google Drive 等外部输入可进入同一个时间线；长期上下文通过 [Paged Context Protocol (PCP)](https://github.com/glenzli/paged-context-protocol) 存储和检索。
@@ -99,6 +113,20 @@ SYMBIONT_RUN_PCP_LANGUAGE_REPAIR=apply cargo run
 <a id="english"></a>
 
 ## English
+
+### Retirement notice: Handing general assistant capabilities back to the platform
+
+**Date: 2026-09-30**
+
+**Project status: retired.** symbiont-d is no longer recommended for new deployments, and no new features are planned. Existing code and documentation remain available as a reference for existing deployments and migration.
+
+symbiont-d originally brought ordinary conversation, external input, scheduled exploration, and durable context together in a local service. In my actual workflow, dots can now handle ordinary conversation, proactive information gathering and organization, tool coordination, voice, mobile access, and ongoing tasks. I have decided to stop expanding this general-purpose assistant service.
+
+This retirement applies to symbiont-d. The durable knowledge, sources, and revision history managed by PCP remain worth preserving; the independent uses of PCP and infer-runtime are outside the scope of this retirement. Existing local data should be backed up and migrated as needed. This notice does not mean that existing services have been stopped or data has already been migrated.
+
+See [VASMC's retirement notice](https://github.com/glenzli/vasmc/blob/main/README.md#en) and [The Half-Life of AI Scaffolding](https://glenzli.com/en/notes/half-life-of-ai-scaffolding/). The feature, installation, and configuration documentation below describes the implementation before retirement and remains for historical reference.
+
+### Project documentation before retirement
 
 > **Development preview.** symbiont-d interfaces, configuration, and local data formats may change. Use it in a test environment and back up any data under `data/` that needs to be retained.
 
